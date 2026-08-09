@@ -1,6 +1,8 @@
 # Ledgerflow Roadmap
 
-Status: architecture approved; ready to begin Milestone 1.
+Status: **Milestone 1 in progress.** T1 (Laravel foundation, Docker runtime, command contract,
+validation surface, CI) is complete. **T2 is next** and owns module boundaries and merchant-user
+identity.
 
 ## Outcome
 
@@ -22,8 +24,12 @@ project commands.
 - T1 — Scaffold Laravel and establish executable project contracts.
 - T2 — Establish module boundaries and merchant-user identity.
 
-Exit: a clean checkout starts through documented Make targets; deterministic identities and
-project-defined validation contracts work.
+Exit, split by owning task so neither is reviewed against the other's clause:
+
+- **T1** — a clean checkout starts through documented Make targets, and the project-defined
+  validation contracts (`quality`, `test`, `check`) work. **Complete.**
+- **T2** — deterministic merchant and user identities are seeded through the `db-seed` contract T1
+  established.
 
 ### M2 — Blocking compatibility spike
 

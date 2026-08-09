@@ -35,5 +35,9 @@ unrelated implementation details.
 
 ## Current status
 
-The architecture and first Payments vertical slice are approved. Milestone 1 has not started, so
-exact Make targets and validation commands are intentionally not yet claimed as working contracts.
+The architecture and first Payments vertical slice are approved. **T1 is complete**: the Laravel 13
+skeleton, Docker runtime, Makefile command contract, and validation surface are implemented and
+verified from a clean checkout. `AGENTS.md` documents the commands that actually work.
+
+T2 is next and owns module boundaries and merchant-user identity. No domain module, Merchant
+identity, or Payments behavior exists yet.

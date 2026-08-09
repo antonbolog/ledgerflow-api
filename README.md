@@ -7,8 +7,24 @@ This repository contains the Laravel API and the internal Filament administratio
 first vertical slice proves that payment initiation remains consistent under repeated requests,
 queue redelivery, worker interruption, and read-model rebuild.
 
-The repository is currently in the pre-scaffold architecture stage. Laravel code and supported
-project commands arrive in Milestone 1.
+## Quickstart
+
+Requires Docker with Compose v2, GNU Make, and Git. **No host PHP or Composer** — everything runs
+in containers.
+
+```bash
+make install   # build, install dependencies, start services, migrate
+make check     # composer validate + Pint + Rector + PHPStan + Pest
+```
+
+`make install` leaves four healthy services and the API on <http://127.0.0.1:8080> (loopback only);
+`GET /up` is the health endpoint. `make` on its own prints the full command surface. Destructive
+targets require a typed confirmation: `make destroy CONFIRM=destroy`,
+`make db-reset CONFIRM=db-reset`.
+
+The Laravel foundation, Docker runtime, command contract, and validation surface are in place. The
+Payments domain, Merchant identity, and the module layout arrive in later milestones — see the
+[roadmap](docs/roadmap.md).
 
 ## Repository ecosystem
 
@@ -23,7 +39,8 @@ repository remains authoritative for its own implementation and local operating 
 
 ## Planned stack
 
-- PHP 8.3/8.4 and Laravel 13
+- PHP 8.4 and Laravel 13 (image pinned to `php:8.4.24-fpm-alpine`; `composer.json` requires
+  `^8.4.1`, the minimum the locked dependency graph resolves against)
 - PostgreSQL locally and Amazon RDS for PostgreSQL on AWS
 - Redis locally and Amazon ElastiCache for cache, locks, rate limiting, Pub/Sub, and Laravel queues
 - Laravel Horizon for Redis queue supervision
