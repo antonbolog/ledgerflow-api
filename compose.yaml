@@ -1,0 +1,136 @@
+# Ledgerflow local development stack.
+#
+#   web (nginx) ──FastCGI──> app (php-fpm) ──┬──> postgres  ledgerflow
+#        :8080                                │              ledgerflow_test
+#     loopback only                           └──> redis
+#
+# Docker-first and editor-neutral: PhpStorm, VS Code, Cursor or a plain
+# terminal all drive the same services from the same host checkout. Laravel
+# Sail is deliberately not used; the application owns its production-oriented
+# Dockerfile.
+#
+# Every image is patch-pinned. Floating tags would make a clean checkout
+# irreproducible over time, which the development environment specification
+# forbids.
+#
+# Worker and scheduler processes are NOT defined here. They arrive with their
+# own milestones and will reuse the `app` image with a `command:` override,
+# which the entrypoint's `exec "$@"` already supports.
+
+name: ${COMPOSE_PROJECT_NAME:-ledgerflow}
+
+services:
+  web:
+    image: nginx:1.30.4-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      # Loopback by default. An unauthenticated application should not be
+      # reachable from the local network by accident; override APP_BIND
+      # deliberately if you need that.
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8080}:80"
+    volumes:
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      # ONLY public/, and at the same absolute path the app service sees it.
+      # nginx computes SCRIPT_FILENAME and php-fpm opens that path in its own
+      # container, so /var/www/html/public/index.php must resolve in both — but
+      # nginx has no business holding .env, vendor/, config/ or the rest of the
+      # repository. Mounting the whole tree here would put the application's
+      # secrets one nginx misconfiguration away from being served.
+      - ./public:/var/www/html/public:ro
+    healthcheck:
+      # Port 80 is the container's own listener. Probing the published port
+      # would test the host's port mapping instead of this container.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:80/up || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  app:
+    build:
+      context: .
+      target: dev
+      args:
+        # Supplied by the Makefile in slice 3. Declared here so that EVERY
+        # build path picks them up, not just an explicit build command.
+        HOST_UID: ${HOST_UID:-1000}
+        HOST_GID: ${HOST_GID:-1000}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      # Not required: a clean checkout has no .env until `make install` creates
+      # it, and `docker compose config` must still work before that.
+      - path: .env
+        required: false
+    environment:
+      # Derived from the same two variables that publish the port, so changing
+      # APP_PORT cannot leave APP_URL pointing at the old one. `environment`
+      # wins over `env_file`, and compose expands these while env_file would
+      # pass a "${...}" reference through literally.
+      APP_URL: "http://${APP_BIND:-127.0.0.1}:${APP_PORT:-8080}"
+    volumes:
+      - ./:/var/www/html
+    healthcheck:
+      # cgi-fcgi speaks FastCGI directly to the pool. A plain TCP check would
+      # pass for a pool that has stopped serving; ping.path proves it responds.
+      test:
+        - CMD-SHELL
+        - >-
+          SCRIPT_NAME=/fpm-ping SCRIPT_FILENAME=/fpm-ping REQUEST_METHOD=GET
+          cgi-fcgi -bind -connect 127.0.0.1:9000 | grep -q pong
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  postgres:
+    image: postgres:18.4-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_DATABASE:-ledgerflow}
+      POSTGRES_USER: ${DB_USERNAME:-ledgerflow}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-ledgerflow}
+      # Explicit, and a subdirectory of the mount point. Pointing PGDATA at the
+      # mount root itself is what leaves a cluster initialised outside the
+      # volume when the image's default layout changes between major versions.
+      PGDATA: /var/lib/postgresql/data/pgdata
+      # Deterministic collation, so index ordering does not depend on the host.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Runs ONLY on first initialisation of an empty data directory. Slice 3
+      # adds an idempotent create in `make install` so editing this file later
+      # does not silently do nothing.
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "${DB_USERNAME:-ledgerflow}" -d "${DB_DATABASE:-ledgerflow}"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+
+  redis:
+    image: redis:8.10.0-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  postgres-data:
+  redis-data:

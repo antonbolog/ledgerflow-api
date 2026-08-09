@@ -6,8 +6,12 @@ Thumbs.db
 .idea/
 .vscode/
 .cursor/
+.codex/
 .fleet/
 .history/
+/.nova
+/.zed
+.phpactor.json
 *.code-workspace
 
 # Environment and credentials
@@ -19,3 +23,22 @@ auth.json
 # Dependencies
 /vendor/
 /node_modules/
+
+# Generated application artifacts
+# Laravel's own nested .gitignore files under storage/ and bootstrap/cache/
+# stay tracked; nothing here may shadow them.
+/public/build
+/public/hot
+/public/storage
+/public/fonts-manifest.dev.json
+/storage/*.key
+/.phpunit.cache/
+.phpunit.result.cache
+
+# Logs
+*.log
+npm-debug.log
+yarn-error.log
+
+# Temporary scaffolding scratch space (T1 bootstrap only, never committed)
+/.bootstrap/

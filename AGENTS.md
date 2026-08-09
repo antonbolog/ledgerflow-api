@@ -16,8 +16,11 @@ Repo: `github.com/mythern/ledgerflow-api` (private now, public later — see **R
 
 ## Stack
 
-- PHP 8.3/8.4, Laravel 13
-- PostgreSQL, Redis, Sanctum, Reverb, Horizon, and Filament
+- PHP **8.4** (pinned `php:8.4.24-fpm-alpine`; `composer.json` requires `^8.4.1`, the minimum the
+  locked dependency graph resolves against), Laravel 13
+- Pinned images: `nginx:1.30.4-alpine` (stable branch), `postgres:18.4-alpine`,
+  `redis:8.10.0-alpine`, `composer:2.8.12`. phpredis pinned to 6.3.0
+- Sanctum, Reverb, Horizon, and Filament arrive with their own milestones
 - Amazon SQS is planned for separately owned durable workloads; Horizon manages Redis queues only
 - `nwidart/laravel-modules` (v13) — module registration
 - `spatie/laravel-event-sourcing` (v7.15) — **Payments module only**
@@ -66,10 +69,21 @@ See `docs/architecture/messaging-and-queues.md` for ownership rules.
 ## Development Environment
 
 - Local development is Docker-first and editor-neutral. PhpStorm, VS Code, Cursor, or another
-  editor opens the same host checkout and uses the same repository commands.
+  editor opens the same host checkout and uses the same repository commands. `.editorconfig` is the
+  one shared editor file, adopted as an explicit project decision.
 - The application owns a custom production-oriented `Dockerfile`; Laravel Sail is not used.
-- Local `compose.yaml` runs the application, PostgreSQL, and Redis. Later web, Horizon, scheduler,
-  relay, Reverb, and SQS worker processes reuse the same application image where applicable.
+- **Image topology.** One multi-stage `Dockerfile`: `base` → `vendor` → `dev` / `production` →
+  `web`. The host UID/GID remap lives **only** in `dev`; `production` keeps a fixed `1000:1000` so
+  the same commit builds the same image from any machine. A foreign UID fails the build rather than
+  silently leaving `app` at 1000. `web` is an nginx stage carrying `public/` for deployment; local
+  development uses the stock nginx image with `./public` mounted read-only.
+- **Runtime topology.** `web` (nginx) → FastCGI → `app` (php-fpm) → `postgres` + `redis`. The
+  published port binds to `127.0.0.1` only. nginx forwards **only** the front controller; any other
+  `.php` path is refused. The entrypoint ends in `exec "$@"` with `CMD ["php-fpm"]`, so Horizon,
+  the scheduler/relay, Reverb, and future SQS workers reuse this image with a `command:` override
+  and no image change.
+- The CLI keeps `memory_limit=-1` for static analysis; the php-fpm pool is capped at 256M so a web
+  worker can never inherit an unbounded limit.
 - Docker and application configuration belongs here. AWS resources and Terraform belong in
   `ledgerflow-infra`.
 - IDE metadata, local environment files, credentials, dependencies, and generated runtime data
@@ -78,8 +92,9 @@ See `docs/architecture/messaging-and-queues.md` for ownership rules.
 
 ## Development Workflow
 
-This project is at **greenfield, pre-scaffold stage**. There is architecture documentation but no
-Laravel codebase or executable project command contract yet.
+T1 is complete: the Laravel 13 skeleton, the Docker runtime, the Makefile command contract, and the
+validation surface are implemented and verified. T2 is the next task and owns module boundaries and
+merchant-user identity. No domain module, Merchant identity, or Payments behavior exists yet.
 
 General delivery flow: Think → Plan → Build → Review → Test → Ship → Reflect. Once implementation
 starts, discovery of current code, conventions, tests, working-tree state, and nested instructions
@@ -91,17 +106,64 @@ and evidence override tool-specific assumptions.
 
 ## Commands
 
-Not yet established. Once the Laravel skeleton lands, `Makefile` becomes the public command
-interface. T1 must implement and verify a small command surface for:
+Prerequisites: Docker with Compose v2, GNU Make, and Git. **No host PHP or Composer is required or
+used** — every command runs in a container. The Makefile targets GNU Make 3.81, the version macOS
+ships, so no `.ONESHELL`, `$(file …)`, or `!=` assignment.
 
-- project lifecycle: install, start, stop, and destroy the local Docker environment;
-- validation: tests, code quality, and one full-check entry point used by CI;
-- database lifecycle: migrate, seed deterministic data, and explicitly reset local/test data.
+`make` with no argument prints this surface.
 
-Destructive commands may remove only generated containers, volumes, or local/test data; they must
-never delete source files and must require an explicit confirmation variable. Exact target names,
-prerequisites, side effects, and evidence are documented only after T1 implements and runs them.
-Do not bypass the Makefile with invented validation commands in the meantime.
+| Target | Effect | Prerequisites | Evidence |
+|---|---|---|---|
+| `help` | Print this surface. The default goal, so bare `make` shows it | — | — |
+| `install` | Ensure `.env`, build images, install dependencies, ensure `APP_KEY`, start services, ensure `ledgerflow_test`, migrate | Docker running | Prints `docker compose ps`; four services healthy |
+| `start` | `up -d --wait` then `ps` | built images | four services healthy |
+| `stop` | Halt containers. **Never removes volumes**; data survives | — | volumes remain |
+| `destroy` | Remove containers, networks and project volumes | **`CONFIRM=destroy`** | refuses without it; touches no file in the working tree |
+| `db-ensure-test` | Idempotently create `ledgerflow_test` | postgres running | `present` or `created` |
+| `db-migrate` | `migrate --force` on `ledgerflow` | stack running | guard prints `target ok: postgres/ledgerflow` |
+| `db-seed` | `db:seed --force`. Seeder is empty; **T2** owns deterministic identities | stack running | exits 0, inserts nothing |
+| `db-reset` | `migrate:fresh` on **both** databases, then re-seed | **`CONFIRM=db-reset`** | prints its target before the guard |
+| `quality` | `composer validate --strict`, Pint `--test`, Rector `--dry-run`, PHPStan level 10 | Docker running | read-only; modifies no file |
+| `test` | Pest against `ledgerflow_test` | Docker running | **starts postgres and redis and leaves them running** |
+| `check` | `quality` then `test`. **The single CI-equivalent entry point** | Docker running | works from a stopped stack |
+
+**Confirmation values are typed and target-specific** — `CONFIRM=destroy`, `CONFIRM=db-reset`. A
+stray `CONFIRM=1` cannot satisfy either. Destructive targets remove only generated containers,
+volumes, and the two allowlisted databases; they can never delete source files.
+
+**PostgreSQL test isolation.** One pinned PostgreSQL service hosts `ledgerflow` (development) and
+`ledgerflow_test` (suite). The suite truncates and re-migrates its database on every run and is
+prevented from reaching any other by three layers: a pre-autoload guard in `tests/bootstrap.php`
+that refuses a wrong connection *before* `RefreshDatabase` can migrate, forced values in
+`phpunit.xml`, and a live `select current_database()` assertion. `check` is non-destructive to
+source and to the development database; the test database is reset by design.
+
+**Services left running.** `make test` starts `postgres` and `redis` if they are down and leaves
+them up — it cannot know whether they belong to a development session, and stopping someone else's
+would be worse. Use `make stop`.
+
+**The Makefile is the sole interface** for environment lifecycle, database lifecycle, and
+validation.
+
+**CI** (`.github/workflows/ci.yml`) performs **all application validation through Make** — `make
+install` from a clean checkout, then the single `make check` contract. It contains no Composer,
+Pest, Pint, Rector, PHPStan or Artisan invocation of its own. Beyond that it runs exactly three
+documented classes of assertion, none of which validate application code:
+
+- **guard assertions** — that `destroy`, `db-reset`, `db-migrate` and `db-seed` refuse, with their
+  documented messages, and that `make check` leaves the development database untouched;
+- **image-contract builds** — `docker build --target production` and `--target web`, because
+  Compose only ever builds the `dev` target and a broken stage would otherwise merge green;
+- **failure diagnostics** — `docker compose ps` and `logs` on failure only.
+
+These are contract assertions *about* the Makefile and the image, not validation that bypasses it.
+There is deliberately no Docker layer caching: `docker compose build` cannot use the Actions cache
+backend without a buildx setup local development would not share.
+
+**Ad-hoc `artisan`, `tinker` and `psql` access is ordinary developer work, not a violation.** T4
+must open concurrent `psql` sessions to prove advisory-lock connection affinity. Editing `.env`
+requires `make start` to recreate the app container before the change takes effect; the database
+guard reads the running container, so a stale container is refused rather than silently used.
 
 ## Boundaries
 
