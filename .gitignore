@@ -1,0 +1,21 @@
+# Operating systems
+.DS_Store
+Thumbs.db
+
+# IDEs and editors
+.idea/
+.vscode/
+.cursor/
+.fleet/
+.history/
+*.code-workspace
+
+# Environment and credentials
+.env
+.env.*
+!.env.example
+auth.json
+
+# Dependencies
+/vendor/
+/node_modules/

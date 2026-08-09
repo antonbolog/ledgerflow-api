@@ -1,0 +1,27 @@
+# Ledgerflow Architecture
+
+Ledgerflow is a three-repository fintech system. `ledgerflow-api` owns the Laravel domain and
+application runtime, `ledgerflow-spa` owns the merchant dashboard, and `ledgerflow-infra` owns AWS
+infrastructure and deployment topology.
+
+## System boundaries
+
+- [System overview](docs/architecture/system-overview.md)
+- [Interfaces and realtime](docs/architecture/interfaces-and-realtime.md)
+- [Messaging and queues](docs/architecture/messaging-and-queues.md)
+- [Deployment boundaries](docs/architecture/deployment-boundaries.md)
+
+## Payments vertical slice
+
+- [Payments flow](docs/architecture/payments-flow.md)
+- [Payments specifications](docs/specifications/payments/README.md)
+- [Resilience test plan](docs/testing/payments-resilience.md)
+
+## Runtime and delivery
+
+- [Development environment](docs/specifications/foundation/development-environment.md)
+- [Runtime contract](docs/operations/runtime-contract.md)
+- [Roadmap](docs/roadmap.md)
+- [Architecture decisions](docs/adr/README.md)
+
+This file indexes the architecture. Detailed behavior belongs in the linked canonical documents.
