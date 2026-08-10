@@ -18,9 +18,17 @@ stable API contracts and authorized realtime events.
 
 ## Authentication and authorization
 
-Laravel Sanctum is the planned API authentication mechanism. The final cookie/token, CORS, CSRF,
-and domain configuration is decided with the SPA deployment topology before authentication is
-implemented; it must not be inferred from local development defaults.
+Laravel Sanctum is the API authentication mechanism, and its **bearer-token foundation exists as of
+T2**: `laravel/sanctum` 4.3.3 is installed, `personal_access_tokens` is migrated, merchant users
+issue and resolve tokens, and `Modules\Merchant\Application\Identity\MerchantContext` answers which
+merchant owns the authenticated request.
+
+Everything above the token itself is still deferred, because T2 serves **no HTTP endpoint**. Token
+abilities are unscoped, `sanctum.expiration` is null so tokens do not expire, and the cookie-versus-
+token choice, CORS, CSRF, and domain configuration are all undecided. `config/sanctum.php` is
+published in full, so its `stateful`, `guard`, `expiration` and `middleware` keys are unreviewed
+defaults rather than decisions. These are settled with the SPA deployment topology by the task that
+serves the first endpoint, and must not be inferred from local development defaults.
 
 Merchant authorization is tenant-scoped on the server. A merchant identifier supplied by a
 client is never sufficient authority for accessing a payment.

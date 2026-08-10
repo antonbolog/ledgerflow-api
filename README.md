@@ -7,6 +7,18 @@ This repository contains the Laravel API and the internal Filament administratio
 first vertical slice proves that payment initiation remains consistent under repeated requests,
 queue redelivery, worker interruption, and read-model rebuild.
 
+## Status
+
+T1 and T2 are complete. The repository has its Docker runtime, Makefile command contract and
+validation surface, the `Merchant` and `Payments` modules with enforced layer boundaries
+([ADR 0001](docs/adr/0001-custom-ddd-module-layout.md)), merchant-user identity inside
+`Modules/Merchant` behind a Sanctum-authenticated application contract, and two deterministic
+seeded merchants and users.
+
+**No Payments behavior exists yet**, and no HTTP endpoint is served. Both modules' `Domain` layers
+are deliberately empty. The payment lifecycle, idempotency, outbox, projection and rebuild work all
+belong to later milestones described in [the roadmap](docs/roadmap.md).
+
 ## Quickstart
 
 Requires Docker with Compose v2, GNU Make, and Git. **No host PHP or Composer** — everything runs

@@ -12,6 +12,7 @@ parameters:
 
     paths:
         - app
+        - Modules
         - bootstrap/app.php
         - config
         - database
@@ -30,3 +31,12 @@ parameters:
         - bootstrap/cache
         - storage
         - vendor
+        # Module test suites are excluded for the same reason tests/ is analysed
+        # only down to bootstrap.php: PHPStan cannot see through Pest's fluent
+        # DSL, so arch() and expect() inside closures produce analyser artefacts
+        # rather than defects.
+        # The trailing /* is load-bearing: PHPStan fnmatches this pattern against
+        # each file path, so `Modules/*/tests` matches the directory and nothing
+        # inside it. Without it the exclusion silently does nothing, which is how
+        # it shipped until the first module test existed to prove otherwise.
+        - Modules/*/tests/*

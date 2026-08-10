@@ -1,0 +1,16 @@
+{
+    "name": "mythern/merchant",
+    "description": "Merchant bounded context: merchant and merchant-user identity.",
+    "autoload": {
+        "psr-4": {
+            "Modules\\Merchant\\": "app/",
+            "Modules\\Merchant\\Database\\Factories\\": "database/factories/",
+            "Modules\\Merchant\\Database\\Seeders\\": "database/seeders/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Modules\\Merchant\\Tests\\": "tests/"
+        }
+    }
+}

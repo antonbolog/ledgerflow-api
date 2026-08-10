@@ -20,24 +20,37 @@ Repo: `github.com/mythern/ledgerflow-api` (private now, public later — see **R
   locked dependency graph resolves against), Laravel 13
 - Pinned images: `nginx:1.30.4-alpine` (stable branch), `postgres:18.4-alpine`,
   `redis:8.10.0-alpine`, `composer:2.8.12`. phpredis pinned to 6.3.0
-- Sanctum, Reverb, Horizon, and Filament arrive with their own milestones
+- `laravel/sanctum` (v4.3.3) — installed in T2 for merchant-user identity. Its migration does **not**
+  load from the package, so T2 published
+  `database/migrations/2026_08_10_175810_create_personal_access_tokens_table.php`. `install:api` was
+  not run: no `routes/api.php`, no `api:` routing entry, no example route until a task serves a real
+  endpoint. Token abilities, expiry, and the SPA cookie-versus-token decision are deferred with it
+- Reverb, Horizon, and Filament arrive with their own milestones
 - Amazon SQS is planned for separately owned durable workloads; Horizon manages Redis queues only
-- `nwidart/laravel-modules` (v13) — module registration
+- `nwidart/laravel-modules` (v13.0.0) — module registration, with
+  `wikimedia/composer-merge-plugin` merging module manifests
 - `spatie/laravel-event-sourcing` (v7.15) — **Payments module only**
-- `spatie/laravel-data` — DTOs
+- `spatie/laravel-data` — DTOs. **Deferred**, not installed: a DTO package with no DTO is a
+  dependency with no consumer. It arrives with the first Payments DTO
 - Pest + `pest-plugin-arch` (boundary enforcement), Larastan, Pint, Rector
 
-Custom DDD layout inside each module: `Domain / Application / Infrastructure / Http`.
-
-`ahmedsaed/laravel-ddd` was evaluated and rejected as a dependency because it was immature at the
-time of evaluation. Its useful folder convention may be reused manually. Record the decision as
-an ADR when the foundation milestone implements the module layout.
+Custom DDD layout inside each module: `Modules/<Context>/app/{Domain,Application,Infrastructure,Http}`,
+plus `app/Providers` for framework wiring. Recorded in
+[ADR 0001](docs/adr/0001-custom-ddd-module-layout.md) and enforced by
+`tests/Architecture/ModuleBoundaryTest.php`. Modules carry only what discovery, providers,
+migrations, tests, and Composer autoloading require.
 
 ## Bounded Contexts
 
 - **Payments** — event-sourced. Lifecycle: `Initiated → Authorized → Captured → Settled/Failed →
   Refunded`. Idempotency and compensating actions are first-class concerns.
-- **Merchant** — plain CRUD, Eloquent, standard repository pattern.
+- **Merchant** — plain CRUD on Eloquent. Its models (`Merchant`, `User`) live in
+  `app/Infrastructure/Persistence/Eloquent`, and its `Domain` layer is deliberately empty: a domain
+  entity, identifier value object, or repository interface arrives with the first Merchant use case
+  that needs one, not before. The repository pattern is the expected direction for that use case, not
+  a requirement to build an unused abstraction now. The one published contract is
+  `Application\Identity\MerchantContext`, which answers "which merchant owns this request" from the
+  authenticated Sanctum user.
 
 ## Repository Strategy
 
@@ -92,9 +105,13 @@ See `docs/architecture/messaging-and-queues.md` for ownership rules.
 
 ## Development Workflow
 
-T1 is complete: the Laravel 13 skeleton, the Docker runtime, the Makefile command contract, and the
-validation surface are implemented and verified. T2 is the next task and owns module boundaries and
-merchant-user identity. No domain module, Merchant identity, or Payments behavior exists yet.
+T1 and T2 are complete. T1 established the Laravel 13 skeleton, the Docker runtime, the Makefile
+command contract, and the validation surface. T2 established the `Merchant` and `Payments` modules
+with enforced layer boundaries, moved merchant-user identity into `Modules/Merchant` behind a
+Sanctum-authenticated application contract, added the required `users.merchant_id` foreign key, and
+seeded two deterministic merchants and users. T3 is the next task and owns the Spatie
+atomic-persistence and transaction-retry spike. No Payments behavior exists yet, and both `Domain`
+layers are deliberately still empty.
 
 General delivery flow: Think → Plan → Build → Review → Test → Ship → Reflect. Once implementation
 starts, discovery of current code, conventions, tests, working-tree state, and nested instructions
@@ -121,7 +138,7 @@ ships, so no `.ONESHELL`, `$(file …)`, or `!=` assignment.
 | `destroy` | Remove containers, networks and project volumes | **`CONFIRM=destroy`** | refuses without it; touches no file in the working tree |
 | `db-ensure-test` | Idempotently create `ledgerflow_test` | postgres running | `present` or `created` |
 | `db-migrate` | `migrate --force` on `ledgerflow` | stack running | guard prints `target ok: postgres/ledgerflow` |
-| `db-seed` | `db:seed --force`. Seeder is empty; **T2** owns deterministic identities | stack running | exits 0, inserts nothing |
+| `db-seed` | `db:seed --force`. Seeds two deterministic merchants and their users | stack running | exits 0; repeatable, creating no duplicates on a second run |
 | `db-reset` | `migrate:fresh` on **both** databases, then re-seed | **`CONFIRM=db-reset`** | prints its target before the guard |
 | `quality` | `composer validate --strict`, Pint `--test`, Rector `--dry-run`, PHPStan level 10 | Docker running | read-only; modifies no file |
 | `test` | Pest against `ledgerflow_test` | Docker running | **starts postgres and redis and leaves them running** |
@@ -180,11 +197,11 @@ guard reads the running container, so a stale container is refused rather than s
 
 ## Architecture Decisions
 
-No ADRs are recorded yet. Place them under `docs/adr/` using `docs/adr/README.md`. Initial
-candidates include the manual DDD module layout, Spatie Domain exception, PostgreSQL idempotency,
-Payments outbox, projection gate, three-repository boundary, Filament admin boundary,
-Redis/Horizon and SQS workload ownership, application-image versus infrastructure ownership, and
-the OpenSearch adoption gate.
+[ADR 0001](docs/adr/0001-custom-ddd-module-layout.md) records the custom DDD module layout. Place
+further ADRs under `docs/adr/` using `docs/adr/README.md`. Remaining candidates include the Spatie
+Domain exception, PostgreSQL idempotency, Payments outbox, projection gate, three-repository
+boundary, Filament admin boundary, Redis/Horizon and SQS workload ownership, application-image
+versus infrastructure ownership, and the OpenSearch adoption gate.
 
 ## Documentation Map
 

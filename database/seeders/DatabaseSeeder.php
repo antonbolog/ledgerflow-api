@@ -6,6 +6,7 @@ namespace Database\Seeders;
 
 use Illuminate\Database\Console\Seeds\WithoutModelEvents;
 use Illuminate\Database\Seeder;
+use Modules\Merchant\Database\Seeders\MerchantDatabaseSeeder;
 
 class DatabaseSeeder extends Seeder
 {
@@ -14,18 +15,21 @@ class DatabaseSeeder extends Seeder
     /**
      * Seed the application's database.
      *
-     * Intentionally empty. T1 establishes only the seeding command contract:
-     * `db-seed` must run, exit zero, and be repeatable. Deterministic
-     * identities are out of scope for the foundation slice.
+     * Delegates to each module's own seeder rather than reaching into module
+     * models directly, so a module owns its fixtures the same way it owns its
+     * migrations.
      *
-     * T2 owns merchant-user identity and populates this seeder with the two
-     * deterministic merchants and users required by the development
-     * environment specification's acceptance evidence.
+     * `make db-seed` is repeatable, and the contract is precisely this: a
+     * re-run creates no duplicate identities, never moves an existing email to
+     * a different merchant, and never rewrites a password hash. It does not
+     * promise byte-identical rows. updateOrCreate() and save() will refresh
+     * timestamps if a fixture's non-key attributes ever drift from what is
+     * stored, which is a correction rather than a violation.
      *
      * @see docs/specifications/foundation/development-environment.md
      */
     public function run(): void
     {
-        //
+        $this->call(MerchantDatabaseSeeder::class);
     }
 }
