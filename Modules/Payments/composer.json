@@ -1,0 +1,9 @@
+{
+    "name": "mythern/payments",
+    "description": "Payments bounded context: event-sourced payment lifecycle.",
+    "autoload": {
+        "psr-4": {
+            "Modules\\Payments\\": "app/"
+        }
+    }
+}

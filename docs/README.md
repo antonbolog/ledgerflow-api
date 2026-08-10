@@ -35,9 +35,12 @@ unrelated implementation details.
 
 ## Current status
 
-The architecture and first Payments vertical slice are approved. **T1 is complete**: the Laravel 13
-skeleton, Docker runtime, Makefile command contract, and validation surface are implemented and
-verified from a clean checkout. `AGENTS.md` documents the commands that actually work.
+The architecture and first Payments vertical slice are approved. **T1 and T2 are complete**: the
+Laravel 13 skeleton, Docker runtime, Makefile command contract, and validation surface, plus the
+`Merchant` and `Payments` modules with enforced layer boundaries, merchant-user identity behind a
+Sanctum-authenticated application contract, and two deterministic seeded merchants and users.
+`AGENTS.md` documents the commands that actually work, and
+[ADR 0001](adr/0001-custom-ddd-module-layout.md) records the module layout.
 
-T2 is next and owns module boundaries and merchant-user identity. No domain module, Merchant
-identity, or Payments behavior exists yet.
+T3 is next and owns the Spatie atomic-persistence and transaction-retry spike. No Payments behavior
+exists yet, and both `Domain` layers are deliberately empty.

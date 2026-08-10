@@ -2,18 +2,22 @@
 
 declare(strict_types=1);
 
-namespace Database\Factories;
+namespace Modules\Merchant\Database\Factories;
 
-use App\Models\User;
 use Illuminate\Database\Eloquent\Factories\Factory;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
+use Modules\Merchant\Infrastructure\Persistence\Eloquent\Merchant;
+use Modules\Merchant\Infrastructure\Persistence\Eloquent\User;
 
 /**
  * @extends Factory<User>
  */
 class UserFactory extends Factory
 {
+    /** @var class-string<User> */
+    protected $model = User::class;
+
     /**
      * The current password being used by the factory.
      */
@@ -32,6 +36,9 @@ class UserFactory extends Factory
             'email_verified_at' => now(),
             'password' => static::$password ??= Hash::make('password'),
             'remember_token' => Str::random(10),
+            // Required by the schema, so the factory must satisfy it: a bare
+            // User::factory()->create() has to produce a valid row.
+            'merchant_id' => Merchant::factory(),
         ];
     }
 

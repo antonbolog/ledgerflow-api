@@ -19,9 +19,16 @@ use Tests\TestCase;
 |
 */
 
+/*
+| The glob is load-bearing. Pest's in() resolves a relative target against the
+| tests directory, then runs glob(), then realpath() — so this matches every
+| module that has Feature tests, today and later, and a module without them
+| contributes nothing. PHPUnit discovers the same paths; without this binding it
+| would discover them with the wrong base class and no RefreshDatabase.
+*/
 pest()->extend(TestCase::class)
     ->use(RefreshDatabase::class)
-    ->in('Feature');
+    ->in('Feature', '../Modules/*/tests/Feature');
 
 pest()->extend(TestCase::class)
     ->in('Architecture');

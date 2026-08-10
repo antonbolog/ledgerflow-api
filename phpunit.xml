@@ -34,6 +34,7 @@
         </testsuite>
         <testsuite name="Feature">
             <directory>tests/Feature</directory>
+            <directory>Modules/*/tests/Feature</directory>
         </testsuite>
         <testsuite name="Architecture">
             <directory>tests/Architecture</directory>
@@ -42,6 +43,7 @@
     <source>
         <include>
             <directory>app</directory>
+            <directory>Modules</directory>
         </include>
     </source>
     <php>

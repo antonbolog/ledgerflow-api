@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-use App\Models\User;
+use Modules\Merchant\Infrastructure\Persistence\Eloquent\User;
 
 return [
 
@@ -66,7 +66,11 @@ return [
     'providers' => [
         'users' => [
             'driver' => 'eloquent',
-            'model' => env('AUTH_MODEL', User::class),
+            // Hardcoded, not env('AUTH_MODEL'). Merchant ownership is an
+            // invariant: an env knob would let deployment configuration point
+            // authentication at a model outside the Merchant module, which is
+            // exactly the boundary this task exists to draw.
+            'model' => User::class,
         ],
 
         // 'users' => [

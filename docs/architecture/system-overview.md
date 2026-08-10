@@ -28,9 +28,17 @@ The first slice therefore implements only this scenario:
 - **Merchant** uses ordinary Eloquent persistence. The first slice needs only pre-seeded
   `Merchant` and `User` identities with one merchant per authenticated user.
 
-Each module uses `Domain / Application / Infrastructure / Http`. Domain code stays independent of
-Laravel, Eloquent, HTTP, Redis, and queue types. The exact Spatie aggregate/event base types are a
-documented Payments-only exception.
+Each module uses `Domain / Application / Infrastructure / Http`, recorded in
+[ADR 0001](../adr/0001-custom-ddd-module-layout.md) and enforced by
+`tests/Architecture/ModuleBoundaryTest.php`. Domain code stays independent of Laravel, Eloquent,
+HTTP, Redis, and queue types.
+
+A Payments-only exception for the Spatie aggregate and event base types is **planned but not
+granted**. The enforced rule currently applies to Payments exactly as it does to Merchant: Domain
+may reference nothing outside its own namespace. The task that introduces those base types is the
+one that records the exact permitted classes, in its own ADR, and narrows the rule to that
+allowlist. Until then there is no exception to rely on, and nothing in Payments Domain may import a
+vendor type.
 
 ## Source-of-truth hierarchy
 

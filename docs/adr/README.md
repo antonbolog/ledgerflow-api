@@ -17,9 +17,13 @@ Each ADR contains:
 
 Use sequential names such as `0001-custom-ddd-module-layout.md`; do not put dates in filenames.
 
-## Initial candidates
+## Recorded
 
-- Reject `ahmedsaed/laravel-ddd` while reusing its useful folder convention manually.
+- [0001](0001-custom-ddd-module-layout.md) — Own the DDD module layout in this repository rather than
+  adopting an opinionated third-party scaffolding package. Accepted, implemented by T2.
+
+## Candidates
+
 - Permit only the named Spatie event-sourcing base types in Payments Domain.
 - Use PostgreSQL durable idempotency rather than rate limiting or Redis as authority.
 - Use a Payments-specific transactional outbox for the learning slice.
@@ -34,4 +38,5 @@ Use sequential names such as `0001-custom-ddd-module-layout.md`; do not put date
 - Require a cost and use-case gate before adopting Amazon OpenSearch Service.
 
 Create each ADR when its corresponding implementation milestone begins, so package behavior and
-measured evidence can inform the final decision record.
+measured evidence can inform the final decision record. Move an entry from **Candidates** to
+**Recorded** as its ADR lands.

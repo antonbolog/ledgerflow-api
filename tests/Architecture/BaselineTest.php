@@ -2,7 +2,6 @@
 
 declare(strict_types=1);
 
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Schema;
 
 /*
@@ -14,10 +13,8 @@ use Illuminate\Support\Facades\Schema;
 | before any domain code exists, and they exist now so the codebase never
 | accumulates violations that a later slice has to retrofit.
 |
-| T2 owns module boundary rules: Payments Domain must not depend on Laravel,
-| Eloquent, HTTP, Redis or queue types, and only ADR-listed Spatie base types
-| are permitted. None of that can be expressed until modules exist, so it is
-| deliberately absent here rather than stubbed.
+| Module layer and cross-module rules live in ModuleBoundaryTest. This file
+| stays scoped to invariants that hold across the whole codebase.
 |
 */
 
@@ -36,10 +33,9 @@ arch('env() is read only through configuration')
     ->expect('env')
     ->not->toBeUsed();
 
-arch('models stay in the models namespace')
-    ->expect('App\Models')
-    ->toBeClasses()
-    ->toExtend(Model::class);
+arch('module source files declare strict types')
+    ->expect(['Modules\Merchant', 'Modules\Payments'])
+    ->toUseStrictTypes();
 
 arch('no leftover skeleton debris')
     ->expect('App')
