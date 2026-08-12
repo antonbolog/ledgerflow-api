@@ -101,9 +101,16 @@ what it validates.
 - `spatie/laravel-data` 4 — a DTO package with no DTO is a dependency with no consumer, which is the
   same ground `laravel/pail` was removed on. It arrives with the first Payments DTO.
 
-**Installed by T3/T4**
+**Installed and verified by T3**
 
-- `spatie/laravel-event-sourcing` 7.15 — its API behavior is the compatibility spike's subject.
+- `spatie/laravel-event-sourcing` **7.15.1** — the compatibility spike's subject. It requires
+  `illuminate/* ^10.0|^11.0|^12.0|^13.0` and `php ^8.0`, so Laravel 13.24.0 on PHP 8.4 is in range;
+  Laravel 13 is only accepted from 7.14.0 onward, and 7.13.0 stops at `^12.0`. It pulls nine
+  transitive packages: `spatie/laravel-package-tools` 1.93.1, `spatie/laravel-schemaless-attributes`
+  2.6.0, `spatie/better-types` 1.1.0, `spatie/php-attribute-reader` 1.1.0, `symfony/serializer`
+  8.1.4, `symfony/property-info` 8.1.4, `symfony/property-access` 8.1.4, `symfony/type-info` 8.1.0,
+  and `symfony/polyfill-php82` 1.38.1. T3 installed the package and read its source; it published no
+  configuration and no migration. See **Spatie event sourcing, as actually installed** below.
 
 `laravel/pail` was removed from the skeleton's dependencies: it has no consumer, since the Makefile
 owns the command surface and no `logs` target exists.
@@ -138,6 +145,168 @@ decision named in [interfaces and realtime](../../architecture/interfaces-and-re
 untouched. `config/sanctum.php` is published in full, so its `stateful`, `guard`, `expiration` and
 `middleware` keys are unreviewed defaults. Whoever serves the first endpoint owns all four questions
 and should read that file rather than inherit it.
+
+### Spatie event sourcing, as actually installed
+
+Read from `vendor/spatie/laravel-event-sourcing` at 7.15.1 during T3. Everything below is a source
+citation, not a reading of the package's documentation.
+
+**The three Spatie base types that bear on the Payments `Domain` allowlist.** They are listed
+together because the spike extends all three, **not** because they share a destination. Only the
+first two are candidates for a future Payments `Domain` allowlist; the third belongs in
+`Infrastructure` and is not part of that exception at all.
+[ADR 0001](../../adr/0001-custom-ddd-module-layout.md) reserves the decision for the task that first
+puts one in production code:
+
+| Type | Kind | Layer it would live in | Source |
+|---|---|---|---|
+| `Spatie\EventSourcing\AggregateRoots\AggregateRoot` | abstract class | `Domain` — **allowlist candidate** | `src/AggregateRoots/AggregateRoot.php:26` |
+| `Spatie\EventSourcing\StoredEvents\ShouldBeStored` | abstract class | `Domain` — **allowlist candidate** | `src/StoredEvents/ShouldBeStored.php:12` |
+| `Spatie\EventSourcing\EventHandlers\Projectors\Projector` | abstract class, implements `EventHandler` | `Infrastructure` — **not** an allowlist candidate | `src/EventHandlers/Projectors/Projector.php:7` |
+
+These three are not everything the spike subclassed: it also extends `EloquentStoredEvent` and
+`EloquentSnapshot`, both test-only `Infrastructure` persistence models that raise no allowlist
+question and are described later in this section.
+
+A projector writes a read model. It is a persistence adapter driven by the event stream, so it sits
+in `Infrastructure` beside the Eloquent models, and the boundary rules already permit that without
+any exception. Widening the `Domain` allowlist to include it would grant `Domain` access to a type it
+must never reference.
+
+**The aggregate lifecycle is four calls**, all on `AggregateRoot`:
+
+- `public static function retrieve(string $uuid): static` (`:50-57`) resolves a **new instance through
+  the container** with `app(static::class)`, assigns the uuid, and replays stored events via
+  `reconstituteFromEvents()`. Because it resolves rather than reuses, every call yields a distinct
+  object — which is what makes "fresh aggregate per retry attempt" achievable without any extra
+  machinery.
+- `public function loadUuid(string $uuid): static` (`:59-64`) is the instance-level equivalent: it
+  assigns the uuid onto an aggregate you already hold and replays from there. Same reconstitution, no
+  container resolution, so it does **not** give a fresh object.
+- `public function recordThat(ShouldBeStored $domainEvent): static` (`:107-120`) stamps the aggregate
+  uuid and `created_at` onto the event, appends it to the in-memory recorded set, applies it, and
+  stamps the aggregate version. Nothing is written to the database here.
+- `public function persist(): static` (`:122-133`) is the only call that writes.
+
+Both retrieval paths read through the stored-event repository, so both touch the database on whatever
+connection that repository's model resolves to.
+
+- **It publishes its migrations and does not load them**, the same trap Sanctum sprang in T2.
+  `EventSourcingServiceProvider::configurePackage()` calls `->hasMigrations([...])` but never
+  `->runsMigrations()` (`src/EventSourcingServiceProvider.php:29-32`), and
+  `ProcessMigrations::bootPackageMigrations()` only calls `loadMigrationsFrom()` when
+  `$this->package->runsMigrations` is true, which defaults to `false`
+  (`laravel-package-tools/src/Concerns/PackageServiceProvider/ProcessMigrations.php:39-41`,
+  `Concerns/Package/HasMigrations.php:7`). Confirmed by `artisan migrate:status`, which does not list
+  `create_stored_events_table` even with the provider discovered. **No application migration creates
+  `stored_events` until someone publishes that one.** T3 published none, so the table is absent from
+  the development database `ledgerflow`; the test-only spike harness creates it in `ledgerflow_test`
+  from its own verbatim copy of the stub.
+- **Its configuration does not need publishing.** `hasConfigFile()` routes through
+  `ProcessConfigs::registerPackageConfigs()`, which calls `mergeConfigFrom()` during `register()`
+  (`laravel-package-tools/src/Concerns/PackageServiceProvider/ProcessConfigs.php:7-27`), so every
+  `event-sourcing.*` default is readable without `config/event-sourcing.php` existing.
+- **`persist()` opens no transaction.** `AggregateRoot::persist()`
+  (`src/AggregateRoots/AggregateRoot.php:122-133`) calls `persistWithoutApplyingToEventHandlers()`
+  and then handles the stored events inline. Only the opt-in
+  `AggregateRoot::persistInTransaction()` wraps work in `DB::transaction()` (`:328-335`). A caller's
+  own transaction is therefore the only transaction, which is what the Payments atomic write needs.
+- **The stored-event model has no connection of its own.** `EloquentStoredEvent` sets
+  `protected $table = 'stored_events'` and declares no `$connection`
+  (`src/StoredEvents/Models/EloquentStoredEvent.php:15-21`), so it follows Eloquent's default
+  connection. It can be pointed elsewhere without publishing configuration, because the repository
+  reads `config('event-sourcing.stored_event_model', ...)` at construction
+  (`src/StoredEvents/Repositories/EloquentStoredEventRepository.php:26`) and the aggregate resolves
+  its repository through `$this->storedEventRepository ?? config('event-sourcing.stored_event_repository')`
+  (`AggregateRoot.php:174-177`).
+- **A handler runs inline unless it implements `ShouldQueue`.** `StoredEvent::handle()` calls
+  `Projectionist::handleWithSyncEventHandlers()` first (`src/StoredEvents/StoredEvent.php:74-76`),
+  and only dispatches a job when `shouldDispatchJob()` finds handlers that *are* `ShouldQueue`
+  (`:101-107`). The sync and async sets are split purely on `instanceof ShouldQueue`
+  (`src/EventHandlers/EventHandlerCollection.php:54-74`). The `event-sourcing.queue` config names the
+  queue; it does not decide whether one is used.
+- **`catch_exceptions` decides whether a failing handler is visible.** `Projectionist::callEventHandler()`
+  catches `Exception` and swallows it when `catchExceptions` is true (`src/Projectionist.php:355-367`,
+  flag set at `:42`). The shipped default is `false`
+  (`config/event-sourcing.php:48`, `env('EVENT_PROJECTOR_CATCH_EXCEPTIONS', false)`), so a failing
+  synchronous handler propagates and takes the caller's transaction down with it. **Setting
+  `EVENT_PROJECTOR_CATCH_EXCEPTIONS=true` would silently break the Payments outbox atomicity
+  guarantee**, because the stored event would persist while its outbox row did not.
+- **No event class map is required.** `enforce_event_class_map` defaults to `false` and
+  `event_class_map` to `[]` (`config/event-sourcing.php:90,97`), so
+  `EloquentStoredEventRepository::getEventClass()` stores the fully-qualified class name
+  (`:163-177`).
+- **A duplicate aggregate version does not surface as a database error.**
+  `persistWithoutApplyingToEventHandlers()` catches `QueryException`, and for a
+  `UniqueConstraintViolationException` rethrows it as `CouldNotPersistAggregate::invalidVersion()`
+  (`AggregateRoot.php:139-155`). Any retry policy that classifies failures by SQLSTATE will not see
+  this one.
+- **Auto-discovery scans `app/` only.** `auto_discover_projectors_and_reactors` defaults to
+  `[app()->path()]` (`config/event-sourcing.php:9-11`), so handlers living in a module are registered
+  explicitly through `Projectionist::addProjector()` (`src/Projectionist.php:71`).
+- **`persist()` writes each stored event twice.** `EloquentStoredEventRepository::persist()` calls
+  `save()`, then writes the event's own id into `meta_data` and calls `save()` again
+  (`:130,134`) — one `INSERT` followed by one `UPDATE` per event.
+
+**Laravel's concurrency detector cannot express the Payments retry allowlist.**
+`Illuminate\Database\ConcurrencyErrorDetector` matches `40001` by code and detects `40P01` only
+through the English message `'deadlock detected'`; it does not recognize `55P03` at all
+(`ConcurrencyErrorDetector.php:20,26-28`). Measured against a real PostgreSQL 18.4 lock conflict, it
+returns `false`. The task that implements the documented `40P01`/`40001`/`55P03` retry allowlist must
+own its own SQLSTATE matching rather than delegating to the framework.
+
+**Observed exception shape** (PostgreSQL 18.4, PDO pgsql, forced against a real row lock and a real
+unique index):
+
+| SQLSTATE | Exception class | `getCode()` | `errorInfo[0]` |
+|---|---|---|---|
+| `55P03` lock_not_available | `Illuminate\Database\QueryException` | `'55P03'` (string) | `'55P03'` |
+| `23505` unique_violation | `Illuminate\Database\UniqueConstraintViolationException` | `'23505'` (string) | `'23505'` |
+
+Both wrap a `PDOException` and both carry the SQLSTATE in `errorInfo[0]` and in `getCode()` as a
+**string**, so a comparison against an integer would silently never match. `23505` arriving as
+`UniqueConstraintViolationException` rather than a plain `QueryException` is what makes the aggregate
+version behavior above possible.
+
+### What T3 deliberately did not add
+
+T3 is a compatibility spike. Every executable artifact it produced — spike fixtures, the copied
+migrations, the schema they create, and the retry runner — is test-only, under
+`Modules/Payments/tests/`, which `tests/Architecture/ModuleBoundaryTest.php` excludes from every layer
+scan and `phpstan.neon` excludes via `Modules/*/tests/*`. It also changed tooling configuration and
+documentation, listed below. Recorded explicitly so a reader does not go looking for artifacts that
+were never created:
+
+- **No production Payments types.** Both `Domain` layers are still empty. The spike's aggregate,
+  event, projector and stored-event model live in its test tree and are named `Spike*` throughout.
+- **No production schema.** `stored_events` and `snapshots` are created only inside `ledgerflow_test`,
+  by migrations copied byte-for-byte from the vendor stubs into the spike's own directory and run
+  against a test-only connection. **`stored_events` does not exist in the development database
+  (`ledgerflow`)**, and `database/migrations/` gained nothing.
+- **No configuration published.** `config/event-sourcing.php` does not exist; the package's defaults
+  are merged, and the spike swaps `stored_event_model` and `snapshot_model` at runtime per test and
+  restores them afterwards.
+- **No `Domain` allowlist, no ADR, no architecture-rule exception.**
+  `tests/Architecture/ModuleBoundaryTest.php` and `BaselineTest.php` are unchanged, and `docs/adr/`
+  gained no record. Because no vendor type entered production module code, there was nothing to
+  permit. The task that first puts one there owns that decision, as
+  [ADR 0001](../../adr/0001-custom-ddd-module-layout.md) reserves.
+
+What T3 did add, by category:
+
+- the `spatie/laravel-event-sourcing` dependency, in `composer.json` and `composer.lock`;
+- the complete test-only spike under `Modules/Payments/tests/` — fixtures, the two verbatim vendor
+  migration copies, and the four Pest suites that prove Q1–Q5;
+- `autoload-dev` PSR-4 for `Modules\Payments\Tests\` in `Modules/Payments/composer.json`;
+- `pint.json` and `rector.php` exclusions for the copied migrations, so formatters cannot rewrite
+  files whose value is being byte-identical to the vendor stubs;
+- `.gitignore` for the ignored `/.ai/` local workspace;
+- documentation: this file, [initiation and
+  idempotency](../payments/initiation-and-idempotency.md), [the roadmap](../../roadmap.md), and
+  `AGENTS.md`.
+
+The measured invariant results live in
+[initiation and idempotency](../payments/initiation-and-idempotency.md#blocking-compatibility-evidence).
 
 ## Editor and ignore policy
 

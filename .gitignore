@@ -14,6 +14,9 @@ Thumbs.db
 .phpactor.json
 *.code-workspace
 
+# Local AI delivery artifacts
+/.ai/
+
 # Environment and credentials
 .env
 .env.*

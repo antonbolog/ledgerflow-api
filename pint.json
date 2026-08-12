@@ -16,6 +16,7 @@
     "exclude": [
         "bootstrap/cache",
         "storage",
-        "vendor"
+        "vendor",
+        "Modules/Payments/tests/Spike/migrations"
     ]
 }

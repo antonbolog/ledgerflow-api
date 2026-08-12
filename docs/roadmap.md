@@ -1,8 +1,11 @@
 # Ledgerflow Roadmap
 
-Status: **Milestone 1 complete.** T1 (Laravel foundation, Docker runtime, command contract,
-validation surface, CI) and T2 (module boundaries and merchant-user identity) are both done.
-**T3 is next**: the blocking compatibility spike that opens M2.
+Status: **Milestone 1 complete. T3 complete.** T1 (Laravel foundation, Docker runtime, command
+contract, validation surface, CI) and T2 (module boundaries and merchant-user identity) are done. T3
+proved the Spatie atomic-persistence and fresh-object retry invariants Q1–Q5 against the resolved
+stack; see the
+[compatibility evidence](specifications/payments/initiation-and-idempotency.md#blocking-compatibility-evidence).
+**T4 is next** and has not been started.
 
 ## Outcome
 
@@ -35,11 +38,16 @@ Exit, split by owning task so neither is reviewed against the other's clause:
 
 Prove exact Laravel/Spatie/PostgreSQL/Redis assumptions before production schema is finalized.
 
-- T3 — Prove Spatie atomic persistence and fresh-object transaction retry.
-- T4 — Prove advisory-lock connection affinity and immediate Redis dispatch.
+- T3 — Prove Spatie atomic persistence and fresh-object transaction retry. **Complete.** Q1–Q5 all
+  passed against Laravel 13.24.0, `spatie/laravel-event-sourcing` 7.15.1 and PostgreSQL 18.4. `40P01`
+  and `40001` remain allowlisted but unmeasured, and multi-process concurrency is out of its scope.
+- T4 — Prove advisory-lock connection affinity and immediate Redis dispatch. **Next; not started.**
 
 Exit: spike documentation records exact package APIs and database/transport behavior. Any failed
-invariant triggers design revision before M3.
+invariant triggers design revision before M3. T3's half of that exit is recorded in
+[initiation/idempotency](specifications/payments/initiation-and-idempotency.md#blocking-compatibility-evidence)
+and [development environment](specifications/foundation/development-environment.md); T4 appends its
+own.
 
 ### M3 — Atomic payment initiation
 
