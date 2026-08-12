@@ -17,7 +17,8 @@
         "laravel/framework": "^13.8",
         "laravel/sanctum": "^4",
         "laravel/tinker": "^3.0",
-        "nwidart/laravel-modules": "^13"
+        "nwidart/laravel-modules": "^13",
+        "spatie/laravel-event-sourcing": "^7.15"
     },
     "require-dev": {
         "driftingly/rector-laravel": "^2.5",

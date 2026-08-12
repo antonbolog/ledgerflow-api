@@ -29,7 +29,13 @@ Repo: `github.com/mythern/ledgerflow-api` (private now, public later — see **R
 - Amazon SQS is planned for separately owned durable workloads; Horizon manages Redis queues only
 - `nwidart/laravel-modules` (v13.0.0) — module registration, with
   `wikimedia/composer-merge-plugin` merging module manifests
-- `spatie/laravel-event-sourcing` (v7.15) — **Payments module only**
+- `spatie/laravel-event-sourcing` (**v7.15.1**, installed by T3) — **Payments module only**. T3 used
+  it from a test-only spike and published none of its configuration or migrations: no application
+  migration exists under `database/migrations/`, and `stored_events` is **absent from the development
+  database `ledgerflow`**. The test-only harness does create and retain it in `ledgerflow_test`, from
+  migrations copied verbatim from the vendor stubs. Its resolved API surface, the three base types the
+  spike extended, and the findings T5/T6 inherit are recorded in
+  [development environment](docs/specifications/foundation/development-environment.md)
 - `spatie/laravel-data` — DTOs. **Deferred**, not installed: a DTO package with no DTO is a
   dependency with no consumer. It arrives with the first Payments DTO
 - Pest + `pest-plugin-arch` (boundary enforcement), Larastan, Pint, Rector
@@ -105,13 +111,24 @@ See `docs/architecture/messaging-and-queues.md` for ownership rules.
 
 ## Development Workflow
 
-T1 and T2 are complete. T1 established the Laravel 13 skeleton, the Docker runtime, the Makefile
+T1, T2 and T3 are complete. T1 established the Laravel 13 skeleton, the Docker runtime, the Makefile
 command contract, and the validation surface. T2 established the `Merchant` and `Payments` modules
 with enforced layer boundaries, moved merchant-user identity into `Modules/Merchant` behind a
 Sanctum-authenticated application contract, added the required `users.merchant_id` foreign key, and
-seeded two deterministic merchants and users. T3 is the next task and owns the Spatie
-atomic-persistence and transaction-retry spike. No Payments behavior exists yet, and both `Domain`
-layers are deliberately still empty.
+seeded two deterministic merchants and users.
+
+T3 proved the Spatie atomic-persistence and transaction-retry invariants Q1–Q5 against the resolved
+stack, entirely from a test-only spike: one transaction and backend connection for receipt, stored
+event and outbox; complete rollback at two failure boundaries; a synchronous handler that finishes
+before persistence returns and enqueues nothing; a real `55P03` retried with fresh objects from stable
+context; exhaustion at three attempts; and a real `23505` attempted once. `40P01` and `40001` are
+allowlisted but were not produced, and multi-process concurrency was out of scope. Evidence lives in
+[initiation/idempotency](docs/specifications/payments/initiation-and-idempotency.md#blocking-compatibility-evidence).
+
+**T4 is next and has not been started**; it owns advisory-lock connection affinity and immediate Redis
+dispatch. Still true after T3: no production Payments behavior exists, both `Domain` layers are
+deliberately empty, no Payments `Domain` allowlist or ADR has been granted, and
+`tests/Architecture/` is unchanged.
 
 General delivery flow: Think → Plan → Build → Review → Test → Ship → Reflect. Once implementation
 starts, discovery of current code, conventions, tests, working-tree state, and nested instructions
