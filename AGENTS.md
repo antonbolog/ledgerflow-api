@@ -33,8 +33,13 @@ Repo: `github.com/mythern/ledgerflow-api` (private now, public later — see **R
   it from a test-only spike and published none of its configuration or migrations: no application
   migration exists under `database/migrations/`, and `stored_events` is **absent from the development
   database `ledgerflow`**. The test-only harness does create and retain it in `ledgerflow_test`, from
-  migrations copied verbatim from the vendor stubs. Its resolved API surface, the three base types the
-  spike extended, and the findings T5/T6 inherit are recorded in
+  migrations copied verbatim from the vendor stubs. Its resolved API surface, the three Spatie base
+  types that bear on the future Payments `Domain` allowlist, and the findings T5/T6 inherit are
+  recorded in [development environment](docs/specifications/foundation/development-environment.md)
+- **T4 added no dependency.** It proved the advisory-lock and Redis-dispatch invariants against the
+  already-resolved Laravel queue and phpredis, registering its Redis and queue connections at runtime
+  in a test-only harness. The resolved queue/Redis/connection-loss behavior and the constraints T7
+  inherits are recorded in
   [development environment](docs/specifications/foundation/development-environment.md)
 - `spatie/laravel-data` — DTOs. **Deferred**, not installed: a DTO package with no DTO is a
   dependency with no consumer. It arrives with the first Payments DTO
@@ -111,7 +116,7 @@ See `docs/architecture/messaging-and-queues.md` for ownership rules.
 
 ## Development Workflow
 
-T1, T2 and T3 are complete. T1 established the Laravel 13 skeleton, the Docker runtime, the Makefile
+T1, T2, T3 and T4 are complete, closing Milestones 1 and 2. T1 established the Laravel 13 skeleton, the Docker runtime, the Makefile
 command contract, and the validation surface. T2 established the `Merchant` and `Payments` modules
 with enforced layer boundaries, moved merchant-user identity into `Modules/Merchant` behind a
 Sanctum-authenticated application contract, added the required `users.merchant_id` foreign key, and
@@ -125,10 +130,25 @@ context; exhaustion at three attempts; and a real `23505` attempted once. `40P01
 allowlisted but were not produced, and multi-process concurrency was out of scope. Evidence lives in
 [initiation/idempotency](docs/specifications/payments/initiation-and-idempotency.md#blocking-compatibility-evidence).
 
-**T4 is next and has not been started**; it owns advisory-lock connection affinity and immediate Redis
-dispatch. Still true after T3: no production Payments behavior exists, both `Domain` layers are
-deliberately empty, no Payments `Domain` allowlist or ADR has been granted, and
-`tests/Architecture/` is unchanged.
+T4 proved the advisory-lock and Redis-dispatch invariants Q6–Q10, also entirely from a test-only spike
+and **without adding a dependency or a line of production behavior**: a shared advisory lock and its
+protected query on one backend, witnessed from a third connection through `pg_locks`; shared and
+exclusive contention observed with no sleeps, including a real `55P03` from a bounded `lock_timeout`;
+a silent reconnect onto a new backend outside a transaction versus a surfaced loss and a **stale**
+`transactionLevel()` inside one; a Redis publication readable while the PostgreSQL transaction was
+still open; a non-vacuous `after_commit` control proving the immediate path is a real choice; and a
+crash after publication that returned the row to eligible so an identical second attempt produced the
+documented safe duplicate. No worker, Horizon, scheduler, relay command, `SKIP LOCKED`, or
+multi-process behavior was exercised. Evidence lives in
+[outbox delivery](docs/specifications/payments/outbox-delivery.md#blocking-compatibility-evidence).
+
+T4 also found and repaired a test-isolation defect: `phpunit.xml`'s queue, cache and session
+declarations were losing to `$_SERVER`, so the suite's default queue was a real Redis queue on
+logical database 0. See **PostgreSQL and transport test isolation** below.
+
+**T5 is next and has not been started.** Still true after T4: no production Payments behavior exists,
+both `Domain` layers are deliberately empty, no Payments `Domain` allowlist or ADR has been granted,
+and `tests/Architecture/` is unchanged.
 
 General delivery flow: Think → Plan → Build → Review → Test → Ship → Reflect. Once implementation
 starts, discovery of current code, conventions, tests, working-tree state, and nested instructions
@@ -165,12 +185,24 @@ ships, so no `.ONESHELL`, `$(file …)`, or `!=` assignment.
 stray `CONFIRM=1` cannot satisfy either. Destructive targets remove only generated containers,
 volumes, and the two allowlisted databases; they can never delete source files.
 
-**PostgreSQL test isolation.** One pinned PostgreSQL service hosts `ledgerflow` (development) and
-`ledgerflow_test` (suite). The suite truncates and re-migrates its database on every run and is
-prevented from reaching any other by three layers: a pre-autoload guard in `tests/bootstrap.php`
-that refuses a wrong connection *before* `RefreshDatabase` can migrate, forced values in
-`phpunit.xml`, and a live `select current_database()` assertion. `check` is non-destructive to
-source and to the development database; the test database is reset by design.
+**PostgreSQL and transport test isolation.** One pinned PostgreSQL service hosts `ledgerflow`
+(development) and `ledgerflow_test` (suite). The suite truncates and re-migrates its database on
+every run and is prevented from reaching any other by three layers: a pre-autoload guard in
+`tests/bootstrap.php` that refuses a wrong connection *before* `RefreshDatabase` can migrate, the
+declared values in `phpunit.xml`, and a live `select current_database()` assertion. `check` is
+non-destructive to source and to the development database; the test database is reset by design.
+
+**`phpunit.xml` declares the intent; `tests/bootstrap.php` is what enforces it.** PHPUnit's
+`<env force="true">` writes `putenv()` and `$_ENV` but **never `$_SERVER`**, and Compose's `env_file`
+puts the development values there, which Laravel's env resolver reads first. The bootstrap validates
+each declared value and then forces it into all three sources. This covers the database keys and —
+since T4 measured the same trap defeating them — `QUEUE_CONNECTION=sync`, `CACHE_STORE=array` and
+`SESSION_DRIVER=array`. Until that repair the suite's **default queue was a real Redis queue on
+logical database 0**, the development keyspace. Do not treat a `phpunit.xml` entry as effective on its
+own: `tests/Feature/InfrastructureContractTest.php` asserts the live resolved `SyncQueue`,
+`ArrayStore` and session driver, and the bootstrap **refuses to run** if a declaration goes missing or
+changes. A test may still reach Redis explicitly by name; what is forbidden is reaching shared
+infrastructure through a framework default nobody chose.
 
 **Services left running.** `make test` starts `postgres` and `redis` if they are down and leaves
 them up — it cannot know whether they belong to a development session, and stopping someone else's

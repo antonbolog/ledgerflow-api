@@ -34,6 +34,22 @@ final class SpikeFailureSwitch
     }
 
     /**
+     * Stop throwing at the next boundary.
+     *
+     * ARM IS STICKY. trip() throws without clearing the flag, so a fixture that
+     * runs the same code path twice cannot get a clean second pass merely by
+     * not arming again — it would throw a second time. T4's safe-duplicate test
+     * runs one relay attempt twice and changes nothing else between the passes,
+     * so it needs an explicit way to turn the injection off. Without this, the
+     * only alternative would be a second switch instance or a second code path,
+     * and both would break the guarantee that the two passes are identical.
+     */
+    public function disarm(): void
+    {
+        $this->armed = false;
+    }
+
+    /**
      * Throw if armed. The caller names the boundary so the assertion message
      * says where the failure was planted.
      */

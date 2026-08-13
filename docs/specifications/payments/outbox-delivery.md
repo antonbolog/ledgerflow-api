@@ -131,6 +131,77 @@ If confirmed, implement a short transactional claim with token/expiry, publish o
 transaction, token-guarded finalization, expired-claim recovery, and crash tests after claim,
 publication, and before finalization. A transient transport outage alone is not a trigger.
 
+## Blocking compatibility evidence
+
+**Satisfied by T4.** Every invariant below was proved against the Composer-resolved stack — Laravel
+13.24.0, PostgreSQL 18.4, Redis 8.10.0 via phpredis 6.3.0, PHP 8.4 — by a test-only spike under
+`Modules/Payments/tests/`. It adds no production behaviour; see
+[development environment](../foundation/development-environment.md#what-t4-deliberately-did-not-add).
+
+| # | Invariant | Proving test | Observed mechanism | Status |
+|---|---|---|---|---|
+| Q6 | A transaction-scoped shared advisory lock and the work it protects run on one connection and one backend | `SpikeProjectionGateTest::it holds the shared gate lock and its protected work on one backend` | Read from the **observer** connection, `pg_locks` holds exactly one row — `locktype advisory`, `classid 4242`, `objid 1`, `objsubid 2`, `mode ShareLock`, `granted true` — whose `pid` equals the protecting backend's own `pg_backend_pid()`; the observer sees **zero** rows in the outbox surrogate while the closure is open, and zero advisory locks after commit | **PASS** |
+| Q6 | The transaction-scoped lock releases on rollback as well as commit | `SpikeProjectionGateTest::it releases the transaction-scoped lock on rollback as well as on commit` | Injected failure propagates; observer sees zero rows and zero advisory locks; spike connection back at `transactionLevel() === 0`, with no explicit release call | **PASS** |
+| Q6 | The affinity check has teeth | `SpikeProjectionGateTest::it reports an affinity mismatch when the lock is taken on another connection` | The same predicate used by the passing case returns **false** when the lock is held by `pgsql_lock` and the work runs on `pgsql_spike`; holder pid and query pid differ | **PASS** |
+| Q7 | An exclusive contender is refused while the gate is held, and admitted once released | `SpikeProjectionGateTest::it refuses an exclusive contender while the gate is held and admits it after release` | `pg_try_advisory_xact_lock` from a second backend returns **false** immediately, then **true** after the holder rolls back. No sleep | **PASS** |
+| Q7 | The gate is genuinely shared | `SpikeProjectionGateTest::it admits a second shared holder while the gate is held` | Two granted `ShareLock` rows with **distinct backend PIDs**, both `objsubid 2` | **PASS** |
+| Q7 | A bounded wait raises a real, allowlisted `55P03` | `SpikeProjectionGateTest::it raises a real 55P03 when a bounded exclusive wait times out` | `SET LOCAL lock_timeout = '250ms'` plus `statement_timeout = '2s'`, then blocking `pg_advisory_xact_lock`: `QueryException`, SQLSTATE `55P03` in both `errorInfo[0]` and `getCode()` (string), message `canceling statement due to lock timeout`. Extracted with T3's own `SpikeTransactionRetry::sqlStateOf()` | **PASS** |
+| Q8 | Outside a transaction, a lost connection reconnects **silently** onto a new backend | `SpikeProjectionGateTest::it reconnects silently onto a new backend when the lost connection has no transaction` | After `pg_terminate_backend`, the next query **does not throw**; the backend PID changed; `pg_locks` reports zero advisory rows; a third connection reacquires the key | **PASS** |
+| Q8 | Inside a transaction, loss **surfaces**, and the PHP transaction level goes stale | `SpikeProjectionGateTest::it surfaces the lost connection and leaves a stale transaction level inside a transaction` | The next query throws `QueryException` wrapping `PDOException`; the container's real `LostConnectionDetector` classifies it; `transactionLevel()` still reports **1** over a backend that no longer exists; the advisory key is nonetheless reacquirable by another connection | **PASS** |
+| Q8 | Teardown recovers from a terminated backend without leaking committed rows | `SpikeProjectionGateTest::it recovers from a terminated backend during teardown without leaking rows` | Self-contained: commits a row, opens a transaction, terminates its own backend, then runs teardown — which does not throw, recovers on a new pid at `transactionLevel() === 0`, leaves no advisory lock, and leaves **no committed row** | **PASS** |
+| Q9 | Publication happens immediately, while the PostgreSQL transaction is still open | `SpikeRelayDispatchTest::it publishes to Redis while the PostgreSQL transaction is still open` | Inside the closure, Redis holds the message while the **observer** still reads `last_published_at IS NULL` and `publish_count = 0`. `JobQueued` fires on connection `redis_spike` at spike `transactionLevel() === 1`. `size()`, `pendingSize()` and `pendingJobs()->count()` all report 1, so the Lua-`eval` and ordinary-command key derivations agree | **PASS** |
+| Q9 | The message carries an identifier, not an envelope | same test | Decoded payload: `displayName` and `data.commandName` are the spike job class, `data.command` is `O:42:"…SpikeRelayJob":1:{s:7:"eventId";s:36:"…";}`; no `amount`, `currency`, `merchant`, `occurred_at` or `aggregate` appears anywhere in the payload | **PASS** |
+| Q9 | The control is not vacuous: `after_commit` really can defer here | `SpikeRelayDispatchTest::it defers the after_commit twin until the transaction commits` | An identical push through an `after_commit => true` twin connection leaves the queue at **0** inside the closure and **1** after commit, with `JobQueued` firing at spike `transactionLevel() === 0`. Callback locality is asserted, not assumed: the shared transaction manager's pending records read `["pgsql@1", "pgsql_spike@1"]` and `last()` is `pgsql_spike` | **PASS** |
+| Q10 | A crash after accepted publication leaves the canonical row in its pre-attempt **eligible** state | `SpikeRelayDispatchTest::it leaves the row eligible after a crash and republishes on a later pass` | From a committed eligible row: pass 1 locks it, publishes, updates, then throws. The exception propagates, Redis retains **1** message, and the observer reads the row still present with `last_published_at IS NULL` and `publish_count = 0` | **PASS** |
+| Q10 | A later pass republishes, producing the documented safe duplicate | same test | The *same* `SpikeRelayAttempt` instance runs again with only the failure switch disarmed: Redis holds **2** messages carrying the same event id, and the row commits with `publish_count = 1` and non-null `last_published_at` | **PASS** |
+
+Pass 2 is also the control for pass 1: it proves the committing path does update the row, so pass 1's
+untouched row is a rollback result rather than a write that never happened. The failure switch is
+sticky by design, so a dedicated test
+(`SpikeRelayDispatchTest::it disarms the failure switch so the same boundary stops throwing`) proves
+`disarm()` is what makes pass 2 succeed, rather than a silently replaced switch or a skipped boundary.
+
+### Constraints T7 inherits
+
+- **Publish with `push()`, never `pushRaw()`.** `pushRaw()` skips `Queue::enqueueUsing()` entirely and
+  is unconditionally immediate (`Queue/RedisQueue.php:323-335`), so it cannot express — or be tested
+  against — the after-commit question at all. Only `push()` consults the connection's `after_commit`
+  (`Queue/RedisQueue.php:302-313`, `Queue/Queue.php:366-387`).
+- **The relay job must not opt into after-commit.** `shouldDispatchAfterCommit()` checks
+  `ShouldQueueAfterCommit` and a truthy `$afterCommit` property **before** the connection config
+  (`Queue/Queue.php:396-405`), so a connection set `after_commit => false` cannot force immediacy on
+  such a job. The job must implement neither and must never be dispatched with `->afterCommit()`.
+  **Read from source, not measured** — see the non-claims below.
+- **A resolved queue connection caches its configuration.** `QueueManager::connection()` stores the
+  resolved queue per name (`Queue/QueueManager.php:158-198`), so changing `queue.connections.<name>`
+  afterwards has no effect. Two behaviours need two configured names. The Redis connector itself
+  resolves the manager lazily per `resolve()` (`Queue/QueueServiceProvider.php:202-207`), so a
+  connection registered at runtime is picked up only if the `redis` instance is forgotten first
+  (`Redis/RedisServiceProvider.php:18-22`).
+- **Measured queue keys.** A real `push()` populated exactly two keys: `queues:<name>` and
+  `queues:<name>:notify` (`Queue/LuaScripts.php:32-38`). `:delayed` and `:reserved` exist in the key
+  space but were never written by publication alone. Anyone pointing Horizon at these queues should
+  start from those literal names rather than from a prefixed variant.
+
+**Not proved, and not claimed.** T4 measured transport and locking primitives, nothing above them.
+No worker ever consumed a message: `pop()`, reservation, `retry_after`, and the notify-key semantics
+are untouched. **No Horizon supervision, no scheduler, and no `payments:outbox:relay` command exist.**
+None of the state transitions above were exercised — no backoff, no `exhausted_at`, no poison
+counting, no receipt reconciliation. The spike's outbox surrogate is a **three-column test-only
+table**, not a proposal for `payment_outbox`, and its eligibility predicate is literally
+`last_published_at is null`. `FOR UPDATE` was used in a single process; **`SKIP LOCKED` and relay
+concurrency were not exercised**, and neither was any multi-process behaviour, which remains T12's.
+The advisory key is a spike constant: **the production derivation from
+`payment_projection_controls` is undecided and belongs to T11.** The `ShouldQueueAfterCommit`
+constraint above is read from vendor source rather than measured, deliberately, because no database
+or transport version could change it. Every observation here is from this container on this stack and
+is not a portability claim.
+
+**The harness is not parallel-safe.** It commits real rows into shared `ledgerflow_test` tables and
+writes shared namespaced keys in Redis logical database 15, so two workers would see each other's
+state. `make test` deliberately does not enable parallel execution. Everything proved above is
+therefore single-process; multi-process behaviour remains T12's scope.
+
 ## Acceptance criteria
 
 - Transport outage leaves the payment and outbox committed, queryable as pending, and recoverable.

@@ -59,6 +59,37 @@ mutual exclusion.
 - Losing or reconnecting the pinned session aborts the rebuild. Code never assumes the old lock
   survived.
 
+### Compatibility evidence for this gate
+
+T4 measured the two clauses above against PostgreSQL 18.4 and Laravel 13.24.0. The result table lives
+in [outbox delivery](outbox-delivery.md#blocking-compatibility-evidence) (Q6 for connection affinity,
+Q8 for session loss); only what T11 must design around is repeated here.
+
+**Affinity is provable.** A transaction-scoped shared lock and its protected query report the same
+backend pid in `pg_locks`, witnessed from a third connection rather than self-reported. Shared holders
+coexist across distinct backends, an exclusive contender is refused immediately, and a bounded
+`lock_timeout` turns a blocking wait into a real `55P03` — the SQLSTATE already on the Payments retry
+allowlist.
+
+**Session loss behaves differently either side of a transaction, and both are dangerous:**
+
+- **Outside a transaction, Laravel reconnects silently.** `Connection::run()` catches the failure,
+  `handleQueryException()` rethrows only when `transactions >= 1`, and otherwise
+  `tryAgainIfCausedByLostConnection()` reconnects and re-runs
+  (`Database/Connection.php:799-828,1010-1040`). Measured: the caller saw a **successful query on a
+  new backend pid**, and the advisory lock was gone.
+- **Inside a transaction, the loss surfaces** as a `QueryException` — but
+  **`transactionLevel()` still reported `1`**. `reconnect()` swaps only the PDO and never touches the
+  counter (`Database/DatabaseManager.php:333-345,374-385`), and `disconnect()` leaves it too
+  (`Database/Connection.php:1064-1081`).
+
+**Therefore, for the rebuild: neither a successful query nor a non-zero `transactionLevel()` is
+evidence that the pinned session, or the advisory lock it took, survived.** Both can be true while the
+lock is already held by somebody else. A rebuild that infers ownership from either is unsafe, and the
+abort path needs a positive check — re-reading the durable control row on a known-live connection, a
+fenced token, or a refusal to reconnect at all. T11 owns that choice; T4 only proves the naive
+inference is wrong.
+
 ## Rebuild algorithm
 
 1. Atomically mark the projection `rebuilding` with a unique owner token.

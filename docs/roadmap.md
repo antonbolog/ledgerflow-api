@@ -1,11 +1,12 @@
 # Ledgerflow Roadmap
 
-Status: **Milestone 1 complete. T3 complete.** T1 (Laravel foundation, Docker runtime, command
-contract, validation surface, CI) and T2 (module boundaries and merchant-user identity) are done. T3
-proved the Spatie atomic-persistence and fresh-object retry invariants Q1–Q5 against the resolved
-stack; see the
-[compatibility evidence](specifications/payments/initiation-and-idempotency.md#blocking-compatibility-evidence).
-**T4 is next** and has not been started.
+Status: **Milestones 1 and 2 complete.** T1 (Laravel foundation, Docker runtime, command contract,
+validation surface, CI) and T2 (module boundaries and merchant-user identity) are done. T3 proved the
+Spatie atomic-persistence and fresh-object retry invariants Q1–Q5; see the
+[initiation evidence](specifications/payments/initiation-and-idempotency.md#blocking-compatibility-evidence).
+T4 proved the advisory-lock and Redis-dispatch invariants Q6–Q10; see the
+[outbox evidence](specifications/payments/outbox-delivery.md#blocking-compatibility-evidence).
+**T5 is next** and has not been started.
 
 ## Outcome
 
@@ -41,13 +42,23 @@ Prove exact Laravel/Spatie/PostgreSQL/Redis assumptions before production schema
 - T3 — Prove Spatie atomic persistence and fresh-object transaction retry. **Complete.** Q1–Q5 all
   passed against Laravel 13.24.0, `spatie/laravel-event-sourcing` 7.15.1 and PostgreSQL 18.4. `40P01`
   and `40001` remain allowlisted but unmeasured, and multi-process concurrency is out of its scope.
-- T4 — Prove advisory-lock connection affinity and immediate Redis dispatch. **Next; not started.**
+- T4 — Prove advisory-lock connection affinity and immediate Redis dispatch. **Complete.** Q6–Q10 all
+  passed against Laravel 13.24.0, PostgreSQL 18.4 and Redis 8.10.0 via phpredis 6.3.0: observer-witnessed
+  lock/backend affinity, shared and exclusive contention with a real `55P03` from a bounded
+  `lock_timeout`, silent reconnect outside a transaction versus surfaced loss and a stale
+  `transactionLevel()` inside one, publication visible in Redis before the PostgreSQL commit, a
+  non-vacuous `after_commit` control, and a crash that returns the row to eligible so a second identical
+  attempt produces the safe duplicate. No worker, Horizon, scheduler, relay command, `SKIP LOCKED`, or
+  multi-process behaviour was exercised, and the production advisory-key derivation stays with T11.
 
-Exit: spike documentation records exact package APIs and database/transport behavior. Any failed
-invariant triggers design revision before M3. T3's half of that exit is recorded in
-[initiation/idempotency](specifications/payments/initiation-and-idempotency.md#blocking-compatibility-evidence)
-and [development environment](specifications/foundation/development-environment.md); T4 appends its
-own.
+**M2 exit satisfied.** Spike documentation records the exact package APIs and database/transport
+behavior, and no invariant failed, so M3 proceeds without design revision. T3's half is recorded in
+[initiation/idempotency](specifications/payments/initiation-and-idempotency.md#blocking-compatibility-evidence);
+T4's is in [outbox delivery](specifications/payments/outbox-delivery.md#blocking-compatibility-evidence),
+with the gate consequences for M5 in
+[verification/rebuild](specifications/payments/verification-and-rebuild.md#compatibility-evidence-for-this-gate)
+and the resolved framework behavior in
+[development environment](specifications/foundation/development-environment.md).
 
 ### M3 — Atomic payment initiation
 
