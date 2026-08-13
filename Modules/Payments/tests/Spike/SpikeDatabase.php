@@ -41,13 +41,21 @@ final class SpikeDatabase
 
     public const string LOCK_CONNECTION = 'pgsql_lock';
 
-    /** Tables the spike owns. Order matters only for readability; none are related. */
+    /**
+     * Tables the spike owns. Order matters only for readability; none are related.
+     *
+     * spike_outbox_delivery (T4) MUST stay in this list. It has no unique key,
+     * so nothing else would catch a leaked committed row: T3's tables are
+     * protected by the receipt-reservation guard failing on a duplicate key,
+     * and this one has no equivalent.
+     */
     private const array TABLES = [
         'stored_events',
         'snapshots',
         'spike_payment_receipts',
         'spike_payment_outbox',
         'spike_lock_probe',
+        'spike_outbox_delivery',
     ];
 
     private static ?string $originalStoredEventModel = null;
@@ -161,12 +169,65 @@ final class SpikeDatabase
         }
 
         if (! $schema->hasTable('spike_lock_probe')) {
-            // Task 4's contention target. Its own table so receipt counts stay
+            // T3 Task 4's contention target. Its own table so receipt counts stay
             // unambiguous when a retry rolls an attempt back.
             $schema->create('spike_lock_probe', function (Blueprint $table): void {
                 $table->unsignedInteger('id')->primary();
             });
         }
+
+        if (! $schema->hasTable('spike_outbox_delivery')) {
+            // T4's durable outbox surrogate. THREE COLUMNS, and it stays three
+            // columns: no available_at, no backoff, no exhausted_at, no partial
+            // index. The eligibility predicate is literally
+            // "last_published_at is null", the smallest thing that can tell a
+            // pre-attempt row from a published one. Anything more would make
+            // this a partial relay implementation, which is T7's, and TODOS.md
+            // already forbids anticipating that design.
+            $schema->create('spike_outbox_delivery', function (Blueprint $table): void {
+                $table->uuid('event_id')->primary();
+                $table->timestampTz('last_published_at')->nullable();
+                $table->integer('publish_count')->default(0);
+            });
+        }
+    }
+
+    /**
+     * What the server says this connection is attached to, not what config
+     * claims. Same reasoning as the infrastructure contract test: config can
+     * report one thing while the connection resolves somewhere else entirely.
+     */
+    public static function databaseName(string $connection): string
+    {
+        return (string) DB::connection($connection)
+            ->selectOne('select current_database() as name')->name;
+    }
+
+    /**
+     * Row counts for every spike table that exists, read from the OBSERVER.
+     *
+     * This is the only leak detector that works. A stale transaction counter is
+     * erased when DB::purge() unsets the connection and the next
+     * DB::connection() builds a fresh Connection object reporting
+     * transactionLevel() === 0 — but committed rows survive that, invisibly, and
+     * would be counted by whichever test ran next.
+     *
+     * @return array<string, int>
+     */
+    public static function observedRowCounts(): array
+    {
+        $connection = DB::connection();
+        $schema = Schema::connection(DB::getDefaultConnection());
+
+        $counts = [];
+
+        foreach (self::TABLES as $table) {
+            if ($schema->hasTable($table)) {
+                $counts[$table] = $connection->table($table)->count();
+            }
+        }
+
+        return $counts;
     }
 
     /**
@@ -179,12 +240,19 @@ final class SpikeDatabase
      *
      * Order is load-bearing. Rolling back before cleanup matters because a DELETE
      * issued inside a still-open transaction would be undone by the rollback that
-     * a later purge performs, silently leaking rows into the next test.
+     * a later purge performs, silently leaking rows into the next test. It also
+     * keeps a DELETE from blocking on a FOR UPDATE row lock a failed attempt left
+     * behind.
+     *
+     * releaseAdvisoryLocks() sits between them (T4). Transaction-scoped locks die
+     * with their transaction, so this exists for the session-level ones; running
+     * it unconditionally means no test has to remember.
      *
      * Failures here are swallowed on purpose. A teardown error must never replace
      * the test's own failure as the reported cause, and leaked state is detected
-     * loudly by the next test's beforeEach guards (transaction level 0 on both
-     * connections, schema present, config swapped) rather than quietly here.
+     * loudly by the next test's beforeEach guards (distinct backends, transaction
+     * level 0 on both connections, no advisory locks on the gate key, and zero
+     * rows in every spike table) rather than quietly here.
      */
     public static function teardown(): void
     {
@@ -192,7 +260,11 @@ final class SpikeDatabase
             try {
                 self::rollbackOpenTransactions();
             } finally {
-                self::cleanup();
+                try {
+                    self::releaseAdvisoryLocks();
+                } finally {
+                    self::cleanup();
+                }
             }
         } catch (Throwable) {
             // Deliberate. See the note above.
@@ -223,6 +295,29 @@ final class SpikeDatabase
 
             while ($connection->transactionLevel() > 0) {
                 $connection->rollBack();
+            }
+        }
+    }
+
+    /**
+     * Drop every session-level advisory lock both spike connections hold.
+     *
+     * Guarded per connection rather than as one loop body: a terminated backend
+     * makes its own call throw, and skipping the other connection because of it
+     * would leak a lock into the next test, where a stale holder makes every
+     * contention result meaningless in the direction of a false pass.
+     *
+     * A throw here is expected and harmless in one case: a backend that has been
+     * terminated already released everything it held, so there is nothing left
+     * to unlock.
+     */
+    public static function releaseAdvisoryLocks(): void
+    {
+        foreach ([self::CONNECTION, self::LOCK_CONNECTION] as $name) {
+            try {
+                DB::connection($name)->select('select pg_advisory_unlock_all()');
+            } catch (Throwable) {
+                // See the note above.
             }
         }
     }

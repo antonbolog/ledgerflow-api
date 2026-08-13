@@ -308,6 +308,140 @@ What T3 did add, by category:
 The measured invariant results live in
 [initiation and idempotency](../payments/initiation-and-idempotency.md#blocking-compatibility-evidence).
 
+### Laravel queue, Redis and connection loss, as actually resolved
+
+Read from `vendor/laravel/framework` at **13.24.0** during T4, and measured against PostgreSQL 18.4
+and Redis 8.10.0 with phpredis 6.3.0. Every line is a source citation or a measurement, not a reading
+of the documentation.
+
+**Publication path.**
+
+- `RedisQueue::push()` routes through `Queue::enqueueUsing()`, which consults
+  `shouldDispatchAfterCommit($job)` and, when true and `db.transactions` is bound, registers the push
+  as a transaction callback instead of performing it (`Queue/RedisQueue.php:302-313`,
+  `Queue/Queue.php:366-387`).
+- **`pushRaw()` bypasses that check entirely** and is unconditionally immediate
+  (`Queue/RedisQueue.php:323-335`).
+- **A job can override the connection.** `shouldDispatchAfterCommit()` returns true for any
+  `ShouldQueueAfterCommit` job, and for any object with a truthy `$afterCommit` property, *before* the
+  connection's `after_commit` config is read (`Queue/Queue.php:396-405`). The connection default comes
+  from `RedisConnector::connect()` (`Queue/Connectors/RedisConnector.php:42-53`).
+- One `push()` writes two keys through a single Lua `eval`: `queues:<name>` and `queues:<name>:notify`
+  (`Queue/LuaScripts.php:32-38`). **Measured: exactly those two keys and no others.**
+- `size()` runs through `eval`, while `pendingSize()` (`llen`) and `pendingJobs()` (`lrange`, decoded
+  into `InspectedJob`) run through ordinary commands (`Queue/RedisQueue.php:110-131,161-172`,
+  `Queue/Jobs/InspectedJob.php:29-49`). That is the axis on which phpredis prefixing could disagree
+  with itself, so the spike asserts all three agree. **Measured: they do.**
+
+**Configuration caching, and why order matters.**
+
+- `RedisManager` captures `database.redis` once, when the singleton is built
+  (`Redis/RedisServiceProvider.php:18-22`, `Redis/RedisManager.php:88-122`), so a connection added to
+  config later is invisible until the instance is forgotten.
+- `QueueManager::connection()` caches the resolved queue **per name**
+  (`Queue/QueueManager.php:158-198`), so two behaviours need two configured names.
+- The Redis queue connector resolves `app['redis']` **inside** a closure invoked on every `resolve()`
+  (`Queue/QueueServiceProvider.php:202-207`), which is what makes forgetting the instance before the
+  first `Queue::connection()` both sufficient and necessary.
+- Per-connection Redis `options` beat the global ones: `PhpRedisConnector::connect()` merges the
+  connection's own array last and applies `prefix` and `database` from it
+  (`Redis/Connectors/PhpRedisConnector.php:25-39,115-120`).
+
+**Transaction-manager callbacks.** Every connection — including one registered at runtime — is handed
+the **same singleton** `DatabaseTransactionsManager` (`Database/DatabaseManager.php:102,236-253`,
+`Database/DatabaseServiceProvider.php:79`). `addCallback()` attaches to
+`getPendingTransactions()->last()` across **all** connections, not the current one
+(`Database/DatabaseTransactionsManager.php:213-220,236-242`). **Callback locality is therefore
+accidental**, and the spike asserts it rather than assuming it: with `RefreshDatabase` holding the
+default connection open, the pending records read `["pgsql@1", "pgsql_spike@1"]` and `last()` is
+`pgsql_spike` only because the spike began last. A commit fires the callbacks; a **rollback discards
+them** (`Database/DatabaseTransactionsManager.php:66-93,120-146,150-176`).
+
+**Connection loss.** `Connection::run()` rethrows only when `transactions >= 1`; otherwise it
+reconnects and re-runs (`Database/Connection.php:799-828,1010-1040`). `reconnect()` swaps the PDO and
+never touches the transaction counter (`Database/DatabaseManager.php:333-345,374-385`), and
+`disconnect()` leaves it as well (`Database/Connection.php:1064-1081`), so `transactionLevel()` can
+outlive the backend it describes (`Database/Concerns/ManagesTransactions.php:341-344`). Classification
+is **substring matching on the message**, not SQLSTATE (`Database/LostConnectionDetector.php:17-105`).
+
+**Measured shapes.**
+
+| What | Observed on this stack |
+|---|---|
+| `pg_locks` for a two-integer advisory key | `locktype 'advisory'`, `classid` = first int, `objid` = second int, **`objsubid` = 2**, `mode` `ShareLock`/`ExclusiveLock`, `granted` boolean, `pid` = holder. Advisory locks are per-database and `pg_locks` reports the whole cluster, so the query filters on the current database OID |
+| Bounded advisory wait | `lock_timeout` **does** apply to advisory waits: `QueryException`, SQLSTATE `55P03` in both `errorInfo[0]` and `getCode()` as a **string**, message `canceling statement due to lock timeout`. The `statement_timeout` hang defense never fired |
+| `pg_terminate_backend`, no transaction open | No exception. Silent reconnect onto a **new backend pid**; the advisory lock is gone |
+| `pg_terminate_backend`, transaction open | `QueryException` wrapping `PDOException`, SQLSTATE **`HY000`** — *not* `57P01`. The message carries both `FATAL: terminating connection due to administrator command` and `server closed the connection unexpectedly`, and it is the **second** that `LostConnectionDetector` matches. **Classification is message based, so anything keying off SQLSTATE would misread this as a generic error.** `transactionLevel()` still reported `1` |
+| Immediate `push()` inside an open transaction | Redis held the message while the observer still read the pre-update row. `JobQueued` fired on the named connection at spike `transactionLevel() === 1` |
+| `after_commit => true` twin | Queue empty inside the closure, one message after commit, `JobQueued` at `transactionLevel() === 0` |
+
+**Test-only artifacts.** The spike writes Redis on **logical database 15**, pinned in its own
+connection config with an empty key prefix, and deletes only the eight keys it can create, by name —
+never `KEYS *`, `flushdb` or `flushall`. Database 15 is chosen to reduce blast radius and is **not**
+claimed as exclusively owned; correctness comes from the key list. The outbox surrogate
+`spike_outbox_delivery` is a **three-column test-only table** (`event_id`, `last_published_at`,
+`publish_count`) in `ledgerflow_test` only, and is not a proposal for `payment_outbox`.
+
+### The environment-precedence defect T4 found, and its repair
+
+`phpunit.xml` declared `QUEUE_CONNECTION=sync`, `CACHE_STORE=array` and `SESSION_DRIVER=array` with
+`force="true"`, but **PHPUnit writes only `putenv()` and `$_ENV`, never `$_SERVER`** — the same defeat
+mechanism `tests/bootstrap.php` already documented for the database keys. Compose's `env_file` puts
+the Redis-backed development values into `$_SERVER`, and Laravel's env resolver reads `$_SERVER`
+first, so all three declarations silently lost.
+
+**Measured before the repair:** `config('queue.default')` was `redis`, `config('cache.default')` was
+`redis`, `config('session.driver')` was `redis`. The suite's **default queue connection was a real
+Redis queue on logical database 0** — the database a developer's stack uses. Nothing in the suite
+dispatched without naming a connection, so no data was written, but any future unnamed dispatch would
+have gone straight into that keyspace.
+
+**Repair.** `tests/bootstrap.php` now validates those three declared values the same way it validates
+the database keys — refusing rather than silently substituting if `phpunit.xml` stops declaring them —
+and then forces them into `$_SERVER`, `$_ENV` and `getenv()` before the autoloader runs. The
+agreement proof at the end of that file covers them too. Three assertions in
+`tests/Feature/InfrastructureContractTest.php` now check the **live** resolved objects: the default
+queue is a `SyncQueue`, the default cache store is an `ArrayStore`, and the session driver is `array`.
+`phpunit.xml` itself was not changed; it remains where the intent is declared, and the bootstrap is
+what makes it win.
+
+A suite that reaches Redis explicitly and by name is fine — `InfrastructureContractTest` still asserts
+real Redis connectivity, and the T4 spike uses named connections on database 15. What is not fine is
+reaching shared infrastructure through a framework default nobody chose.
+
+### What T4 deliberately did not add
+
+T4 is a compatibility spike. Every executable artifact it produced is test-only, under
+`Modules/Payments/tests/`, which `tests/Architecture/ModuleBoundaryTest.php` excludes from every layer
+scan and `phpstan.neon` excludes via `Modules/*/tests/*`. Recorded explicitly so a reader does not go
+looking for artifacts that were never created:
+
+- **No dependency.** `composer.json` and `composer.lock` are untouched.
+- **No production Payments types.** Both `Domain` layers are still empty; every fixture is named
+  `Spike*` and lives in the test tree.
+- **No production schema.** `spike_outbox_delivery` exists only in `ledgerflow_test`, created by the
+  test harness. `database/migrations/` and `Modules/Payments/database/migrations/` gained nothing.
+- **No configuration published, and no `phpunit.xml` change.** The spike registers its Redis and queue
+  connections at runtime, in `config()`, per test.
+- **No Horizon, no scheduler, no relay command, no worker.** Nothing consumes a published message.
+- **No ADR, no `Domain` allowlist, no architecture-rule exception.**
+  `tests/Architecture/ModuleBoundaryTest.php` and `BaselineTest.php` are unchanged, because no vendor
+  type entered production module code.
+
+What T4 did add, by category:
+
+- the test-only spike under `Modules/Payments/tests/` — `SpikeAdvisoryLock`, `SpikeRelayQueue`,
+  `SpikeRelayJob`, `SpikeRelayAttempt`, additions to `SpikeDatabase` and `SpikeFailureSwitch`, and two
+  Pest suites proving Q6–Q10;
+- the test-isolation repair in `tests/bootstrap.php` and its three contract assertions in
+  `tests/Feature/InfrastructureContractTest.php`;
+- documentation: this file, [outbox delivery](../payments/outbox-delivery.md),
+  [verification and rebuild](../payments/verification-and-rebuild.md),
+  [the roadmap](../../roadmap.md), and `AGENTS.md`.
+
+The measured invariant results live in
+[outbox delivery](../payments/outbox-delivery.md#blocking-compatibility-evidence).
+
 ## Editor and ignore policy
 
 `.gitignore` excludes IDE metadata such as `.idea/`, `.vscode/`, `.cursor/`, `.codex/`, `.fleet/`,
@@ -373,7 +507,10 @@ Recorded so they are not rediscovered as surprises:
   used.
 - **`make test` leaves `postgres` and `redis` running.**
 - **The `$_SERVER` env-precedence trap** that let the suite reach the development database is fixed
-  in `tests/bootstrap.php`, but the fix is not itself covered by a test.
+  in `tests/bootstrap.php`. T4 found the same trap defeating the queue, cache and session
+  declarations and extended the fix to them; those three *are* covered by live assertions in
+  `tests/Feature/InfrastructureContractTest.php`. The database half of the fix still has no test of
+  its own.
 - **CI has no Docker layer caching**, deliberately: `docker compose build` cannot use the Actions
   cache backend without a buildx bake setup that local development would not share.
 

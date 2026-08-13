@@ -33,6 +33,19 @@ declare(strict_types=1);
  *   - A cached bootstrap/cache/config.php makes Laravel ignore the environment
  *     entirely and use whatever was compiled into the cache.
  *
+ * THE SAME TRAP, A SECOND BLAST RADIUS
+ * ------------------------------------
+ * The database keys were fixed here first because they were the loudest. The
+ * queue, cache and session keys have exactly the same defeat mechanism and were
+ * left declared-but-not-enforced until T4 measured it: config('queue.default')
+ * resolved to 'redis', not the declared 'sync', so the suite's DEFAULT queue was
+ * a real Redis queue on logical database 0 — the database a developer's stack
+ * uses. An unnamed dispatch would have written into it, and a cache or session
+ * write would have shared that keyspace too.
+ *
+ * A suite that reaches Redis explicitly and by name is fine. A suite that
+ * reaches it through a framework default nobody chose is not.
+ *
  * @see docs/testing/payments-resilience.md — SQLite is not a substitute for
  *      PostgreSQL concurrency and advisory-lock behaviour.
  */
@@ -41,13 +54,35 @@ const LEDGERFLOW_TEST_DATABASE = 'ledgerflow_test';
 /** Hosts the suite may reach. Mirrors the Makefile allowlist. */
 const LEDGERFLOW_ALLOWED_HOSTS = ['postgres', '127.0.0.1', 'localhost', '::1'];
 
-$ledgerflowRefuse = static function (string $reason, string $detail): never {
+/**
+ * Isolation defaults phpunit.xml declares, which must survive $_SERVER.
+ *
+ * These do not decide WHICH shared service the suite reaches; they keep it from
+ * reaching one at all through a default. Anything that genuinely needs Redis
+ * names its connection explicitly.
+ */
+const LEDGERFLOW_ISOLATION = [
+    'QUEUE_CONNECTION' => 'sync',
+    'CACHE_STORE' => 'array',
+    'SESSION_DRIVER' => 'array',
+];
+
+$ledgerflowRefuse = static function (string $reason, string $detail, ?string $closing = null): never {
     fwrite(STDERR, PHP_EOL);
     fwrite(STDERR, 'REFUSING TO RUN THE TEST SUITE'.PHP_EOL);
     fwrite(STDERR, '  '.$reason.PHP_EOL);
     fwrite(STDERR, '  '.$detail.PHP_EOL);
-    fwrite(STDERR, '  The suite truncates and re-migrates its database on every run,'.PHP_EOL);
-    fwrite(STDERR, '  so it may only ever target '.LEDGERFLOW_TEST_DATABASE.'.'.PHP_EOL);
+
+    // The database closing stays byte-identical to what it always printed; the
+    // isolation checks pass their own, because "it may only ever target
+    // ledgerflow_test" says nothing useful about a queue driver.
+    if ($closing === null) {
+        fwrite(STDERR, '  The suite truncates and re-migrates its database on every run,'.PHP_EOL);
+        fwrite(STDERR, '  so it may only ever target '.LEDGERFLOW_TEST_DATABASE.'.'.PHP_EOL);
+    } else {
+        fwrite(STDERR, '  '.$closing.PHP_EOL);
+    }
+
     fwrite(STDERR, PHP_EOL);
 
     exit(1);
@@ -156,9 +191,25 @@ if (! in_array($ledgerflowHost, LEDGERFLOW_ALLOWED_HOSTS, true)) {
     );
 }
 
+// Validate the isolation intent the same way, and for the same reason: if
+// someone edits phpunit.xml to point the suite's default queue back at Redis,
+// that is a decision to make deliberately, not one to have silently restored by
+// this file forcing a value nobody declared.
+foreach (LEDGERFLOW_ISOLATION as $ledgerflowKey => $ledgerflowWanted) {
+    $ledgerflowActual = $ledgerflowIntent($ledgerflowKey);
+
+    if ($ledgerflowActual !== $ledgerflowWanted) {
+        $ledgerflowRefuse(
+            $ledgerflowKey.' is not the declared test isolation value.',
+            $ledgerflowKey.'='.($ledgerflowActual === '' ? '(unset)' : $ledgerflowActual).", expected {$ledgerflowWanted}.",
+            'The suite must not reach shared queue, cache or session infrastructure through a default.',
+        );
+    }
+}
+
 // Make the validated intent authoritative across every source Laravel consults,
 // so $_SERVER can no longer shadow it.
-$ledgerflowForce = array_merge($ledgerflowExpected, [
+$ledgerflowForce = array_merge($ledgerflowExpected, LEDGERFLOW_ISOLATION, [
     'DB_HOST' => $ledgerflowHost,
     'DB_URL' => '',
 ]);
@@ -170,7 +221,12 @@ foreach ($ledgerflowForce as $ledgerflowKey => $ledgerflowValue) {
 }
 
 // Prove it: every source must now agree, or the forcing above did not take.
-foreach (['DB_CONNECTION', 'DB_HOST', 'DB_DATABASE'] as $ledgerflowKey) {
+$ledgerflowProven = array_merge(
+    ['DB_CONNECTION', 'DB_HOST', 'DB_DATABASE'],
+    array_keys(LEDGERFLOW_ISOLATION),
+);
+
+foreach ($ledgerflowProven as $ledgerflowKey) {
     foreach ($ledgerflowAllSources($ledgerflowKey) as $ledgerflowSource => $ledgerflowValue) {
         if ($ledgerflowValue !== $ledgerflowForce[$ledgerflowKey]) {
             $ledgerflowRefuse(
