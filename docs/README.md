@@ -42,5 +42,8 @@ Sanctum-authenticated application contract, and two deterministic seeded merchan
 `AGENTS.md` documents the commands that actually work, and
 [ADR 0001](adr/0001-custom-ddd-module-layout.md) records the module layout.
 
-T3 is next and owns the Spatie atomic-persistence and transaction-retry spike. No Payments behavior
-exists yet, and both `Domain` layers are deliberately empty.
+T3 and T4 proved the blocking compatibility invariants, and T5 landed the production Payments
+domain, the four Payments migrations and
+[ADR 0002](adr/0002-payments-domain-event-sourcing-allowlist.md). Payments' `Domain` holds
+`PaymentAggregate`, `PaymentInitiated` and two domain exceptions; Merchant's `Domain` remains
+deliberately empty. No HTTP endpoint is served yet — **T6 is next**.

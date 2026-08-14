@@ -30,12 +30,16 @@ Repo: `github.com/mythern/ledgerflow-api` (private now, public later — see **R
 - `nwidart/laravel-modules` (v13.0.0) — module registration, with
   `wikimedia/composer-merge-plugin` merging module manifests
 - `spatie/laravel-event-sourcing` (**v7.15.1**, installed by T3) — **Payments module only**. T3 used
-  it from a test-only spike and published none of its configuration or migrations: no application
-  migration exists under `database/migrations/`, and `stored_events` is **absent from the development
-  database `ledgerflow`**. The test-only harness does create and retain it in `ledgerflow_test`, from
-  migrations copied verbatim from the vendor stubs. Its resolved API surface, the three Spatie base
-  types that bear on the future Payments `Domain` allowlist, and the findings T5/T6 inherit are
-  recorded in [development environment](docs/specifications/foundation/development-environment.md)
+  it from a test-only spike; **T5 put it into production**. The package publishes its migrations and
+  never loads them, so T5 owns four migrations under `Modules/Payments/database/migrations/` —
+  `stored_events` and `snapshots` schema-identical to the vendor stubs, plus
+  `payment_idempotency_receipts` and `payment_outbox`. All four now exist in the development database
+  `ledgerflow` and in `ledgerflow_test`. `config/event-sourcing.php` is a hand-written **three-key**
+  file — `catch_exceptions => false` (literal, never `env()`), `event_class_map` with the single
+  production alias, and `enforce_event_class_map => false` — with every other key left on the vendor
+  default that `mergeConfigFrom()` supplies. Its resolved API surface, the Spatie base types the
+  Payments `Domain` allowlist permits, and the findings T6 inherits are recorded in
+  [development environment](docs/specifications/foundation/development-environment.md)
 - **T4 added no dependency.** It proved the advisory-lock and Redis-dispatch invariants against the
   already-resolved Laravel queue and phpredis, registering its Redis and queue connections at runtime
   in a test-only harness. The resolved queue/Redis/connection-loss behavior and the constraints T7
@@ -55,6 +59,17 @@ migrations, tests, and Composer autoloading require.
 
 - **Payments** — event-sourced. Lifecycle: `Initiated → Authorized → Captured → Settled/Failed →
   Refunded`. Idempotency and compensating actions are first-class concerns.
+
+  **Only the first transition exists.** T5's `Domain` holds `PaymentAggregate` — one command,
+  `initiate()`, taking scalars because `AggregateRoot::apply()` would re-invoke a command method
+  typed against the event — plus the immutable `PaymentInitiated` and the exceptions
+  `InvalidPaymentInitiation` and `PaymentAlreadyInitiated`. Authorized, Captured, Settled, Failed and
+  Refunded have no code: inventing their transitions before a use case needs them is schema by
+  anticipation. `PaymentInitiated` carries the stable alias `payments.payment_initiated`, schema
+  version `1` from an overridden `eventVersion()` rather than a Spatie attribute, and exactly six
+  durable payload fields — `eventId`, `paymentId`, `merchantId`, `amountMinor`, `currency`,
+  `occurredAt` — where `occurredAt` is a canonical ISO-8601 **UTC microsecond** string
+  (`Y-m-d\TH:i:s.uP`), not a `DateTimeInterface`.
 - **Merchant** — plain CRUD on Eloquent. Its models (`Merchant`, `User`) live in
   `app/Infrastructure/Persistence/Eloquent`, and its `Domain` layer is deliberately empty: a domain
   entity, identifier value object, or repository interface arrives with the first Merchant use case
@@ -146,9 +161,25 @@ T4 also found and repaired a test-isolation defect: `phpunit.xml`'s queue, cache
 declarations were losing to `$_SERVER`, so the suite's default queue was a real Redis queue on
 logical database 0. See **PostgreSQL and transport test isolation** below.
 
-**T5 is next and has not been started.** Still true after T4: no production Payments behavior exists,
-both `Domain` layers are deliberately empty, no Payments `Domain` allowlist or ADR has been granted,
-and `tests/Architecture/` is unchanged.
+T5 is complete. It put the first production Payments types on disk — `PaymentAggregate`,
+`PaymentInitiated` and two domain exceptions — behind
+[ADR 0002](docs/adr/0002-payments-domain-event-sourcing-allowlist.md), which grants Payments `Domain`
+exactly two external namespaced Spatie classes (`AggregateRoot`, `ShouldBeStored`), matched as exact
+names and scoped to that module. `tests/Architecture/ModuleBoundaryTest.php` carries the enforcing
+allowlist and its mutation tests. T5 also added the four Payments migrations, the minimal
+event-sourcing configuration, and the schema and persistence contracts that pin them.
+**Merchant's `Domain` is still deliberately empty** and remains subject to the unmodified rule.
+
+**T6 is next.** M3 is not complete: its exit needs T6's atomic idempotent initiation and Problem
+Details. T5 deliberately shipped no HTTP surface, no initiation handler, no idempotency arbitration,
+no transaction retry, and no outbox writer — `payment_outbox` and `payment_idempotency_receipts` have
+schema and proven-satisfiable contracts but no producer. **T6 owns the first writers for both**;
+T7 owns **transport delivery state** (`available_at`, `last_published_at`, `publish_count`,
+`consecutive_transport_failures`, `last_transport_error`); T8 owns the **projection outcome and
+threshold-driven exhaustion** (`projection_completed_at`, `projection_failure_count`,
+`last_projection_error`, `exhausted_at`). Exhaustion sits with T8 because only a confirmed
+consumer-handler failure increments the count that triggers it, and a transport outage must never
+exhaust a row.
 
 General delivery flow: Think → Plan → Build → Review → Test → Ship → Reflect. Once implementation
 starts, discovery of current code, conventions, tests, working-tree state, and nested instructions
@@ -246,9 +277,10 @@ guard reads the running container, so a stale container is refused rather than s
 
 ## Architecture Decisions
 
-[ADR 0001](docs/adr/0001-custom-ddd-module-layout.md) records the custom DDD module layout. Place
-further ADRs under `docs/adr/` using `docs/adr/README.md`. Remaining candidates include the Spatie
-Domain exception, PostgreSQL idempotency, Payments outbox, projection gate, three-repository
+[ADR 0001](docs/adr/0001-custom-ddd-module-layout.md) records the custom DDD module layout.
+[ADR 0002](docs/adr/0002-payments-domain-event-sourcing-allowlist.md) records the Payments `Domain`
+event-sourcing allowlist. Place further ADRs under `docs/adr/` using `docs/adr/README.md`. Remaining
+candidates include PostgreSQL idempotency, Payments outbox, projection gate, three-repository
 boundary, Filament admin boundary, Redis/Horizon and SQS workload ownership, application-image
 versus infrastructure ownership, and the OpenSearch adoption gate.
 

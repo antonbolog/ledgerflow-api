@@ -15,9 +15,15 @@ validation surface, the `Merchant` and `Payments` modules with enforced layer bo
 `Modules/Merchant` behind a Sanctum-authenticated application contract, and two deterministic
 seeded merchants and users.
 
-**No Payments behavior exists yet**, and no HTTP endpoint is served. Both modules' `Domain` layers
-are deliberately empty. The payment lifecycle, idempotency, outbox, projection and rebuild work all
-belong to later milestones described in [the roadmap](docs/roadmap.md).
+T1–T5 are complete. The Payments `Domain` now exists: `PaymentAggregate` records an immutable
+`PaymentInitiated`, admitted by
+[ADR 0002](docs/adr/0002-payments-domain-event-sourcing-allowlist.md)'s exact two-class allowlist,
+and four migrations create `stored_events`, `snapshots`, `payment_idempotency_receipts` and
+`payment_outbox`. Merchant's `Domain` is still deliberately empty.
+
+**No HTTP endpoint is served yet.** Only the first lifecycle transition exists, and nothing writes a
+receipt or an outbox row: idempotency arbitration, transaction retry, the relay, projection and
+rebuild all belong to T6 and later, described in [the roadmap](docs/roadmap.md). **T6 is next.**
 
 ## Quickstart
 

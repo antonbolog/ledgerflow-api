@@ -76,15 +76,47 @@ input, fingerprint, and response bytes are reused.
 
 ## Event contract
 
-`PaymentInitiated` is immutable and includes:
+**Implemented by T5** as `Modules\Payments\Domain\Payment\Events\PaymentInitiated`, a `final` class
+extending Spatie's `ShouldBeStored` with six `public readonly` promoted constructor properties. Those
+property names are the durable payload keys, and the stored document contains **exactly** them:
 
-- `event_id`, `payment_id`, and `merchant_id`;
-- `amount_minor` and canonical `currency`;
-- `occurred_at`;
-- stable event alias or schema version.
+| Payload key | Type | Notes |
+|---|---|---|
+| `eventId` | `string` | canonical lowercase UUIDv7 |
+| `paymentId` | `string` | canonical lowercase UUIDv7; equals `stored_events.aggregate_uuid` |
+| `merchantId` | `int` | positive |
+| `amountMinor` | `int` | 1 … 100 000 000 inclusive |
+| `currency` | `string` | canonical uppercase `USD` only |
+| `occurredAt` | `string` | ISO-8601 UTC, microsecond precision |
+
+The class validates all six in its constructor. That is the last line of defence, not the
+user-facing one: T6's request validation returns `422` first, and a domain exception reaching the
+HTTP path means the handler skipped canonicalization.
+
+**Stable identity is the alias, not the class name.** `PaymentInitiated::ALIAS` is
+`payments.payment_initiated`, mapped in `config/event-sourcing.php`, and it is what
+`stored_events.event_class` and `payment_outbox.event_type` carry — so the namespace can move
+without rewriting history. `enforce_event_class_map` stays `false` because the T3/T4 spikes persist
+test-only fixtures that must never appear in production configuration; an exact-equality test on the
+map enforces completeness instead.
+
+**Schema version is `1`, from an overridden `eventVersion()` method** rather than Spatie's
+`#[EventVersion]` attribute. The attribute would be a third vendor type in `Domain` and
+[ADR 0002](../../adr/0002-payments-domain-event-sourcing-allowlist.md) permits exactly two. Spatie's
+`ObjectNormalizer` filters `eventVersion` out of the payload unless the child declares a *property*
+of that name, so the override changes the stored key set not at all.
+
+**`occurredAt` is a string, deliberately.** Symfony's `DateTimeNormalizer` sits in Spatie's default
+normalizer chain and formats with RFC3339, which has **no sub-second component**, so a
+`DateTimeImmutable` property would silently truncate business time to whole seconds inside the stored
+payload. The canonical format is `Y-m-d\TH:i:s.uP` at offset `+00:00`, validated by a
+format round-trip that also rejects overflowing dates such as `2026-02-30`.
 
 Raw idempotency keys are hashed separately for lookup and never enter events, outbox payloads, or
 logs. Hashing gives fixed-width lookup and reduces casual plaintext exposure; it is not encryption.
+T5 proves only the narrow half of this: no schema column exists whose purpose is the raw key. **T6
+owes the rest** — once the real writer exists it must prove the raw key never reaches a stored event,
+an outbox payload, or a log line.
 
 ## Schema invariants
 
