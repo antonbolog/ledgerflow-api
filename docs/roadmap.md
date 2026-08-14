@@ -6,7 +6,9 @@ Spatie atomic-persistence and fresh-object retry invariants Q1–Q5; see the
 [initiation evidence](specifications/payments/initiation-and-idempotency.md#blocking-compatibility-evidence).
 T4 proved the advisory-lock and Redis-dispatch invariants Q6–Q10; see the
 [outbox evidence](specifications/payments/outbox-delivery.md#blocking-compatibility-evidence).
-**T5 is next** and has not been started.
+**T5 is complete**: the production Payments domain, the four Payments migrations, the minimal
+event-sourcing configuration, and [ADR 0002](adr/0002-payments-domain-event-sourcing-allowlist.md).
+**T6 is next**, and M3 stays open until it lands.
 
 ## Outcome
 
@@ -64,11 +66,19 @@ and the resolved framework behavior in
 
 Ship the synchronous write half without depending on queue availability.
 
-- T5 — Implement initiation aggregate, event, schema, and invariants.
-- T6 — Implement atomic idempotent payment initiation and Problem Details.
+- T5 — Implement initiation aggregate, event, schema, and invariants. **Complete.** `PaymentAggregate`
+  and the immutable `PaymentInitiated` live in `Modules/Payments/app/Domain`, admitted by
+  [ADR 0002](adr/0002-payments-domain-event-sourcing-allowlist.md)'s exact two-class allowlist.
+  Four migrations create `stored_events`, `snapshots`, `payment_idempotency_receipts` and
+  `payment_outbox`; a three-key `config/event-sourcing.php` pins the alias map and keeps handler
+  exceptions visible. A real `persist()` proves the alias, the six-field payload, microsecond
+  fidelity, deserialization of the readonly-promoted event, and that every required `payment_outbox`
+  column is derivable from a persisted event.
+- T6 — Implement atomic idempotent payment initiation and Problem Details. **Next.** It owns the
+  first writers for both `payment_idempotency_receipts` and `payment_outbox`.
 
 Exit: sequential/concurrent idempotency, mismatch, ownership, rollback, and allowlisted transaction
-retry pass against PostgreSQL.
+retry pass against PostgreSQL. **Not satisfied** — every clause belongs to T6.
 
 ### M4 — Relay, projection, and query
 

@@ -2,6 +2,12 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\DB;
+use Modules\Payments\Domain\Payment\Events\PaymentInitiated;
+use Spatie\EventSourcing\AggregateRoots\AggregateRoot;
+use Spatie\EventSourcing\Attributes\EventVersion;
+use Spatie\EventSourcing\EventHandlers\Projectors\Projector;
+use Spatie\EventSourcing\StoredEvents\ShouldBeStored;
 use Symfony\Component\Finder\Finder;
 
 /*
@@ -22,6 +28,24 @@ use Symfony\Component\Finder\Finder;
 */
 
 const LEDGERFLOW_MODULES_PATH = __DIR__.'/../../Modules';
+
+/**
+ * Fully-qualified class names a module's Domain may reference besides its own
+ * namespace. EXACT matches, never prefixes: a prefix of Spatie\EventSourcing\
+ * would admit Projector, StoredEvent and the Eloquent models alongside the two
+ * types ADR 0002 permits.
+ *
+ * Recorded in docs/adr/0002-payments-domain-event-sourcing-allowlist.md. That
+ * document explains the decision; this constant is what enforces it.
+ *
+ * @var array<string, list<string>>
+ */
+const LEDGERFLOW_DOMAIN_ALLOWLIST = [
+    'Payments' => [
+        AggregateRoot::class,
+        ShouldBeStored::class,
+    ],
+];
 
 function ledgerflowModulePath(string $module): string
 {
@@ -164,6 +188,33 @@ function ledgerflowHelperCalls(string $directory): array
     return $calls;
 }
 
+/**
+ * The Domain rule as a pure function over a reference map, so it can be run
+ * against fabricated input. A rule that can only run against the current tree
+ * is a rule whose failure path is never tested.
+ *
+ * @param  array<string, list<string>>  $references
+ * @return list<string>
+ */
+function ledgerflowDomainViolations(string $module, array $references): array
+{
+    $ownNamespace = "Modules\\{$module}\\Domain\\";
+    $allowed = LEDGERFLOW_DOMAIN_ALLOWLIST[$module] ?? [];
+    $violations = [];
+
+    foreach ($references as $file => $names) {
+        foreach ($names as $name) {
+            if (str_starts_with($name, $ownNamespace) || in_array($name, $allowed, true)) {
+                continue;
+            }
+
+            $violations[] = "Modules/{$module}/app/Domain/{$file} references {$name}.";
+        }
+    }
+
+    return $violations;
+}
+
 /** @param list<array{0: int, 1: string, 2: int}|string> $tokens */
 function ledgerflowPreviousToken(array $tokens, int $index): int|string|null
 {
@@ -202,20 +253,60 @@ dataset('modules', ledgerflowModules(...));
 | failure reports every violation at once instead of stopping at the first.
 */
 
-it('lets Domain reference nothing outside its own namespace', function (string $module): void {
-    $allowed = "Modules\\{$module}\\Domain\\";
-    $violations = [];
-
-    foreach (ledgerflowReferences(ledgerflowModulePath($module).'/app/Domain') as $file => $names) {
-        foreach ($names as $name) {
-            if (! str_starts_with($name, $allowed)) {
-                $violations[] = "Modules/{$module}/app/Domain/{$file} references {$name}.";
-            }
-        }
-    }
+it('lets Domain reference nothing outside its own namespace and the ADR 0002 allowlist', function (string $module): void {
+    $violations = ledgerflowDomainViolations(
+        $module,
+        ledgerflowReferences(ledgerflowModulePath($module).'/app/Domain'),
+    );
 
     expect($violations)->toBeEmpty(implode(PHP_EOL, $violations));
 })->with('modules');
+
+/*
+| The rule above passes vacuously while a Domain is empty, and it will keep
+| passing for Merchant forever. The tests below exercise the SAME function
+| against fabricated references, so the allowlist's failure path is tested
+| rather than assumed.
+*/
+
+it('grants the ADR 0002 exception to exactly two classes in exactly one module', function (): void {
+    // The behavioural tests below prove what the rule DOES with the allowlist.
+    // This one pins the allowlist itself, by value: a third entry, a second
+    // module key, or a substitution is a change to the ADR 0002 decision and has
+    // to fail here rather than quietly widen what Domain may reference.
+    expect(LEDGERFLOW_DOMAIN_ALLOWLIST)->toBe([
+        'Payments' => [
+            AggregateRoot::class,
+            ShouldBeStored::class,
+        ],
+    ]);
+});
+
+it('admits exactly the two ADR 0002 base types into Payments Domain', function (): void {
+    expect(ledgerflowDomainViolations('Payments', ['PaymentAggregate.php' => [
+        AggregateRoot::class,
+        ShouldBeStored::class,
+        PaymentInitiated::class,
+    ]]))->toBeEmpty();
+});
+
+it('refuses every other event-sourcing type in Payments Domain', function (string $forbidden): void {
+    // The projector is the one a careless allowlist admits: it is the third type
+    // the spike extended, and a namespace-prefix rule would let it through.
+    expect(ledgerflowDomainViolations('Payments', ['Fake.php' => [$forbidden]]))->not->toBeEmpty();
+})->with([
+    Projector::class,
+    EventVersion::class,
+    DB::class,
+]);
+
+it('grants the allowlist to Payments only', function (): void {
+    // Merchant has no event-sourced aggregate and no exception. If this passes,
+    // the allowlist has gone global and ADR 0002 is misdescribed.
+    expect(ledgerflowDomainViolations('Merchant', ['Fake.php' => [
+        AggregateRoot::class,
+    ]]))->not->toBeEmpty();
+});
 
 it('keeps Domain free of framework global helpers', function (string $module): void {
     $violations = [];

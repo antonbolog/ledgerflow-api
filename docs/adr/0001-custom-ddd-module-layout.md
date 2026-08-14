@@ -100,9 +100,13 @@ free to organise internally, which is exactly the drift the Payments/Merchant sp
 - PHPStan level 10 is now exercised against real Eloquent code and holds with no baseline. The cost
   is `@property` annotations on models: attribute access and assignment are typed from them, and an
   incomplete list fails analysis rather than silently passing, which is the safe direction.
-- The Payments exception for event-sourcing base types is **not** granted here. Payments `Domain` is
-  currently subject to the same rule as Merchant's. The task that introduces those base types records
-  the exact permitted classes and narrows the rule to that allowlist.
+- The Payments exception for event-sourcing base types was **not** granted here, deliberately: the
+  permitted classes could not be named honestly before a task needed them in production code.
+  [ADR 0002](0002-payments-domain-event-sourcing-allowlist.md) grants it, and narrows it to exactly
+  `Spatie\EventSourcing\AggregateRoots\AggregateRoot` and
+  `Spatie\EventSourcing\StoredEvents\ShouldBeStored`, matched as exact class names and **only for the
+  Payments module**. `Projector` is named and excluded. Merchant's `Domain` remains subject to the
+  unmodified rule above.
 - Empty `Domain` directories are a deliberate state, not an unfinished one. A reviewer expecting a
   populated domain layer in every module should read this section rather than file it as a gap.
 

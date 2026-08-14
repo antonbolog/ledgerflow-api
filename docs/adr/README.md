@@ -21,10 +21,12 @@ Use sequential names such as `0001-custom-ddd-module-layout.md`; do not put date
 
 - [0001](0001-custom-ddd-module-layout.md) — Own the DDD module layout in this repository rather than
   adopting an opinionated third-party scaffolding package. Accepted, implemented by T2.
+- [0002](0002-payments-domain-event-sourcing-allowlist.md) — Permit only `AggregateRoot` and
+  `ShouldBeStored` in Payments `Domain`, matched exactly and scoped to that module. Accepted,
+  implemented by T5.
 
 ## Candidates
 
-- Permit only the named Spatie event-sourcing base types in Payments Domain.
 - Use PostgreSQL durable idempotency rather than rate limiting or Redis as authority.
 - Use a Payments-specific transactional outbox for the learning slice.
 - Use a connection-affine PostgreSQL advisory-lock gate for projection rebuild.

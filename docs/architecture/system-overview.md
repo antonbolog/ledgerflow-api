@@ -33,12 +33,19 @@ Each module uses `Domain / Application / Infrastructure / Http`, recorded in
 `tests/Architecture/ModuleBoundaryTest.php`. Domain code stays independent of Laravel, Eloquent,
 HTTP, Redis, and queue types.
 
-A Payments-only exception for the Spatie aggregate and event base types is **planned but not
-granted**. The enforced rule currently applies to Payments exactly as it does to Merchant: Domain
-may reference nothing outside its own namespace. The task that introduces those base types is the
-one that records the exact permitted classes, in its own ADR, and narrows the rule to that
-allowlist. Until then there is no exception to rely on, and nothing in Payments Domain may import a
-vendor type.
+A Payments-only exception for the Spatie aggregate and event base types is **granted**, by
+[ADR 0002](../adr/0002-payments-domain-event-sourcing-allowlist.md), which T5 recorded when it put
+the first vendor base type into production module code. Payments `Domain` may reference exactly two
+external namespaced package classes — `Spatie\EventSourcing\AggregateRoots\AggregateRoot` and
+`Spatie\EventSourcing\StoredEvents\ShouldBeStored` — matched as **exact class names, never
+namespace prefixes**, and only in that module. `Projector` is named and excluded: it writes a read
+model and belongs in `Infrastructure`, where the unmodified rules already permit it.
+
+Merchant's `Domain` has no entry and stays under the original rule: it may reference nothing outside
+its own namespace. Native single-segment PHP types are outside the rule in both modules, as ADR
+0001's scanner semantics already described; ADR 0002 adds no native-type allowlist. Any further
+vendor type in Payments `Domain` needs a new ADR — `LEDGERFLOW_DOMAIN_ALLOWLIST` in
+`tests/Architecture/ModuleBoundaryTest.php` fails on anything not spelled out there.
 
 ## Source-of-truth hierarchy
 

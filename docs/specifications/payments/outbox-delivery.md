@@ -37,6 +37,57 @@ The hot-path partial index is `(available_at, event_id)` where
 `projection_completed_at IS NULL AND exhausted_at IS NULL`. Eligibility also requires
 `available_at <= now`.
 
+**Created by T5**, which owns the shape only. Three additions beyond the list above are recorded
+here rather than left implicit:
+
+- **`unique (aggregate_uuid, aggregate_version)`**, named
+  `payment_outbox_aggregate_version_unique`. This mirrors the key `stored_events` already enforces,
+  so a duplicate envelope for one aggregate version is **impossible** rather than merely detectable
+  by M5's verifier. It can never fire spuriously, because the source table cannot produce a colliding
+  pair. Beyond the literal text above, and cheaper now than a migration plus a data check later.
+- **No `CHECK (… >= 0)` constraints on the three counters.** PostgreSQL has no unsigned integer, so a
+  check would be the only enforcement of a non-negative invariant. **T5 deliberately ships none,
+  because no production writer exists yet** — a constraint added now would guard columns nothing
+  writes.
+
+  The decision splits along the same line as the columns. **T7 owns the non-negative invariant for
+  `publish_count` and `consecutive_transport_failures`**; **T8 owns it for
+  `projection_failure_count`**. T6 creates the initial row and should let all three take their zero
+  defaults rather than supplying them.
+- **The two Payments-authored keys are named explicitly** —
+  `payment_outbox_aggregate_version_unique` and `payment_outbox_eligible_index` — because PostgreSQL
+  truncates identifiers at 63 bytes and a truncated name cannot be dropped by the name a later
+  migration computes. The primary key keeps Laravel's generated `payment_outbox_pkey`, and the
+  receipts table likewise keeps its generated primary-key and foreign-key names; `stored_events` and
+  `snapshots` keep the vendor stubs' generated names throughout. Every generated identifier across
+  the four tables — indexes and constraints, including PostgreSQL's own NOT NULL constraint names —
+  was measured against the 63-byte limit; the longest is **58** characters
+  (`payment_idempotency_receipts_idempotency_key_hash_not_null`), so nothing truncates.
+
+Writer ownership is split across three tasks, and no envelope exists until the first of them lands:
+
+- **T6 inserts** the initial envelope, in the same transaction as the idempotency receipt and the
+  stored event. It is the first writer. T5 proved the row is *satisfiable* from a really-persisted
+  `PaymentInitiated` — `event_id`, `event_type`, `schema_version`, `aggregate_uuid`,
+  `aggregate_version`, `payload` and `occurred_at` all derive from the event or its stored row, and
+  the payload is jsonb-equal to `stored_events.event_properties`. That derivation lives in a T5 test;
+  **T6 should lift it rather than reinvent it.**
+- **T7 mutates transport state only**: `available_at`, `last_published_at`, `publish_count`,
+  `consecutive_transport_failures`, `last_transport_error`. It never writes `exhausted_at`.
+- **T8 records consumer outcome, and owns exhaustion**: `projection_completed_at` on success, and on
+  a confirmed handler failure `projection_failure_count`, `last_projection_error` **and the
+  threshold-driven `exhausted_at`, in one transaction**.
+
+  Exhaustion belongs with the counter that triggers it. The rules above already require it: an
+  arbitrarily long transport outage never sets `exhausted_at`, only a confirmed consumer-handler
+  exception increments the poison count, and exhaustion is reached when that count crosses its
+  threshold. Splitting the increment from the threshold check across two owners would make the
+  decision race — the count could reach five in T8 while T7 evaluated a stale value, exhausting a
+  row early or never. One writer, one transaction, no race.
+
+  `payments:outbox:retry {eventId}` **clears** `exhausted_at` after operator correction. That is a
+  third surface, neither relay nor consumer, and it is the only path that unsets the column.
+
 ## Initial relay algorithm
 
 The first slice implements lock-through-push:

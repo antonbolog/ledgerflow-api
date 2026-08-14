@@ -152,17 +152,16 @@ Read from `vendor/spatie/laravel-event-sourcing` at 7.15.1 during T3. Everything
 citation, not a reading of the package's documentation.
 
 **The three Spatie base types that bear on the Payments `Domain` allowlist.** They are listed
-together because the spike extends all three, **not** because they share a destination. Only the
-first two are candidates for a future Payments `Domain` allowlist; the third belongs in
-`Infrastructure` and is not part of that exception at all.
-[ADR 0001](../../adr/0001-custom-ddd-module-layout.md) reserves the decision for the task that first
-puts one in production code:
+together because the spike extends all three, **not** because they share a destination. **T5 settled
+this in [ADR 0002](../../adr/0002-payments-domain-event-sourcing-allowlist.md)**: the first two are
+permitted in Payments `Domain`, matched as exact class names and in that module only; the third is
+named and excluded, and belongs in `Infrastructure` where the unmodified rules already permit it.
 
-| Type | Kind | Layer it would live in | Source |
+| Type | Kind | Layer it lives in | Source |
 |---|---|---|---|
-| `Spatie\EventSourcing\AggregateRoots\AggregateRoot` | abstract class | `Domain` — **allowlist candidate** | `src/AggregateRoots/AggregateRoot.php:26` |
-| `Spatie\EventSourcing\StoredEvents\ShouldBeStored` | abstract class | `Domain` — **allowlist candidate** | `src/StoredEvents/ShouldBeStored.php:12` |
-| `Spatie\EventSourcing\EventHandlers\Projectors\Projector` | abstract class, implements `EventHandler` | `Infrastructure` — **not** an allowlist candidate | `src/EventHandlers/Projectors/Projector.php:7` |
+| `Spatie\EventSourcing\AggregateRoots\AggregateRoot` | abstract class | `Domain` — **permitted (ADR 0002)** | `src/AggregateRoots/AggregateRoot.php:26` |
+| `Spatie\EventSourcing\StoredEvents\ShouldBeStored` | abstract class | `Domain` — **permitted (ADR 0002)** | `src/StoredEvents/ShouldBeStored.php:12` |
+| `Spatie\EventSourcing\EventHandlers\Projectors\Projector` | abstract class, implements `EventHandler` | `Infrastructure` — **excluded by name** | `src/EventHandlers/Projectors/Projector.php:7` |
 
 These three are not everything the spike subclassed: it also extends `EloquentStoredEvent` and
 `EloquentSnapshot`, both test-only `Infrastructure` persistence models that raise no allowlist
@@ -199,9 +198,11 @@ connection that repository's model resolves to.
   (`laravel-package-tools/src/Concerns/PackageServiceProvider/ProcessMigrations.php:39-41`,
   `Concerns/Package/HasMigrations.php:7`). Confirmed by `artisan migrate:status`, which does not list
   `create_stored_events_table` even with the provider discovered. **No application migration creates
-  `stored_events` until someone publishes that one.** T3 published none, so the table is absent from
-  the development database `ledgerflow`; the test-only spike harness creates it in `ledgerflow_test`
-  from its own verbatim copy of the stub.
+  `stored_events` until the application owns one.** That was the state through T3 and T4. **T5 now
+  owns four migrations** under `Modules/Payments/database/migrations/`, so `stored_events` and
+  `snapshots` — schema-identical to the vendor stubs — plus `payment_idempotency_receipts` and
+  `payment_outbox` exist in `ledgerflow` and `ledgerflow_test`. The spike harness creates its copies
+  only when the tables are absent, so from T5 onward the T3/T4 suites run against these migrations.
 - **Its configuration does not need publishing.** `hasConfigFile()` routes through
   `ProcessConfigs::registerPackageConfigs()`, which calls `mergeConfigFrom()` during `register()`
   (`laravel-package-tools/src/Concerns/PackageServiceProvider/ProcessConfigs.php:7-27`), so every
@@ -229,13 +230,20 @@ connection that repository's model resolves to.
   catches `Exception` and swallows it when `catchExceptions` is true (`src/Projectionist.php:355-367`,
   flag set at `:42`). The shipped default is `false`
   (`config/event-sourcing.php:48`, `env('EVENT_PROJECTOR_CATCH_EXCEPTIONS', false)`), so a failing
-  synchronous handler propagates and takes the caller's transaction down with it. **Setting
-  `EVENT_PROJECTOR_CATCH_EXCEPTIONS=true` would silently break the Payments outbox atomicity
-  guarantee**, because the stored event would persist while its outbox row did not.
-- **No event class map is required.** `enforce_event_class_map` defaults to `false` and
-  `event_class_map` to `[]` (`config/event-sourcing.php:90,97`), so
+  synchronous handler propagates and takes the caller's transaction down with it. A `true` value
+  **would silently break the Payments outbox atomicity guarantee**, because the stored event would
+  persist while its outbox row did not.
+
+  **T5 closed that hole.** The application's `config/event-sourcing.php` pins `catch_exceptions` to a
+  **literal `false`**, so the environment variable is no longer consulted at all and no deployment can
+  set it. A test reads the application file directly — `require`, plus a token scan proving the file
+  contains no `env()` call — because the merged runtime value is `false` either way and therefore
+  cannot tell a deliberate pin from a deleted key.
+- **No event class map is required by the package.** `enforce_event_class_map` defaults to `false`
+  and `event_class_map` to `[]` (`config/event-sourcing.php:90,97`), so
   `EloquentStoredEventRepository::getEventClass()` stores the fully-qualified class name
-  (`:163-177`).
+  (`:163-177`). **T5 nonetheless supplies one** — not because the package demands it, but because the
+  alias is what lets the namespace move without rewriting history. See **What T5 added** below.
 - **A duplicate aggregate version does not surface as a database error.**
   `persistWithoutApplyingToEventHandlers()` catches `QueryException`, and for a
   `UniqueConstraintViolationException` rethrows it as `CouldNotPersistAggregate::invalidVersion()`
@@ -269,6 +277,10 @@ Both wrap a `PDOException` and both carry the SQLSTATE in `errorInfo[0]` and in 
 version behavior above possible.
 
 ### What T3 deliberately did not add
+
+> **Historical record of T3, superseded in part by T5.** The four bullets below were true when T3
+> landed and remain an accurate account of *that task*. T5 has since added production types, schema
+> and configuration; where a bullet reads in the present tense, **What T5 added** below is current.
 
 T3 is a compatibility spike. Every executable artifact it produced — spike fixtures, the copied
 migrations, the schema they create, and the retry runner — is test-only, under
@@ -411,6 +423,10 @@ reaching shared infrastructure through a framework default nobody chose.
 
 ### What T4 deliberately did not add
 
+> **Historical record of T4, superseded in part by T5.** True when T4 landed and still an accurate
+> account of *that task*. For the current state of production types, schema and configuration, see
+> **What T5 added** below.
+
 T4 is a compatibility spike. Every executable artifact it produced is test-only, under
 `Modules/Payments/tests/`, which `tests/Architecture/ModuleBoundaryTest.php` excludes from every layer
 scan and `phpstan.neon` excludes via `Modules/*/tests/*`. Recorded explicitly so a reader does not go
@@ -441,6 +457,85 @@ What T4 did add, by category:
 
 The measured invariant results live in
 [outbox delivery](../payments/outbox-delivery.md#blocking-compatibility-evidence).
+
+### What T5 added, and what it deliberately did not
+
+T5 is the first task with production Payments code. It added no dependency: `composer.json` and
+`composer.lock` are byte-identical to what T4 left.
+
+**Added:**
+
+- **Payments `Domain`** — `PaymentAggregate`, the immutable `PaymentInitiated`, and the exceptions
+  `InvalidPaymentInitiation` and `PaymentAlreadyInitiated`. Merchant's `Domain` is still empty.
+- **[ADR 0002](../../adr/0002-payments-domain-event-sourcing-allowlist.md)** and the narrowed
+  `LEDGERFLOW_DOMAIN_ALLOWLIST` in `tests/Architecture/ModuleBoundaryTest.php`, permitting exactly
+  two external namespaced Spatie classes — `AggregateRoots\AggregateRoot` and
+  `StoredEvents\ShouldBeStored` — matched as exact names, in the Payments module only. `Projector`
+  and `#[EventVersion]` are named and excluded. Native single-segment PHP types are unaffected: they
+  were always outside the rule by ADR 0001's scanner semantics, and no native-type allowlist exists.
+- **Four migrations** in `Modules/Payments/database/migrations/`. `stored_events` and `snapshots` are
+  schema-identical to the vendor stubs; `payment_idempotency_receipts` and `payment_outbox` are
+  Payments' own. All four now exist in `ledgerflow` as well as `ledgerflow_test`.
+- **`config/event-sourcing.php`**, hand-written with three keys only.
+- **`Modules/*/tests/Unit` in the `phpunit.xml` Unit suite**, so module unit tests are collected at
+  all. Nothing inside `<php>` was touched.
+
+**Findings that shaped those artifacts:**
+
+- **`snapshots` is required even though nothing writes it.**
+  `AggregateRoot::reconstituteFromEvents()` calls `getSnapshotRepository()->retrieve($uuid)`
+  unconditionally, and it is the only body reachable from either uuid-binding path — `retrieve()` and
+  `loadUuid()`. `EloquentSnapshotRepository::retrieve()` selects from `snapshots` via a `scopeUuid()`
+  the model really declares. No configuration switch skips it. The alternative, overriding
+  reconstitution or installing a null repository, buys one empty table at the price of an aggregate
+  that cannot be replayed.
+- **Schema version comes from an overridden `eventVersion()`, not `#[EventVersion]`.** The attribute
+  would be a third `Domain` type. Spatie's `ObjectNormalizer` filters `eventVersion` out of the
+  payload unless the child declares a *property* of that name, so an overridden method changes the
+  durable key set not at all — measured, not assumed.
+- **`enforce_event_class_map` stays `false`.** Turning it on throws for any unmapped class, and the
+  T3/T4 spikes persist test-only fixtures that must never enter production configuration. An
+  exact-equality test on the map gives the same guarantee at `make check` time instead.
+- **The dotted alias key is safe.** `Arr::get()` checks `Arr::exists()` *before* it splits on `.`, so
+  `event_class_map['payments.payment_initiated']` resolves as a literal key and never as nested
+  `['payments']['payment_initiated']`.
+- **`occurredAt` is a string because RFC3339 has no sub-second component.** Symfony's
+  `DateTimeNormalizer` is in the default normalizer chain, so a `DateTimeImmutable` property would
+  silently truncate business time to whole seconds inside the stored payload.
+- **`Schema\Builder::$defaultTimePrecision` is `0`**, so a bare `$table->timestamp()` yields
+  `timestamp(0)` in PostgreSQL, which **rounds to whole seconds**. Every Payments-owned timestamp
+  therefore declares `timestampTz(…, 6)`.
+- **PostgreSQL truncates identifiers at 63 bytes.** Laravel's generated name for the receipts
+  merchant/key unique would be 68 characters, and a truncated name cannot be dropped by the name a
+  later migration computes. The **Payments-authored** keys are named explicitly — the two receipts
+  uniques, the receipts composite index, the outbox aggregate-version unique and the outbox partial
+  index. Generated names remain on the primary keys, the receipts foreign key and both vendor tables.
+  Every generated identifier across the four tables, constraints included, was measured against the
+  limit; the longest is 58 characters
+  (`payment_idempotency_receipts_idempotency_key_hash_not_null`).
+- **A failed statement aborts the whole transaction.** Any test that expects a constraint violation
+  and then keeps asserting must wrap the failing statement in a nested transaction, which Laravel
+  compiles to `SAVEPOINT` / `ROLLBACK TO SAVEPOINT`. Without it every later statement returns
+  `25P02`. T6 will need this throughout.
+
+**Deliberately not added, and not claimed:**
+
+- **No commit-boundary evidence of its own.** T5's persistence tests run inside `RefreshDatabase`'s
+  wrapping transaction. Real cross-connection commit atomicity is T3's measurement and is not
+  restated here as new.
+- **No concurrency.** No second process, no second connection, no `SKIP LOCKED`, no advisory lock,
+  no transaction retry.
+- **No outbox writer.** `payment_outbox` has schema and a derivation proof, not a producer. T6 owns
+  the projector, its `ShouldQueue` prohibition and its registration — including that
+  `auto_discover_projectors_and_reactors` defaults to `[app()->path()]` and never scans `Modules/`.
+- **No receipt writer.** `payment_idempotency_receipts` is written only by test fixtures.
+- **No relay, queue, worker, projector, command, route, controller or query.** Nothing was enqueued
+  and no handler was registered.
+- **No query plan asserted.** The eligibility index is proven to exist, partial, on the documented
+  columns, with its two predicates joined by `AND`. The planner remains free to choose a sequential
+  scan on a handful of rows, and no test pretends otherwise.
+- **No snapshot ever written.** `snapshots` is created and only read.
+- **`40P01` and `40001` remain unmeasured**, exactly as T3 left them.
 
 ## Editor and ignore policy
 
@@ -496,12 +591,15 @@ Recorded so they are not rediscovered as surprises:
   only `tests/bootstrap.php` is analysed from `tests/`, and module suites are excluded by
   `Modules/*/tests/*`. The trailing `/*` is load-bearing: PHPStan matches that pattern against file
   paths, so without it the exclusion silently does nothing. The suites are verified by running them.
-- **PHPStan level 10 holds against the code T2 landed.** Eloquent models, factories, a seeder and a
-  container binding all pass at level 10 with no baseline. The cost is `@property` annotations on
-  models: attribute access and assignment are typed from them, and an incomplete list fails analysis
-  rather than silently passing. Both `Domain` layers are still empty, so level 10 remains untested
-  against domain code proper; the earlier prediction that it would need lowering is deferred to the
-  Payments slice, not resolved.
+- **PHPStan level 10 holds against domain code too. Resolved, not deferred.** T2's Eloquent models,
+  factories, seeder and container binding pass at level 10 with no baseline; the cost there is
+  `@property` annotations on models, since attribute access and assignment are typed from them and an
+  incomplete list fails analysis rather than silently passing. **T5 populated the Payments `Domain`
+  and level 10 still holds with no baseline and no level change** — the aggregate, the immutable
+  event with its promoted `readonly` properties, and both exceptions were accepted as written. The
+  earlier prediction that the Payments slice would force a lowering did not come true. `phpstan.neon`
+  forbids a baseline in writing, so if a future slice cannot hold level 10 the level must be lowered
+  explicitly, with a recorded reason.
 - **Editing `.env` requires `make start`** before the app container observes the change. The
   database guard reads the running container, so a stale container is refused rather than silently
   used.
