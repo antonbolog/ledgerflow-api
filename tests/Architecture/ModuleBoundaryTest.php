@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+use Illuminate\Database\ConcurrencyErrorDetector;
+use Illuminate\Database\DetectsConcurrencyErrors;
 use Illuminate\Support\Facades\DB;
 use Modules\Payments\Domain\Payment\Events\PaymentInitiated;
 use Spatie\EventSourcing\AggregateRoots\AggregateRoot;
@@ -401,6 +403,45 @@ it('keeps app/ out of module internals', function (): void {
         foreach ($names as $name) {
             if (preg_match('/^Modules\\\\\w+\\\\(Domain|Infrastructure)\\\\/', $name) === 1) {
                 $violations[] = "app/{$file} references {$name}; the skeleton must not reach into a module's internals.";
+            }
+        }
+    }
+
+    expect($violations)->toBeEmpty(implode(PHP_EOL, $violations));
+});
+
+it('never delegates concurrency classification to laravel', function (): void {
+    // Laravel's ConcurrencyErrorDetector matches 40001 by code and 40P01 only
+    // through the English message 'deadlock detected', and does not recognise
+    // 55P03 AT ALL — T3 measured it returning false for a real PostgreSQL 18.4
+    // lock conflict, the case this specification cares most about. Adopting it
+    // later would silently narrow the allowlist RetryingAtomicTransaction owns,
+    // and nothing else in the suite would notice: the runner would still retry
+    // two of the three states and simply stop retrying the third.
+    //
+    // EXACT NAMES, NOT PREFIXES, matching the ADR 0002 allowlist's discipline: a
+    // prefix of Illuminate\Database\ would forbid the ConnectionInterface and
+    // DeadlockException the Infrastructure layer legitimately depends on.
+    // ::class, not string literals — the same idiom as the ADR 0002 allowlist at
+    // the top of this file, and it means a Laravel rename cannot leave this rule
+    // silently matching a name that no longer exists.
+    $forbidden = [
+        DetectsConcurrencyErrors::class,
+        ConcurrencyErrorDetector::class,
+    ];
+
+    // Derived from disk over every module, so a third module is governed the
+    // moment it exists. ledgerflowTokens() excludes tests/, so this rule is about
+    // production source — a test may still NAME the detector to describe it.
+    $violations = [];
+
+    foreach (ledgerflowModules() as $module) {
+        foreach (ledgerflowReferences(ledgerflowModulePath($module)) as $file => $names) {
+            foreach ($names as $name) {
+                if (in_array($name, $forbidden, true)) {
+                    $violations[] = "Modules/{$module}/{$file} references {$name}; "
+                        .'concurrency classification is owned by RetryingAtomicTransaction::sqlStateOf().';
+                }
             }
         }
     }

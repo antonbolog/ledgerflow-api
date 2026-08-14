@@ -22,9 +22,15 @@ Repo: `github.com/mythern/ledgerflow-api` (private now, public later — see **R
   `redis:8.10.0-alpine`, `composer:2.8.12`. phpredis pinned to 6.3.0
 - `laravel/sanctum` (v4.3.3) — installed in T2 for merchant-user identity. Its migration does **not**
   load from the package, so T2 published
-  `database/migrations/2026_08_10_175810_create_personal_access_tokens_table.php`. `install:api` was
-  not run: no `routes/api.php`, no `api:` routing entry, no example route until a task serves a real
-  endpoint. Token abilities, expiry, and the SPA cookie-versus-token decision are deferred with it
+  `database/migrations/2026_08_10_175810_create_personal_access_tokens_table.php`. `install:api` has
+  still never been run; **T6 wrote by hand the only two parts of it that gained a consumer** —
+  `routes/api.php` and the `api:` entry in `bootstrap/app.php`. The example route and the rest of its
+  scaffolding remain absent. T6 proves real bearer-token authentication on that route, which
+  establishes the guard and **selects nothing for the SPA**: token abilities, expiration, the
+  cookie-versus-token mode, CORS/CSRF, deployment domains, and the rest of `config/sanctum.php` were
+  deliberately left undecided, and now belong to
+  [Merchant dashboard integration](docs/roadmap.md#merchant-dashboard-integration) rather than to the
+  task that served the first endpoint
 - Reverb, Horizon, and Filament arrive with their own milestones
 - Amazon SQS is planned for separately owned durable workloads; Horizon manages Redis queues only
 - `nwidart/laravel-modules` (v13.0.0) — module registration, with
@@ -46,7 +52,11 @@ Repo: `github.com/mythern/ledgerflow-api` (private now, public later — see **R
   inherits are recorded in
   [development environment](docs/specifications/foundation/development-environment.md)
 - `spatie/laravel-data` — DTOs. **Deferred**, not installed: a DTO package with no DTO is a
-  dependency with no consumer. It arrives with the first Payments DTO
+  dependency with no consumer. It arrives with the first DTO that needs **casting, transformation, or
+  more than one representation** — not merely with the first DTO. T6 shipped three DTO-shaped types
+  and still installed nothing: `FormRequest` already produces the validation failure shape, the
+  command context is immutable scalars in a layer whose boundary rule forbids external namespaced
+  classes, and the success body is contractually one pinned `json_encode()`
 - Pest + `pest-plugin-arch` (boundary enforcement), Larastan, Pint, Rector
 
 Custom DDD layout inside each module: `Modules/<Context>/app/{Domain,Application,Infrastructure,Http}`,
@@ -70,6 +80,14 @@ migrations, tests, and Composer autoloading require.
   durable payload fields — `eventId`, `paymentId`, `merchantId`, `amountMinor`, `currency`,
   `occurredAt` — where `occurredAt` is a canonical ISO-8601 **UTC microsecond** string
   (`Y-m-d\TH:i:s.uP`), not a `DateTimeInterface`.
+
+  **T6 added the layers above it, and no further transition.** `Application\Initiation` holds the
+  framework-free use case behind exactly two ports — `AtomicTransaction` and `IdempotencyReceipts` —
+  plus the immutable `PaymentInitiationContext` and the two exceptions that become `409` and `503`.
+  A clock port and an identifier port were deliberately **cut**: time and UUIDs are minted once in
+  the Http layer before the transaction opens, which makes regenerating them inside a retry
+  unrepresentable rather than merely discouraged. `Infrastructure` holds the two adapters and the
+  synchronous `PaymentOutboxWriter`. The lifecycle beyond `Initiated` is still uncoded.
 - **Merchant** — plain CRUD on Eloquent. Its models (`Merchant`, `User`) live in
   `app/Infrastructure/Persistence/Eloquent`, and its `Domain` layer is deliberately empty: a domain
   entity, identifier value object, or repository interface arrives with the first Merchant use case
@@ -131,7 +149,7 @@ See `docs/architecture/messaging-and-queues.md` for ownership rules.
 
 ## Development Workflow
 
-T1, T2, T3 and T4 are complete, closing Milestones 1 and 2. T1 established the Laravel 13 skeleton, the Docker runtime, the Makefile
+T1 through T6 are complete, closing Milestones 1, 2 and 3. T1 established the Laravel 13 skeleton, the Docker runtime, the Makefile
 command contract, and the validation surface. T2 established the `Merchant` and `Payments` modules
 with enforced layer boundaries, moved merchant-user identity into `Modules/Merchant` behind a
 Sanctum-authenticated application contract, added the required `users.merchant_id` foreign key, and
@@ -170,16 +188,39 @@ allowlist and its mutation tests. T5 also added the four Payments migrations, th
 event-sourcing configuration, and the schema and persistence contracts that pin them.
 **Merchant's `Domain` is still deliberately empty** and remains subject to the unmodified rule.
 
-**T6 is next.** M3 is not complete: its exit needs T6's atomic idempotent initiation and Problem
-Details. T5 deliberately shipped no HTTP surface, no initiation handler, no idempotency arbitration,
-no transaction retry, and no outbox writer — `payment_outbox` and `payment_idempotency_receipts` have
-schema and proven-satisfiable contracts but no producer. **T6 owns the first writers for both**;
-T7 owns **transport delivery state** (`available_at`, `last_published_at`, `publish_count`,
-`consecutive_transport_failures`, `last_transport_error`); T8 owns the **projection outcome and
-threshold-driven exhaustion** (`projection_completed_at`, `projection_failure_count`,
+T6 is complete, closing M3. It serves the repository's first API route, `POST /api/payments`, behind
+`auth:sanctum` from a root `routes/api.php` — root, because `ModuleBoundaryTest` forbids a module
+carrying a `routes` directory. One outer transaction on one connection, opened by an owned retry
+runner, commits the idempotency receipt, the stored event and the outbox envelope, or none of them.
+Arbitration is `INSERT … ON CONFLICT (merchant_id, idempotency_key_hash) DO NOTHING RETURNING id`
+with the conflict target **named**: this table also carries a global unique on `payment_id`, and an
+untargeted clause would swallow that collision and answer a permanent condition with a retryable
+`503`. An empty return means a committed, readable winner — measured, not assumed — whose stored
+bytes are replayed on a fingerprint match and refused with `409` otherwise. `40P01`, `40001` and
+`55P03` retry the whole closure at most three times with fresh aggregate and event objects built from
+an immutable context minted in the HTTP layer, so identifiers, occurrence time and response bytes
+cannot drift between attempts; exhaustion is `503` with `Retry-After: 1`. Every `/api/*` failure is
+RFC 9457 `application/problem+json`, mapped by **exception type first** because Laravel renders any
+non-`HttpException` as 500 before the hook runs. The mechanism and its measurements are recorded in
+[ADR 0003](docs/adr/0003-postgresql-idempotency-arbitration.md), and the per-invariant evidence in
+[initiation/idempotency](docs/specifications/payments/initiation-and-idempotency.md#implementation-evidence).
+T6 also installed **no** Composer dependency.
+
+**What T6 did not prove.** `40P01` and `40001` are still allowlisted and unit-classified and have
+never been produced against a real database — unchanged since T3. Its contention is two connections
+in one process; multi-process racing remains T12's. Nothing publishes, consumes or completes an
+envelope, and `GET /api/payments/{id}` does not exist, so the `Location` header points at a route T9
+creates. `PaymentOutboxWriter` is correct only on the live persist path and refuses loudly during a
+replay rather than deriving an envelope; whether a rebuild re-creates envelopes is T11's decision.
+No load, throughput, index-plan or rate-limiting claim.
+
+**T7 is next.** T7 owns **transport delivery state** (`available_at`, `last_published_at`,
+`publish_count`, `consecutive_transport_failures`, `last_transport_error`); T8 owns the **projection
+outcome and threshold-driven exhaustion** (`projection_completed_at`, `projection_failure_count`,
 `last_projection_error`, `exhausted_at`). Exhaustion sits with T8 because only a confirmed
 consumer-handler failure increments the count that triggers it, and a transport outage must never
-exhaust a row.
+exhaust a row. T6 wrote every envelope with all three counters at their zero defaults and touched
+none of those columns.
 
 General delivery flow: Think → Plan → Build → Review → Test → Ship → Reflect. Once implementation
 starts, discovery of current code, conventions, tests, working-tree state, and nested instructions
@@ -279,10 +320,12 @@ guard reads the running container, so a stale container is refused rather than s
 
 [ADR 0001](docs/adr/0001-custom-ddd-module-layout.md) records the custom DDD module layout.
 [ADR 0002](docs/adr/0002-payments-domain-event-sourcing-allowlist.md) records the Payments `Domain`
-event-sourcing allowlist. Place further ADRs under `docs/adr/` using `docs/adr/README.md`. Remaining
-candidates include PostgreSQL idempotency, Payments outbox, projection gate, three-repository
-boundary, Filament admin boundary, Redis/Horizon and SQS workload ownership, application-image
-versus infrastructure ownership, and the OpenSearch adoption gate.
+event-sourcing allowlist. [ADR 0003](docs/adr/0003-postgresql-idempotency-arbitration.md) records
+PostgreSQL idempotency arbitration — the complete receipt, the targeted `ON CONFLICT` target, and the
+repository-owned SQLSTATE retry allowlist. Place further ADRs under `docs/adr/` using
+`docs/adr/README.md`. Remaining candidates include the Payments outbox, projection gate,
+three-repository boundary, Filament admin boundary, Redis/Horizon and SQS workload ownership,
+application-image versus infrastructure ownership, and the OpenSearch adoption gate.
 
 ## Documentation Map
 

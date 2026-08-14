@@ -10,11 +10,15 @@ use Illuminate\Support\Facades\Schema;
 /**
  * Durable delivery intent for Payments events.
  *
- * T5 owns the shape only. Nothing writes here yet, and the writers arrive in
- * three distinct tasks:
+ * T5 owns the shape only, and the writers arrive in three distinct tasks. The
+ * first has landed; the other two have not:
  *
  * - T6 INSERTS the initial envelope, inside the same transaction as the
- *   idempotency receipt and the stored event. It is the first writer.
+ *   idempotency receipt and the stored event. It is the first writer, and it is
+ *   Modules/Payments/app/Infrastructure/Projectors/PaymentOutboxWriter — a
+ *   synchronous, non-queued projector that reads the payload back out of the
+ *   stored_events row the repository has just written, rather than re-serialising
+ *   the event. It supplies no counter, so all three take their zero defaults.
  * - T7 MUTATES TRANSPORT STATE ONLY: available_at, last_published_at,
  *   publish_count, consecutive_transport_failures, last_transport_error. It
  *   never writes exhausted_at — an arbitrarily long transport outage must not

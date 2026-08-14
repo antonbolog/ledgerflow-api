@@ -24,10 +24,12 @@ Use sequential names such as `0001-custom-ddd-module-layout.md`; do not put date
 - [0002](0002-payments-domain-event-sourcing-allowlist.md) — Permit only `AggregateRoot` and
   `ShouldBeStored` in Payments `Domain`, matched exactly and scoped to that module. Accepted,
   implemented by T5.
+- [0003](0003-postgresql-idempotency-arbitration.md) — Arbitrate payment idempotency in PostgreSQL
+  with a complete receipt, a targeted `ON CONFLICT` target, and a repository-owned SQLSTATE retry
+  allowlist. Accepted, implemented by T6.
 
 ## Candidates
 
-- Use PostgreSQL durable idempotency rather than rate limiting or Redis as authority.
 - Use a Payments-specific transactional outbox for the learning slice.
 - Use a connection-affine PostgreSQL advisory-lock gate for projection rebuild.
 - Split the system into `ledgerflow-api`, `ledgerflow-spa`, and `ledgerflow-infra` with explicit

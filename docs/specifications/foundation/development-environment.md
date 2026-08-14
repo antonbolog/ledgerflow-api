@@ -99,7 +99,12 @@ what it validates.
 **Deferred to the task with the first consumer**
 
 - `spatie/laravel-data` 4 — a DTO package with no DTO is a dependency with no consumer, which is the
-  same ground `laravel/pail` was removed on. It arrives with the first Payments DTO.
+  same ground `laravel/pail` was removed on. It arrives with the first DTO that needs **casting,
+  transformation, or more than one representation**. T6 shipped three DTO-shaped types and installed
+  nothing: `FormRequest` already produces the validation failure shape, the command context is an
+  immutable set of scalars that must live in a layer where the boundary rule forbids external
+  namespaced classes, and the success body is contractually one pinned `json_encode()` rather than a
+  transformer chain a package upgrade can re-order.
 
 **Installed and verified by T3**
 
@@ -139,12 +144,18 @@ Sanctum registers its own `sanctum` guard through `SanctumServiceProvider::confi
 by a test that authenticates a real bearer token. No guard entry was added to `config/auth.php`,
 because an unnecessary one is configuration nobody can later tell is load-bearing.
 
-**Deferred because T2 ships no API endpoint.** Token abilities are unscoped (`['*']` wherever a token
-is minted), `sanctum.expiration` is null so tokens do not expire, and the SPA cookie-versus-token
-decision named in [interfaces and realtime](../../architecture/interfaces-and-realtime.md) is
-untouched. `config/sanctum.php` is published in full, so its `stateful`, `guard`, `expiration` and
-`middleware` keys are unreviewed defaults. Whoever serves the first endpoint owns all four questions
-and should read that file rather than inherit it.
+**Still deferred, and T6 deliberately left them deferred.** T6 serves the first authenticated
+endpoint and proves real bearer-token authentication against this guard — which establishes that the
+guard works, not which session mode the SPA will use. Token abilities remain unscoped (`['*']`
+wherever a token is minted), `sanctum.expiration` remains null so tokens do not expire, and the SPA
+cookie-versus-token decision named in
+[interfaces and realtime](../../architecture/interfaces-and-realtime.md) is untouched.
+`config/sanctum.php` is published in full, so its `stateful`, `guard`, `expiration` and `middleware`
+keys are unreviewed defaults. All four questions — together with CORS, CSRF and the deployment
+domains — now belong to
+[Merchant dashboard integration](../../roadmap.md#merchant-dashboard-integration), not to whoever
+served the first endpoint: none of them can be answered before the SPA and its deployment topology
+are fixed. Read that file rather than inherit it.
 
 ### Spatie event sourcing, as actually installed
 
@@ -516,7 +527,7 @@ T5 is the first task with production Payments code. It added no dependency: `com
 - **A failed statement aborts the whole transaction.** Any test that expects a constraint violation
   and then keeps asserting must wrap the failing statement in a nested transaction, which Laravel
   compiles to `SAVEPOINT` / `ROLLBACK TO SAVEPOINT`. Without it every later statement returns
-  `25P02`. T6 will need this throughout.
+  `25P02`. T6's persistence tests used this pattern throughout.
 
 **Deliberately not added, and not claimed:**
 

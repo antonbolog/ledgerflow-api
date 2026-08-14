@@ -1,6 +1,6 @@
 # Ledgerflow Roadmap
 
-Status: **Milestones 1 and 2 complete.** T1 (Laravel foundation, Docker runtime, command contract,
+Status: **Milestones 1, 2 and 3 complete.** T1 (Laravel foundation, Docker runtime, command contract,
 validation surface, CI) and T2 (module boundaries and merchant-user identity) are done. T3 proved the
 Spatie atomic-persistence and fresh-object retry invariants Q1–Q5; see the
 [initiation evidence](specifications/payments/initiation-and-idempotency.md#blocking-compatibility-evidence).
@@ -8,7 +8,11 @@ T4 proved the advisory-lock and Redis-dispatch invariants Q6–Q10; see the
 [outbox evidence](specifications/payments/outbox-delivery.md#blocking-compatibility-evidence).
 **T5 is complete**: the production Payments domain, the four Payments migrations, the minimal
 event-sourcing configuration, and [ADR 0002](adr/0002-payments-domain-event-sourcing-allowlist.md).
-**T6 is next**, and M3 stays open until it lands.
+**T6 is complete**, closing M3: `POST /api/payments`, RFC 9457 Problem Details, and the first
+producers of `payment_idempotency_receipts` and `payment_outbox`, recorded in
+[ADR 0003](adr/0003-postgresql-idempotency-arbitration.md) with its evidence in the
+[implementation evidence](specifications/payments/initiation-and-idempotency.md#implementation-evidence)
+table. **T7 is next**, and M4 opens with it.
 
 ## Outcome
 
@@ -74,11 +78,25 @@ Ship the synchronous write half without depending on queue availability.
   exceptions visible. A real `persist()` proves the alias, the six-field payload, microsecond
   fidelity, deserialization of the readonly-promoted event, and that every required `payment_outbox`
   column is derivable from a persisted event.
-- T6 — Implement atomic idempotent payment initiation and Problem Details. **Next.** It owns the
-  first writers for both `payment_idempotency_receipts` and `payment_outbox`.
+- T6 — Implement atomic idempotent payment initiation and Problem Details. **Complete.** It owns the
+  first writers for both `payment_idempotency_receipts` and `payment_outbox`. `POST /api/payments`
+  commits the receipt, the stored event and the envelope in one transaction on one connection or
+  none of them; an identical merchant/key/payload replays the exact stored bytes, status and
+  `Location`; a mismatched payload is `409` and writes nothing new; the merchant comes only from the
+  authenticated user; `40P01`, `40001` and `55P03` retry the closure at most three times with fresh
+  aggregate and event objects, exhausting into `503` with `Retry-After: 1`; every `/api/*` failure is
+  `application/problem+json`. The mechanism is recorded in
+  [ADR 0003](adr/0003-postgresql-idempotency-arbitration.md). Delivery, projection and the read model
+  were deliberately out of scope and stay with T7–T9.
 
-Exit: sequential/concurrent idempotency, mismatch, ownership, rollback, and allowlisted transaction
-retry pass against PostgreSQL. **Not satisfied** — every clause belongs to T6.
+**M3 exit satisfied.** Sequential idempotency, mismatch, ownership, rollback and allowlisted
+transaction retry all pass against PostgreSQL, with commit-boundary claims proved from a suite that
+runs without `RefreshDatabase` and reads from a second backend — see the
+[implementation evidence](specifications/payments/initiation-and-idempotency.md#implementation-evidence).
+Two limits are carried forward rather than closed: `40P01` and `40001` remain allowlisted and
+unit-classified but have never been produced against a real database, and *concurrent* identical
+requests are proved only across two connections in one process. Genuine multi-process racing is
+[T12's](testing/payments-resilience.md).
 
 ### M4 — Relay, projection, and query
 
