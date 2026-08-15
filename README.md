@@ -15,15 +15,22 @@ validation surface, the `Merchant` and `Payments` modules with enforced layer bo
 `Modules/Merchant` behind a Sanctum-authenticated application contract, and two deterministic
 seeded merchants and users.
 
-T1–T5 are complete. The Payments `Domain` now exists: `PaymentAggregate` records an immutable
+T1–T6 are complete. The Payments `Domain` exists: `PaymentAggregate` records an immutable
 `PaymentInitiated`, admitted by
 [ADR 0002](docs/adr/0002-payments-domain-event-sourcing-allowlist.md)'s exact two-class allowlist,
 and four migrations create `stored_events`, `snapshots`, `payment_idempotency_receipts` and
 `payment_outbox`. Merchant's `Domain` is still deliberately empty.
 
-**No HTTP endpoint is served yet.** Only the first lifecycle transition exists, and nothing writes a
-receipt or an outbox row: idempotency arbitration, transaction retry, the relay, projection and
-rebuild all belong to T6 and later, described in [the roadmap](docs/roadmap.md). **T6 is next.**
+`POST /api/payments` is served. An authenticated merchant user initiates a payment; the idempotency
+receipt, the stored event and the outbox envelope commit in one transaction on one connection or not
+at all; an identical merchant/key/payload replays the exact stored response bytes; a mismatched
+payload is `409`; allowlisted PostgreSQL failures retry with fresh objects and exhaust into a `503`.
+Every `/api/*` failure is RFC 9457 `application/problem+json`. See
+[ADR 0003](docs/adr/0003-postgresql-idempotency-arbitration.md).
+
+**Nothing delivers the envelope yet.** The relay, the projection consumer, the read model and
+`GET /api/payments/{id}` belong to T7 and later, described in [the roadmap](docs/roadmap.md) — so the
+`Location` header points at a route that does not exist yet. **T7 is next.**
 
 ## Quickstart
 
@@ -36,13 +43,14 @@ make check     # composer validate + Pint + Rector + PHPStan + Pest
 ```
 
 `make install` leaves four healthy services and the API on <http://127.0.0.1:8080> (loopback only);
-`GET /up` is the health endpoint. `make` on its own prints the full command surface. Destructive
-targets require a typed confirmation: `make destroy CONFIRM=destroy`,
+`GET /up` is the health endpoint and `POST /api/payments` is the initiation endpoint, which requires
+a Sanctum bearer token and an `Idempotency-Key` header. `make` on its own prints the full command
+surface. Destructive targets require a typed confirmation: `make destroy CONFIRM=destroy`,
 `make db-reset CONFIRM=db-reset`.
 
-The Laravel foundation, Docker runtime, command contract, and validation surface are in place. The
-Payments domain, Merchant identity, and the module layout arrive in later milestones — see the
-[roadmap](docs/roadmap.md).
+The Laravel foundation, Docker runtime, command contract, validation surface, module layout,
+Merchant identity and the Payments write path are all in place. Asynchronous delivery, the read
+model, verification and rebuild arrive in later milestones — see the [roadmap](docs/roadmap.md).
 
 ## Repository ecosystem
 

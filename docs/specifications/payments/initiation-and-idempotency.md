@@ -34,9 +34,24 @@ but it is never authoritative.
 - scopes the key by merchant, so two merchants may use the same value independently.
 
 All API failures use `application/problem+json` with stable `type`, `title`, `status`, `detail`,
-`instance`, and `code`; validation also includes `errors`. The slice defines at least
-`unauthenticated`, `validation_failed`, `idempotency_payload_mismatch`,
-`idempotency_contention`, `projection_rebuilding`, and `payment_not_found`.
+`instance`, and `code`; validation also includes `errors`.
+
+**T6 defines seven codes and owns all of them**: `unauthenticated` (401), `validation_failed` (422),
+`idempotency_payload_mismatch` (409), `idempotency_contention` (503, with `Retry-After: 1`), plus
+`not_found` (404), `method_not_allowed` (405) and `internal_error` (500) so that no `/api/*` failure
+can escape in another shape. `type` is the relative URI reference `/problems/{code}` with hyphens,
+which RFC 9457 permits and which resolves against the request URI; `code` is the stable identifier
+and everything else derives from it.
+
+`projection_rebuilding` and `payment_not_found` belong to **T9's query endpoint** and deliberately do
+not exist yet — an enum case with no producer is a promise nothing keeps.
+
+Mapping is by **exception type first**, status code only as a fallback. This is required rather than
+stylistic: Laravel's `prepareJsonResponse()` gives any non-`HttpException` a 500 before the hook
+runs, and the Application-layer exceptions cannot implement Symfony's `HttpExceptionInterface`
+without breaking the module boundary rule — so a status-driven mapper would ship the `409` as a
+`500`. `detail` is a fixed client-safe sentence per code and never an exception message outside
+`app.debug`, because that string routinely carries SQL, table names and identifiers.
 
 ## Atomic write
 
@@ -46,8 +61,11 @@ response. Serialize the response body exactly once.
 
 Inside one outer PostgreSQL transaction:
 
-1. Insert a complete idempotency receipt with `INSERT ... ON CONFLICT DO NOTHING` against unique
-   `(merchant_id, idempotency_key_hash)`.
+1. Insert a complete idempotency receipt with
+   `INSERT ... ON CONFLICT (merchant_id, idempotency_key_hash) DO NOTHING RETURNING id`. **The
+   conflict target is named, not omitted**: this table also carries a global unique on `payment_id`,
+   and an untargeted clause would swallow that collision too, turning a permanent condition into a
+   retryable `503`. See [ADR 0003](../../adr/0003-postgresql-idempotency-arbitration.md).
 2. If no row was inserted, load the committed winner. Return its stored response when fingerprints
    match; otherwise fail with `409`.
 3. For a new receipt, create a fresh `PaymentAggregate` and `PaymentInitiated` from immutable
@@ -114,9 +132,14 @@ format round-trip that also rejects overflowing dates such as `2026-02-30`.
 
 Raw idempotency keys are hashed separately for lookup and never enter events, outbox payloads, or
 logs. Hashing gives fixed-width lookup and reduces casual plaintext exposure; it is not encryption.
-T5 proves only the narrow half of this: no schema column exists whose purpose is the raw key. **T6
-owes the rest** — once the real writer exists it must prove the raw key never reaches a stored event,
-an outbox payload, or a log line.
+T5 proved only the narrow half: no schema column exists whose purpose is the raw key. **T6 discharged
+the rest**, in `InitiatePaymentWriteTest::it writes the raw idempotency key to no durable column,
+exception or log line`. The raw key is not a property of the command context and never becomes one; it drives
+a 202, a 409 and a 422 through one key, then scans **every column of every row** of
+`payment_idempotency_receipts`, `stored_events` and `payment_outbox` as encoded JSON — a whole-row
+scan, so a future column carrying the key fails it — and every captured `MessageLogged` line, and
+asserts the key appears in none of them nor in either failure response body. The listener is asserted
+non-empty, so the log half cannot pass vacuously.
 
 ## Schema invariants
 
@@ -194,6 +217,44 @@ single-process.
 
 See [development environment](../foundation/development-environment.md) for the resolved package
 version, the exact vendor base types, and what T3 deliberately did not add.
+
+## Implementation evidence
+
+**Satisfied by T6**, which shipped `POST /api/payments`, the Problem Details surface, the first
+producer of `payment_idempotency_receipts` and the first producer of `payment_outbox`. Every row was
+observed through `make check` against PostgreSQL 18.4.
+
+The commit-boundary rows come from a suite that runs **without** `RefreshDatabase`, and that is what
+makes them evidence at all: the trait wraps each test in a transaction, which turns the production
+`DB::transaction()` into a savepoint, so `TransactionCommitting` never fires at depth 1, no second
+connection can witness a commit, and an "all three rows exist" assertion would pass against a handler
+that opened no transaction whatsoever. The suite refuses to run if it ever finds itself wrapped, and
+provisions its own schema so it does not depend on having run after some other suite.
+
+| # | Invariant | Proving test | Observed mechanism | Status |
+|---|---|---|---|---|
+| C2 | Receipt, stored event and envelope commit on one transaction and one backend | `InitiationCommitBoundaryTest::it commits receipt, stored event and outbox in one transaction on one backend` | An observer on a second backend pid counts zero rows at `TransactionCommitting` and one of each afterwards; all three tuples report the same `xmin`; one `pg_backend_pid()` across the whole write; `transactionLevel()` back to 0 | **PASS** |
+| C2 | A failure at the last moment before `COMMIT` rolls all three back | `InitiationCommitBoundaryTest::it rolls all three back when the failure lands after everything, before COMMIT` | A throwing `TransactionCommitting` listener; all three tables empty from the observer, the merchant still present, and the connection genuinely clean — `getPdo()->inTransaction()` false, not merely `transactionLevel()` 0 | **PASS** |
+| C2 | A throwing synchronous projector rolls all three back | `InitiationCommitBoundaryTest::it rolls all three back when a synchronous projector throws after the outbox row` | A second projector at a later `$weight` throws once the envelope exists and the exception escapes the live `Projectionist` — what `catch_exceptions => false` buys; the thrower is asserted to have seen exactly one outbox row, so "after the envelope" is not a guess | **PASS** |
+| C3 | An identical retry replays the exact bytes, status and `Location` | `InitiatePaymentWriteTest::it replays the exact stored bytes, status and location for an identical retry` | `getContent()` compared as **bytes**, not re-encoded JSON; one receipt, one stored event, one envelope after both requests | **PASS** |
+| C4 | A different canonical payload under one key conflicts and writes nothing new | `InitiatePaymentWriteTest::it returns 409 for the same key with a different payload and writes nothing new` | `409 idempotency_payload_mismatch`; durable row counts unchanged | **PASS** |
+| C4 | The conflict target is the merchant/key key alone | `InitiatePaymentWriteTest::it reserves against the merchant/key constraint only` | A pre-seeded receipt colliding on `payment_id` under a *different* merchant/key raises a real `23505`, surfacing as `internal_error`, **not** as the retryable `idempotency_contention` an untargeted clause would have produced | **PASS** |
+| C5 | Ownership comes only from the authenticated user | `InitiatePaymentRequestTest::it resolves the merchant from the bearer token exactly once`, `…it refuses a client-supplied merchant_id in any form, present is present` | A real Sanctum bearer token rather than `actingAs`, so a misconfigured guard cannot pass; a client-supplied `merchant_id` is `422`, not silently overridden | **PASS** |
+| C6 | A real `55P03` retries with fresh objects and commits one logical result | `InitiationCommitBoundaryTest::it retries a real 55P03 and commits one logical result with fresh objects` | Contention injected *after* `persist()` by a third projector at a later weight, from a bounded `lock_timeout` against a row a second connection holds — no sleeps; two **distinct retained event objects** carrying identical `eventId` and `occurredAt`; one receipt, one stored event, one envelope on one `xmin`; `aggregate_version` 1, so the rolled-back attempt left nothing behind | **PASS** |
+| C6 | Exhaustion stops at three attempts with no partial state | `InitiationCommitBoundaryTest::it exhausts at three attempts and leaves no partial state` | Captured SQLSTATEs `55P03, 55P03, 55P03`; three distinct event objects by identity; `IdempotencyContention` thrown; all three tables empty from the observer | **PASS** |
+| C6 | Exhaustion is answered `503` with `Retry-After: 1` and no SQL vocabulary | `InitiatePaymentWriteTest::it answers exhausted contention with 503, Retry-After: 1 and problem details` | The HTTP shape against a bound double, so it dies if the mapper changes while the row above dies if the runner changes; `detail` asserted to contain neither lock vocabulary nor a table name | **PASS** |
+| C6 | Only the three allowlisted states retry, classified by this repository | `TransactionRetryTest` (17 cases), `ModuleBoundaryTest::it never delegates concurrency classification to laravel` | `errorInfo[0]` preferred over `getCode()`, `DeadlockException` unwrapped first, string comparison; a non-retryable failure attempted exactly once; Laravel's own detector mechanically forbidden anywhere under `Modules/` | **PASS** |
+| C7 | Every `/api/*` failure is Problem Details, and the web surface is untouched | `ProblemDetailsContractTest`, `InitiatePaymentRequestTest` | 404/405/401/422 all `application/problem+json` with the six members; Laravel's `{"message":"Unauthenticated."}` key proven absent; a non-API 404 proven *not* reshaped; malformed JSON pinned as `422`, since `Request::json()` decodes it to `[]` and throws nothing; a generic conflict proven **not** dressed as `idempotency_payload_mismatch`, and a generic 503 not as `idempotency_contention` | **PASS** |
+| C1 | The envelope derives from the row just written, and leaves T7/T8 columns alone | `InitiatePaymentWriteTest::it derives every outbox column from the row the repository just wrote`, `…it leaves every T7 and T8 delivery column at its default` | `payload = stored_events.event_properties` compared as **jsonb**; `occurred_at` re-parsed and re-formatted rather than substring-matched; all three counters 0, both error columns and both completion timestamps null, `available_at` not null | **PASS** |
+| C1 | Nothing is enqueued while writing the envelope | `InitiatePaymentWriteTest::it enqueues nothing while writing the envelope` | `Queue::assertNothingPushed()` under an active `Queue::fake()` | **PASS** |
+
+**Not proved, and not claimed.** `40P01` and `40001` remain allowlisted and unit-classified but have
+**never been produced against a real database** by any task — unchanged since T3, and this section
+must not be read as changing it. The contention above is two connections in one process; genuine
+multi-process racing stays with [T12](../../testing/payments-resilience.md). H-1's blocking probe used
+two OS processes but one machine and one container, and says nothing about isolation levels other
+than the `read committed` the application runs. Nothing here is a load, throughput or index-plan
+claim.
 
 ## Acceptance criteria
 

@@ -9,8 +9,25 @@ use Illuminate\Support\Facades\Schema;
 /**
  * Merchant-scoped request arbitration and exact response replay.
  *
- * T5 owns the shape; T6 owns the writer. Nothing inserts here until the atomic
- * initiation handler exists.
+ * T5 owns the shape; T6 owns the writer, and it has landed:
+ * Modules/Payments/app/Infrastructure/Persistence/DatabaseIdempotencyReceipts is
+ * the one production writer of this table.
+ *
+ * THE RESERVATION TARGETS payment_receipts_merchant_key_unique EXPLICITLY, and the
+ * reason is this table's SECOND unique key. reserve() compiles to
+ * `on conflict ("merchant_id", "idempotency_key_hash") do nothing returning "id"`.
+ * A bare insertOrIgnore() would emit `on conflict do nothing` with NO target
+ * (PostgresGrammar::compileInsertOrIgnore), which swallows the global unique on
+ * payment_id as well — so a payment_id collision would return zero rows,
+ * indistinguishable from losing the merchant/key race, and the caller would answer
+ * 503 idempotency_contention: a RETRYABLE answer to a PERMANENT condition, which a
+ * well-behaved client retries forever. With the target named, that collision raises
+ * a real 23505, which the retry allowlist correctly refuses. Measured, not argued —
+ * see ADR 0003.
+ *
+ * The row is COMPLETE at insert: status, response bytes and Location are all
+ * written by that first statement, which is what lets a replay be answered without
+ * re-deriving anything.
  *
  * Decisions a reader cannot infer from the column list:
  *

@@ -64,14 +64,30 @@ here rather than left implicit:
   was measured against the 63-byte limit; the longest is **58** characters
   (`payment_idempotency_receipts_idempotency_key_hash_not_null`), so nothing truncates.
 
-Writer ownership is split across three tasks, and no envelope exists until the first of them lands:
+Writer ownership is split across three tasks. **The first has landed; the other two have not**, so an
+envelope exists and is immediately eligible, and nothing yet publishes, consumes or completes it:
 
 - **T6 inserts** the initial envelope, in the same transaction as the idempotency receipt and the
-  stored event. It is the first writer. T5 proved the row is *satisfiable* from a really-persisted
-  `PaymentInitiated` — `event_id`, `event_type`, `schema_version`, `aggregate_uuid`,
-  `aggregate_version`, `payload` and `occurred_at` all derive from the event or its stored row, and
-  the payload is jsonb-equal to `stored_events.event_properties`. That derivation lives in a T5 test;
-  **T6 should lift it rather than reinvent it.**
+  stored event. It is the first writer, and it is
+  `Modules\Payments\Infrastructure\Projectors\PaymentOutboxWriter` — a synchronous, non-queued
+  projector registered explicitly by `PaymentsServiceProvider`, because Spatie's
+  `auto_discover_projectors_and_reactors` only ever looks in `app/`. T5 proved the row is
+  *satisfiable* from a really-persisted `PaymentInitiated` — `event_id`, `event_type`,
+  `schema_version`, `aggregate_uuid`, `aggregate_version`, `payload` and `occurred_at` all derive
+  from the event or its stored row, and the payload is jsonb-equal to
+  `stored_events.event_properties`. T6 **lifted that derivation rather than reinventing it**.
+
+  **The payload is read back out of `stored_events`, not re-serialised.** The writer selects
+  `event_properties` by the primary key the repository has just stamped on the event instance, on the
+  same connection inside the same transaction, which makes jsonb-equality with the stored event true
+  by construction instead of by test. It supplies none of the three counters, so all of them take
+  their zero defaults, and `available_at` is set to the insert time — immediately eligible. Every
+  later mutation of that column belongs to T7.
+
+  It refuses **loudly** when `Projectionist::isReplaying()` is true, writing nothing: a replayed event
+  is fully derivable, so a standard rebuild would otherwise re-create envelopes or die on the
+  aggregate-version unique reporting the wrong problem. Whether a rebuild re-creates envelopes is
+  T11's decision to make deliberately.
 - **T7 mutates transport state only**: `available_at`, `last_published_at`, `publish_count`,
   `consecutive_transport_failures`, `last_transport_error`. It never writes `exhausted_at`.
 - **T8 records consumer outcome, and owns exhaustion**: `projection_completed_at` on success, and on

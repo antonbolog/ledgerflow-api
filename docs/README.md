@@ -46,4 +46,10 @@ T3 and T4 proved the blocking compatibility invariants, and T5 landed the produc
 domain, the four Payments migrations and
 [ADR 0002](adr/0002-payments-domain-event-sourcing-allowlist.md). Payments' `Domain` holds
 `PaymentAggregate`, `PaymentInitiated` and two domain exceptions; Merchant's `Domain` remains
-deliberately empty. No HTTP endpoint is served yet — **T6 is next**.
+deliberately empty.
+
+T6 closed M3 and serves the first HTTP endpoint, `POST /api/payments`: one transaction commits the
+idempotency receipt, the stored event and the outbox envelope or none of them, an identical retry
+replays the exact stored bytes, and every `/api/*` failure is RFC 9457 Problem Details. See
+[ADR 0003](adr/0003-postgresql-idempotency-arbitration.md). **Nothing delivers that envelope yet —
+T7 is next.**

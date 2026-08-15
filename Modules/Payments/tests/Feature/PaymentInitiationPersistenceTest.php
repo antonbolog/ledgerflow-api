@@ -10,6 +10,8 @@ use Modules\Payments\Domain\Payment\Events\PaymentInitiated;
 use Modules\Payments\Domain\Payment\Exceptions\InvalidPaymentInitiation;
 use Modules\Payments\Domain\Payment\Exceptions\PaymentAlreadyInitiated;
 use Modules\Payments\Domain\Payment\PaymentAggregate;
+use Modules\Payments\Infrastructure\Projectors\PaymentOutboxWriter;
+use Spatie\EventSourcing\Projectionist;
 use Spatie\EventSourcing\StoredEvents\Models\EloquentStoredEvent;
 use Spatie\EventSourcing\StoredEvents\ShouldBeStored;
 use Spatie\EventSourcing\StoredEvents\StoredEvent;
@@ -287,6 +289,15 @@ it('derives every required outbox column from a really-persisted event', functio
     // T6's atomic write. What T5 owes is proof that payment_outbox is satisfiable
     // from a real PaymentInitiated — so the derivation runs here, in a test,
     // against values measured off the event rather than invented by a fixture.
+    //
+    // T6 SLICE 2 REGISTERED THE PRODUCTION WRITER, so persist() now fills
+    // payment_outbox on its own and the by-hand insert below would collide on the
+    // event_id primary key. Removing the projector for the duration of this test
+    // keeps T5's claim exactly what it always was — the envelope is DERIVABLE from a
+    // bare persist() — rather than silently turning it into a second test of T6's
+    // writer, which InitiatePaymentWriteTest already covers.
+    resolve(Projectionist::class)->withoutEventHandler(PaymentOutboxWriter::class);
+
     $event = persistOnePayment();
     $stored = t5StoredEvent();
     $now = CarbonImmutable::now();
@@ -308,7 +319,7 @@ it('derives every required outbox column from a really-persisted event', functio
 
     // EVERY column traced back to a real source — the event object or the stored
     // event — never to a literal. A literal only proves the fixture matches
-    // itself; this proves the mapping T6 will lift is correct.
+    // itself; this pinned the mapping T6 later lifted into PaymentOutboxWriter.
     //
     // Column defaults and nullability are NOT re-asserted here: Slice 2's schema
     // contract owns those, and duplicating them would mean two places to update.

@@ -23,12 +23,25 @@ T2**: `laravel/sanctum` 4.3.3 is installed, `personal_access_tokens` is migrated
 issue and resolve tokens, and `Modules\Merchant\Application\Identity\MerchantContext` answers which
 merchant owns the authenticated request.
 
-Everything above the token itself is still deferred, because T2 serves **no HTTP endpoint**. Token
-abilities are unscoped, `sanctum.expiration` is null so tokens do not expire, and the cookie-versus-
-token choice, CORS, CSRF, and domain configuration are all undecided. `config/sanctum.php` is
+**T6 serves the first authenticated endpoint**, `POST /api/payments` behind `auth:sanctum`, and
+proves real bearer-token authentication: a test issues a genuine token and sends it as an
+`Authorization: Bearer` header rather than installing a user through `actingAs`, so the guard is
+what resolves the merchant.
+
+Everything above the token itself is still undecided, and **T6 deliberately decided none of it**.
+Token abilities are unscoped, `sanctum.expiration` is null so tokens do not expire, and the SPA
+cookie-versus-token mode, CORS, CSRF, and deployment domains remain open. `config/sanctum.php` is
 published in full, so its `stateful`, `guard`, `expiration` and `middleware` keys are unreviewed
-defaults rather than decisions. These are settled with the SPA deployment topology by the task that
-serves the first endpoint, and must not be inferred from local development defaults.
+defaults rather than decisions.
+
+**These now belong to [Merchant dashboard integration](../roadmap.md#merchant-dashboard-integration)**,
+where the SPA and its deployment topology are finalized — not to "the task that serves the first
+endpoint", which has been and gone without needing to answer them. They must not be inferred from
+local development defaults.
+
+A server-to-server test authenticating with a bearer token settles nothing about the SPA. It is
+evidence that the guard works, not a selection of the session mode a browser client will use; the
+cookie-versus-token choice is still open in both directions.
 
 Merchant authorization is tenant-scoped on the server. A merchant identifier supplied by a
 client is never sufficient authority for accessing a payment.
