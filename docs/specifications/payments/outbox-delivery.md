@@ -106,9 +106,9 @@ envelope exists and is immediately eligible, and nothing yet publishes, consumes
 
 ## Initial relay algorithm
 
-The first slice implements lock-through-push:
+**Implemented by T7** as lock-through-push, in `Modules\Payments\Infrastructure\Relay\OutboxRelay`:
 
-1. Begin a short transaction and acquire the Payments projection shared gate.
+1. Begin a short transaction and set a local `statement_timeout`.
 2. Select one eligible row `FOR UPDATE SKIP LOCKED`.
 3. Publish a small job containing only the outbox event ID.
 4. Update the relevant delivery state.
@@ -117,7 +117,22 @@ The first slice implements lock-through-push:
 The queue connection must publish immediately inside this transaction, not through an
 after-commit callback. One row per transaction, short transport timeouts, a bounded batch, and a
 maximum wall-clock runtime prevent unbounded database occupancy. Overlapping relay invocations are
-safe because row locks, not scheduler uniqueness, provide correctness.
+safe because row locks, not scheduler uniqueness, provide correctness — `SKIP LOCKED` is what makes
+that true, and no `withoutOverlapping()`/`onOneServer()` is registered on the schedule entry.
+
+### HS-1 — no shared projection gate is acquired
+
+An earlier draft of this algorithm opened with "acquire the Payments projection shared gate." **T7
+does not do this.** `payment_projection_controls`, its ready/rebuilding row, and the connection-affine
+advisory lock in front of it belong to T11, which has not run; a provisional gate built here would
+either become permanent scope creep or be discarded, coupling two milestones for no present benefit.
+No advisory key is derived by this relay, and no "zero advisory locks taken" claim is made anywhere —
+the absence is temporary scope, not a permanent contract. **T11 adds gate acquisition as the first
+statement inside `OutboxRelay::relayOne()`, before eligibility selection, on the same injected
+connection**, and adds the deferral semantics rebuild introduces. See
+[verification and rebuild](verification-and-rebuild.md#projection-gate) for the reciprocal side of
+this obligation, and [ADR 0004](../../adr/0004-lock-through-push-outbox-relay.md) for the full
+decision record.
 
 ## State transitions
 
@@ -152,9 +167,32 @@ The compatibility and load-test milestone may tune them without weakening accept
 
 ## Scheduler contract
 
-`payments:outbox:relay` is a short-lived command scheduled every second. Local development and the
-resilience demo use a continuously running Laravel scheduler process. Production deployment must
-supervise a scheduler process and interrupt the previous release after new code is live.
+**Implemented by T7.** `payments:outbox:relay` is registered
+`Schedule::command('payments:outbox:relay')->everySecond()` in root `routes/console.php` — root,
+because `ModuleBoundaryTest` forbids a module carrying a `routes` directory, the same reason
+`config/payments.php` lives at the root rather than inside `Modules/Payments`. It is a short-lived,
+bounded command: loop until drained, a 50-row batch cap, or a 750 ms start-budget checked **before**
+each next row — a start budget, not a kill deadline, so a row already begun always finishes
+committing or rolling back.
+
+`payments:outbox:status` is the read-only JSON health surface. It reports `heartbeat` (one of five
+states — `fresh`, `stale`, `missing`, `unavailable`, `invalid` — never echoing a malformed or
+future-dated value) and `database` (one snapshot-consistent PostgreSQL aggregate: `eligible_count`,
+`active_count`, `oldest_eligible_age_seconds`, all `null` on database failure). It exits `0` only when
+the heartbeat is fresh **and** the PostgreSQL query succeeds. The heartbeat is written in application
+UTC — not PostgreSQL `now()` — only after a fully handled pass, because it records that a *process*
+made progress, which a database outage must not be able to fake as a scheduler outage.
+
+Local development runs the scheduler as an **opt-in** Compose service, `scheduler`, behind profile
+`relay`: the same `dev`-target image as `app`, `command: php artisan schedule:work`, healthchecked by
+`payments:outbox:status` itself — not mere process existence, so a wedged loop or a lost database both
+fail the check. A clean `make install`/`make start` never brings this profile up; `make relay-start`
+and `make relay-stop` toggle it without touching the four default services, and `make stop`/`make
+destroy` are profile-aware so they reach a scheduler an operator started by hand. **The relay stays
+dormant in every normal deployment until T8 activates the scheduler and its Horizon-supervised
+consumer together** — a long-lived producer without its consumer would otherwise republish every
+accepted row on an unbounded 30-second cycle. Production deployment must supervise a scheduler process
+the same way and interrupt the previous release after new code is live.
 
 Scheduler heartbeat and oldest eligible outbox age must expose a stopped scheduler even when HTTP
 and workers are healthy. See the [runtime contract](../../operations/runtime-contract.md).
@@ -269,6 +307,183 @@ writes shared namespaced keys in Redis logical database 15, so two workers would
 state. `make test` deliberately does not enable parallel execution. Everything proved above is
 therefore single-process; multi-process behaviour remains T12's scope.
 
+## Implementation evidence
+
+**Satisfied by T7**, which shipped the eight production types listed in
+[ADR 0004](../../adr/0004-lock-through-push-outbox-relay.md), the one forward migration adding
+`payment_outbox`'s two non-negative CHECK constraints, `config/payments.php`, the schedule
+registration, and the opt-in `scheduler` Compose service. Every row below was observed through
+`make check` against PostgreSQL 18.4 and Redis 8.10.0 (phpredis 6.3.0), re-proving the T4 primitives
+against production code and the real `payment_outbox` rather than the T4 surrogate table — T4's
+evidence above remains frozen and is not restated as re-measured here.
+
+| # | Invariant | Proving test | Observed mechanism | Status |
+|---|---|---|---|---|
+| M-1 | The physical Redis key a real `push()` writes matches what both read paths derive | `PaymentRelayRuntimeContractTest::it addresses one physical key from both read paths, and records the prefix phpredis applies` | `size()` (Lua `eval`) and `pendingSize()` (`llen`) agree at 1 after a real push on the named `payments-projection` connection; the key exists only under the client's own prefix | **PASS** |
+| M-2 | `SKIP LOCKED`, compiled and exercised, not merely intended | `OutboxRelayTest::it skips a row another session holds and publishes the next one instead`, `…it compiles the eligibility query with SKIP LOCKED rather than a bare row lock` | A second connection holds `FOR UPDATE` on the oldest eligible row; the relay selects and publishes the *other* row with no sleep and no `55P03`; compiled SQL pinned to end `for update skip locked` | **PASS** |
+| M-3 | The forward migration's two CHECK constraints are real and named correctly | `PaymentsSchemaTest::it refuses a negative publish_count and a negative consecutive_transport_failures`, `…it reports 23514 naming the violated transport constraint` | Both constraints exist, fit the 63-byte identifier limit, and a direct negative `UPDATE` now raises `23514` naming the violated constraint (measured accepting the same write silently before the migration) | **PASS** |
+| — | One eligible row, ordered by the index, three ways a row is correctly invisible | `OutboxRelayTest::it takes the oldest eligible row first and cannot see an ineligible one` | Oldest-`available_at` row published first; a future-dated, a completed, and an exhausted row all remain untouched through repeated passes | **PASS** |
+| — | Accepted publication updates transport state from PostgreSQL `now()`, with exact grace | `OutboxRelayTest::it makes an accepted row eligible again only after the grace has passed` | Row invisible inside the 30 s grace window, reachable again after it elapses | **PASS** |
+| — | Transport rejection backs off and later clears on acceptance | `RelayPaymentOutboxCommandTest::it continues after a transport rejection but never after any other failure` | Two rejected rows both show `consecutive_transport_failures = 1`; pass continues to a second row after a rejection | **PASS** |
+| — | Any other failure rolls back and aborts the whole pass, with no same-pass retry | `RelayPaymentOutboxCommandTest::it aborts the pass with a non-zero exit when a row fails for any other reason`, `OutboxRelayTest::it classifies a failure before BEGIN as pre-commit rather than inferring it from an idle connection`, `…it leaves Laravel and the PDO clean after a commit-boundary failure, and relays again on the same connection` | Exactly one attempted row before abort; `DB::transactionLevel() === 0` and `getPdo()->inTransaction() === false` after every failure phase; the same connection relays successfully immediately afterward | **PASS** |
+| — | A crash after accepted push and before commit is a safe duplicate, not a lost message | `OutboxRelayTest::it restores the exact pre-attempt row after a crash between the accepted push and the commit` | Redis retains the message; PostgreSQL rolls back to the exact pre-attempt row, column by column; a later pass republishes the same event id, producing two Redis messages carrying one identifier | **PASS** |
+| — | An ambiguous commit outcome is reported as such, never guessed | `OutboxRelayTest::it reports an ambiguous commit outcome instead of claiming the work rolled back` | A `TransactionCommitted` injection (fires *after* `getPdo()->commit()` succeeds) is classified `commit_outcome_unknown`, aborts non-zero, and does not republish in the same pass | **PASS** |
+| — | Rollback-cleanup failure never replaces the primary exception | `OutboxRelayTest` fault-injection case where the primary failure and its rollback cleanup both throw | The primary exception escapes unchanged; the cleanup failure is logged separately and never retried in the same pass | **PASS** |
+| — | Structured logs carry no payload, credential, or raw exception message | `RelayPaymentOutboxCommandTest::it keeps payloads and raw transport detail out of the pass log` | A sentinel planted inside a driver exception message, plus `amountMinor`/`merchantId`, are asserted absent from every rendered log record across the whole pass | **PASS** |
+| — | Heartbeat is application UTC, written only after a handled pass, and cache failure never blocks delivery | `RelayPaymentOutboxCommandTest::it records the heartbeat once, in application UTC, only after a handled pass`, `…it writes no heartbeat when the pass aborts`, `…it does not undo completed delivery when the heartbeat cache is unavailable` | Heartbeat absent until a pass completes; absent entirely on an aborted pass; a broken `CacheFactory` still lets the pass publish and commit, logging only a warning | **PASS** |
+| — | `payments:outbox:status` distinguishes every documented state and exits accordingly | `PaymentOutboxStatusCommandTest` (fresh/stale/missing/unavailable/invalid heartbeat states; database ok/unavailable; eligible/active/oldest-age metrics) | Exit `0` only for fresh heartbeat + database `ok`; every other combination exits `1`; a forced pre-transaction failure yields `database.state:unavailable` with all three metrics `null`, and the JSON carries no exception message | **PASS** |
+| — | The schedule entry runs every second with no scheduler-uniqueness dependency | `PaymentRelayRuntimeContractTest::it schedules the relay command every second, with no scheduler-uniqueness dependency` | `getExpression() === '* * * * *'`, `isRepeatable() === true`, `repeatSeconds === 1`, `withoutOverlapping === false` | **PASS** |
+| — | The disposable scheduler reaches healthy with a fresh heartbeat; `stop`/`destroy` reach it too | Manual run under `COMPOSE_PROJECT_NAME=ledgerflow-t7-relay-contract` — **not** a Pest test; see the non-claim below | `relay-start` → `docker compose … --wait` exits 0; live `payments:outbox:status` inside the `scheduler` container reports `healthy:true`; `relay-stop`, plain `stop`, and confirmed `destroy` each reach and stop/remove the `scheduler` container; `destroy` leaves 0 containers/volumes/networks for the disposable project | **PASS** |
+
+**Environment limitation, recorded rather than hidden.** The disposable-project measurement's fresh
+image build was blocked by this session's registry access (`docker/dockerfile:1` frontend resolution
+timed out on every attempt); the run reused the already-built `dev`-target image by retagging it,
+which was removed again afterward. This is not a fresh-build proof of the current `Dockerfile` — the
+image content itself was already proved current by the same `make check` this evidence table draws
+its Pest rows from. See
+[development environment](../foundation/development-environment.md#what-t7-added-and-what-it-deliberately-did-not).
+
+**Not proved, and not claimed.**
+
+- No consumer, no `payments:outbox:retry`, and no Horizon exist. Nothing reads `payment_outbox` for
+  projection purposes; T8 owns that.
+- Pest never ran a live scheduler process. Every `everySecond()`/heartbeat/status assertion above uses
+  an injected monotonic clock or direct command invocation; the only evidence that `schedule:work`
+  itself invokes `payments:outbox:relay` on a real per-second cadence is the disposable Compose
+  measurement, which is explicitly not a Pest-run claim.
+- No multi-process relay race is proved. `SKIP LOCKED` progress above is two connections in one
+  process, matching T4's own scope note; genuine multi-process racing remains T12's.
+- No load, throughput, or index-plan claim. The eligibility index is proven to exist, partial, on the
+  documented columns; the planner remains free to choose whatever plan it likes on a handful of rows.
+- No rebuild-safety claim. Whether a rebuild re-creates envelopes, and how the relay behaves under
+  T11's rebuild gate, are T11's questions; HS-1 above records that no gate exists yet for this relay
+  to defer to.
+- No end-to-end projector-receipt reconciliation. The 30-second grace and its redelivery are proved
+  from the relay's own transport state only; nothing here writes or reads a projector receipt, because
+  none exists until T8.
+- `40P01` and `40001` remain allowlisted and unit-classified for the relay's own failure path,
+  unchanged since T3 — this relay retries nothing itself; its "retry" is the next scheduled pass.
+
+### Transport exception classification — verified against the resolved stack
+
+`OutboxRelay::relayOne()` catches `RedisException` and nothing else. That boundary was re-derived
+from installed source and measured against the running stack (phpredis **6.3.0**, `redis:8.10.0-alpine`,
+non-cluster, `client => phpredis`, queue connection `payments-projection` over Redis connection
+`payments`). **No code change followed: the catch is already exactly right.**
+
+The resolved call path is `RedisQueue::push()` → `Queue::createPayload()` → `enqueueUsing()` →
+`RedisQueue::pushRaw()` → `getQueueRedisKey()` → `RedisManager::connection('payments')` →
+`PhpRedisConnector::connect()` → `PhpRedisConnection::command('eval', …)`. Every type it can raise:
+
+| Thrown by | Type | Class | Relay handling |
+|---|---|---|---|
+| `Queue::createPayload()`, `json_encode` failure (`Queue.php:135-143`) | payload encoding | `InvalidPayloadException` (extends `InvalidArgumentException`) | escapes — abort pass |
+| `Queue::createObjectPayload()`, `serialize(clone $job)` failure (`Queue.php:192-201`) | serialization | `RuntimeException` (Laravel-wrapped, original as `previous`) | escapes — abort pass |
+| `RedisManager::resolve()`, unknown connection name (`RedisManager.php:122`) | configuration | `InvalidArgumentException` | escapes — abort pass |
+| `PhpRedisConnector::createClient()`, extension missing or facade-alias collision | configuration | `LogicException` | escapes — abort pass |
+| `PhpRedisConnector::establishConnection()`, `Redis::connect()` | transport | `RedisException` | **caught** — backoff committed |
+| `PhpRedisConnection::command('eval')`, connection lost / protocol desync / non-`ERR` server reply | transport | `RedisException` | **caught** — backoff committed |
+
+Neither wrapper layer converts anything: `Redis\Connections\Connection::command()` catches
+`Throwable` only to dispatch a `CommandFailed` event and rethrows the same instance
+(`Connection.php:123-131`), and `PhpRedisConnection::command()` catches `RedisException` only to
+optionally rebuild the client before rethrowing it unchanged (`PhpRedisConnection.php:528-539`). So
+the class the relay sees is the class phpredis raised.
+
+**The four types that cannot occur here**, each ruled out rather than assumed:
+
+- **`RedisClusterException`** — thrown only by `RedisCluster` methods. `RedisManager::resolve()`
+  reaches `connectToCluster()` only via `isset($this->config['clusters'][$name])`, which is tested
+  *after* the top-level `isset($this->config[$name])` that `payments` already satisfies; and
+  `config/database.php` declares no `clusters` key at all. `RedisQueue::isClusterConnection()` calls
+  `Connection::isCluster()`, a plain `return false` (`Connection.php:193-196`) — not a Redis command,
+  so it cannot fail. Worth recording precisely because **`RedisClusterException` extends
+  `RuntimeException`, not `RedisException`** (measured): were it ever reachable it would abort the
+  pass rather than back off, so introducing a cluster connection here is a breaking change to this
+  classification, not a configuration detail.
+- **Predis exceptions** — `predis/predis` is not installed. It appears in `composer.lock` only under
+  the `require-dev` and `suggest` blocks of other packages, never in the installed package set, and
+  `Predis\Client` does not exist at runtime (measured). `REDIS_CLIENT` is `phpredis`.
+- **Queue contract exceptions** — `Illuminate\Contracts\Queue\*` declares no exception the push
+  path throws; the failures above are the whole surface.
+- **Converted PHP warnings** — this one was measured rather than reasoned, because
+  `Redis::connect()` *does* emit an `E_WARNING` beside its exception on a name-resolution failure.
+  With the application bootstrapped and `HandleExceptions` live (`error_reporting() === -1`, handler
+  registered), an undefined-array-key warning converts to `ErrorException` as expected, yet
+  `Redis::connect('no-such-host')` still surfaces `RedisException` — not `ErrorException`. The
+  control and the subject were run in the same bootstrapped process, so the negative result is a
+  measurement, not a dead probe.
+
+**Redis can accept the push and then throw — and that is safe.** Measured directly with the relay's
+own `read_timeout` of 0.25 s: a script mirroring `LuaScripts::push()` that applies both `rpush` calls
+and then busy-loops past the read timeout makes the client throw
+`RedisException: protocol error, got '…' as reply-type byte`, while a *separate* client confirms the
+payload and its `:notify` entry are durably in the list.
+
+The relay classifies that throw as a `RedisException` and takes the ordinary transport-rejection
+path, which **commits — there is no rollback on this path.** `recordRejection()` increments
+`consecutive_transport_failures`, writes the fixed `last_transport_error` category, and moves
+`available_at` forward by the transport backoff for the incremented count; `publish_count` and
+`last_published_at` are absent from the statement and stay exactly as they were, which is correct,
+because from the relay's side the publication was not acknowledged. That `UPDATE` is then committed
+with the row. When the backoff expires the row re-enters the partial active index, the next pass
+selects it as eligible, and it is republished — so the message Redis had already accepted is
+delivered a second time. The outcome is one **safe duplicate**, never a lost message.
+
+This reaches the same ceiling as the crash-before-commit case by a different mechanism, and the two
+should not be conflated: a crash before `COMMIT` is a genuine PostgreSQL rollback that leaves the row
+untouched and immediately eligible, whereas an accepted-then-thrown push commits durable rejection
+state and defers the row by the backoff. Both can only over-deliver — which the consumer's
+idempotency absorbs — and neither can under-deliver.
+
+**Residual risk, deliberately not fixed here.** phpredis does not throw for every server error: it
+returns `false` and sets `getLastError()` for replies prefixed `ERR`, `NOSCRIPT` and `WRONGTYPE`, and
+throws `RedisException` for all others. Both halves were measured — a Lua compile error and a
+`WRONGTYPE` push both returned `false`, while an `OOM command not allowed` push threw. Because
+`RedisQueue::pushRaw()` discards `eval()`'s return value entirely (`RedisQueue.php:327-332`), a
+`false` reply is invisible to `push()` and therefore to the relay.
+
+**The consequence is a false-positive publication acknowledgement, not message loss.** The relay
+takes its acceptance path for a message Redis never enqueued: `recordAcceptance()` increments
+`publish_count`, sets `last_published_at = now()`, **clears** `consecutive_transport_failures` to `0`
+and `last_transport_error` to `null`, and moves `available_at` to `now() + reconciliation_grace_seconds`
+rather than to a transport backoff. Four things follow, and they are bounded by T7's own
+reconciliation contract rather than by anything T8 adds:
+
+- **Retry is delayed to the reconciliation grace instead of the transport backoff.** The row is not
+  lost and needs no external detection: when the grace expires with no `projection_completed_at`
+  written, it re-enters the partial active index and T7 republishes it on the next pass. That is the
+  same redelivery loop that covers a consumer which never ran, and it requires no knowledge of
+  projector receipts — which is precisely why T7 owns it.
+- **Transport-failure state is temporarily cleared and `publish_count` advances.** A count that
+  climbs while nothing is delivered is the misleading signal here, not a stuck row.
+- **A persistent condition repeats once per reconciliation cycle** until the underlying Redis key is
+  repaired, rather than backing off exponentially the way a thrown rejection would. It is a slow,
+  self-repeating loop, not a permanent stall.
+- **The health surface may not distinguish it during the grace window.** Within the grace the row is
+  simply not yet eligible and carries clean transport state, so it reads as healthy in-flight work;
+  it only becomes visible as backlog once the grace lapses and it keeps returning.
+
+The condition is unlikely by construction: the realistic error classes for this script — `OOM`,
+`READONLY`, `NOAUTH`, `MISCONF`, `LOADING` — all fall on the throwing side, and the silent side needs
+the queue key itself to hold a non-list, which requires a foreign write into a logical Redis database
+dedicated to the relay with explicit key ownership. It is **not** repairable inside `OutboxRelay`
+without abandoning `push()` for `pushRaw()`, and that trade is refused here: `pushRaw()` bypasses
+`enqueueUsing()` and so cannot be held to the `after_commit => false` contract that the whole
+lock-through-push ordering depends on. Recorded as a known limitation of the vendor push path that
+**stays with T7's reconciliation loop** — it creates no permanent message loss under that loop, and
+it is not handed to T8, which owns projection completion and consumer outcomes, not the detection of
+a Redis job that was never enqueued.
+
+**One consequence of the desync worth naming.** The `RedisException` message measured above
+(`protocol error, …`) does not match any substring in `PhpRedisConnection::command()`'s reconnect
+list (`went away`, `socket`, `Error while reading`, `read error on connection`, `READONLY`,
+`Connection lost`), so Laravel does not rebuild the client, and `RedisManager` caches the connection
+per process. A pass that continues after a rejection therefore reuses a desynced connection. That
+degrades to more rejections rather than to wrong state: every subsequent misread also throws
+`RedisException`, so those rows are backed off, not falsely marked published — and the server executed
+each `EVAL` it received regardless, so the ceiling remains duplicates.
+
 ## Acceptance criteria
 
 - Transport outage leaves the payment and outbox committed, queryable as pending, and recoverable.
@@ -281,7 +496,10 @@ therefore single-process; multi-process behaviour remains T12's scope.
 
 ## Related
 
+- [ADR 0004](../../adr/0004-lock-through-push-outbox-relay.md) — the lock-through-push decision record,
+  HS-1, and the disposable-scheduler measurement.
 - [Projection and query](projection-and-query.md)
+- [Verification and rebuild](verification-and-rebuild.md) — T11's reciprocal gate obligation.
 - [Runtime contract](../../operations/runtime-contract.md)
 - [Messaging and queues](../../architecture/messaging-and-queues.md)
 - [Resilience test plan](../../testing/payments-resilience.md)

@@ -9,3 +9,12 @@
 /.github export-ignore
 CHANGELOG.md export-ignore
 .styleci.yml export-ignore
+
+# Graphify generated artifacts. Tracked for repository use, but never reviewed as
+# text: `graphify update .` rewrites them wholesale, so a textual diff is noise and
+# a textual merge is meaningless. Conflicts are resolved by regenerating, not by
+# hand-merging. Overrides the *.html and *.md diff drivers declared above.
+graphify-out/graph.json            -diff -merge linguist-generated=true
+graphify-out/graph.html            -diff -merge linguist-generated=true
+graphify-out/GRAPH_REPORT.md       -diff -merge linguist-generated=true
+graphify-out/.graphify_labels.json -diff -merge linguist-generated=true

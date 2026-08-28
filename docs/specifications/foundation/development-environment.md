@@ -548,11 +548,126 @@ T5 is the first task with production Payments code. It added no dependency: `com
 - **No snapshot ever written.** `snapshots` is created and only read.
 - **`40P01` and `40001` remain unmeasured**, exactly as T3 left them.
 
+### What T7 added, and what it deliberately did not
+
+T7 is the first task to add production Payments *delivery* code, and it added **no Composer
+dependency**: `composer.json` and `composer.lock` are byte-identical to what T6 left.
+
+**Added:**
+
+- **Eight production types**, no more, all under `Modules\Payments\Infrastructure\{Relay,Console}`:
+  `RelayConfiguration`, `TransportBackoff`, `ProjectPaymentEvent`, `RelayOutcome`, `OutboxRelay`,
+  `RelayHeartbeat`, `RelayPaymentOutboxCommand`, `PaymentOutboxStatusCommand`. See
+  [ADR 0004](../../adr/0004-lock-through-push-outbox-relay.md) for the decision each one serves and
+  why no ninth type — a generic transport abstraction, a custom consumer exception, an Application
+  port — was added ahead of a second implementation that would need it.
+- **One forward migration**, `2026_08_21_000000_add_payment_outbox_transport_checks.php`, adding the
+  two non-negative `CHECK` constraints T5 deliberately deferred for `publish_count` and
+  `consecutive_transport_failures`. It does not edit the merged T5 migration.
+- **`config/payments.php`**, at the repository root because `ModuleBoundaryTest` forbids a module
+  carrying a `config` directory — the same reason `routes/api.php` is root. Every value is either a
+  literal three connection/queue/store names Horizon supervision must also agree on, or an env-tunable
+  operational timing; `RelayConfiguration::fromArray()` validates all of them once, at container
+  resolution, so a mistyped `.env` fails before any row is touched rather than becoming a silently
+  wrong delivery schedule.
+- **A dedicated Redis connection** `payments` in `config/database.php` (bounded connect/read timeouts,
+  `max_retries => 0`) and **a dedicated cache store** `payments-relay` in `config/cache.php`, pinned to
+  that same connection — never the default cache store, so a heartbeat write cannot retry or block
+  longer than the pass it describes.
+- **Schedule registration** in root `routes/console.php` —
+  `Schedule::command('payments:outbox:relay')->everySecond()` — and an **opt-in** `scheduler` Compose
+  service behind profile `relay`, plus `relay-start`/`relay-stop` Make targets and profile-aware
+  `stop`/`destroy`.
+
+**Findings that shaped those artifacts:**
+
+- **`Connection::transaction()` was measured and deliberately not reused.** T6 already found its
+  commit-exception path sets `transactions = 0` and rethrows while rolling the PDO back only for a
+  concurrency error with attempts remaining — so at one attempt, every other commit-boundary failure
+  leaves the *server* transaction open while `transactionLevel()` reports 0. `OutboxRelay` therefore
+  manages `beginTransaction()`/`commit()`/`rollBack()` explicitly, tracking `transaction_started` and
+  `commit_attempted` as local booleans rather than inferring either from end-of-request connection
+  state — which the historical description below the M-3 evidence table proves matters: a failure
+  before `BEGIN` and a failure after a successful `COMMIT` leave *identical* end states.
+- **`ScheduleWorkCommand` spawns a new `schedule:run` subprocess only at `second === 0` of each
+  minute** (`Console/Scheduling/ScheduleWorkCommand.php`); sub-second cadence
+  (`everySecond()`/`repeatSeconds`) is handled *inside* that per-minute subprocess
+  (`Console/Scheduling/ScheduleRunCommand.php`), not by `schedule:work` itself. A freshly started
+  scheduler container can therefore wait up to ~60 real seconds for its first tick, independent of
+  anything this project controls. Combined with `redis-data` persisting across container restarts,
+  a restarted scheduler correctly reports its own *previous* run's now-stale heartbeat during that
+  wait — the five-state heartbeat design working as intended, just not one a 20-second healthcheck
+  `start_period` could tolerate. Measured against the real disposable project: `start_period: 75s`
+  comfortably covers a worst case of ~62 real seconds.
+- **An empty-table `COUNT(*)` aggregate always returns exactly one row**, so `PaymentOutboxStatusCommand`'s
+  `selectOne()` result is narrowed with an `instanceof stdClass` check plus `is_numeric()` on each
+  column — the same "types, not validation" pattern `OutboxRelay` already uses for its own row read —
+  rather than a null-coalescing default that would hide a genuinely malformed aggregate.
+
+**Environment limitation, from Slice 4's disposable-project measurement, recorded rather than
+smoothed over.** `docker build`/`docker compose build` could not resolve the `docker/dockerfile:1`
+syntax-frontend image over this session's registry proxy — every attempt failed with
+`DeadlineExceeded`/`Canceled` regardless of retry. Since the `dev`-target image had already been built
+for the main project earlier in the same session, the disposable-project evidence run retagged that
+already-built image as the disposable project's `app` and `scheduler` images (removed again
+afterward) rather than rebuilding from `Dockerfile`. **This is not a fresh-build proof of the current
+`Dockerfile`.** The image *content* was independently proved current by the same `make check` that
+built and ran it for the main project; only the disposable-project *rebuild step itself* was skipped,
+for an environment reason unrelated to `compose.yaml` or the `Dockerfile`.
+
+**Deliberately not added, and not claimed:**
+
+- **No consumer, no Horizon configuration, no `payments:outbox:retry`.** T8 owns all three; nothing
+  in T7 reads `payment_outbox` for projection purposes or writes `projection_completed_at`,
+  `projection_failure_count`, `last_projection_error`, or `exhausted_at`.
+- **No shared projection gate.** `OutboxRelay::relayOne()` acquires no advisory lock and reads no
+  `payment_projection_controls` row — recorded as HS-1 in
+  [outbox delivery](../payments/outbox-delivery.md#hs-1-no-shared-projection-gate-is-acquired) and as
+  T11's reciprocal obligation in
+  [verification and rebuild](../payments/verification-and-rebuild.md#t7s-reciprocal-obligation-the-gate-does-not-exist-yet-in-the-relay).
+- **No live scheduler ran inside Pest.** Every `everySecond()`, heartbeat, and status assertion in the
+  suite uses an injected monotonic clock or a direct command invocation; the only evidence that
+  `schedule:work` itself drives `payments:outbox:relay` on a real cadence is the disposable Compose
+  measurement above, which is explicitly not a claim about what Pest exercised.
+- **No multi-process relay race.** The `SKIP LOCKED` proof is two connections in one process, matching
+  T4's own scope note; genuine multi-process racing remains T12's.
+- **No load, throughput, or index-plan claim**, and **no rebuild-safety claim** — see HS-1 above.
+- **No end-to-end projector-receipt reconciliation.** The 30-second grace and redelivery are proved
+  from the relay's own transport state alone; no projector receipt exists to reconcile against until
+  T8.
+
+The measured invariant results live in
+[outbox delivery](../payments/outbox-delivery.md#implementation-evidence).
+
 ## Editor and ignore policy
 
 `.gitignore` excludes IDE metadata such as `.idea/`, `.vscode/`, `.cursor/`, `.codex/`, `.fleet/`,
 and local history, plus local environment files, credentials, dependencies, OS metadata, logs,
-coverage, and generated runtime data.
+coverage, and machine-local runtime data.
+
+**Two directories are deliberate exceptions where generated content is tracked.** `/.claude/` is
+tracked so that the shared project permissions, the Graphify PreToolUse hooks, and the vendored
+`graphify` skill travel with the checkout and every contributor's agent behaves identically. Only
+`/.claude/settings.local.json`, the per-machine permission cache, is ignored — and it is ignored by
+this repository's `.gitignore`, not by a user-global ignore file, so the exclusion holds on a fresh
+clone on any machine. Under `graphify-out/`, exactly four artifacts are tracked because they *are*
+the queryable graph: `graph.json`, `graph.html`, `GRAPH_REPORT.md`, and `.graphify_labels.json`.
+`.gitattributes` marks those four `linguist-generated` with `-diff -merge`, so they never produce a
+reviewable textual diff and a merge conflict is resolved by regenerating rather than hand-editing.
+Everything else in `graphify-out/` is machine-local and ignored: `cache/`, `cost.json`,
+`manifest.json` (per-file incremental build state, which conflicts on every merge and proves
+nothing), `.graphify_python` and `.graphify_root` (absolute host paths), the dated pre-update
+backup directories, and the `*.sig` integrity signatures.
+
+The tracked graph artifacts are refreshed only after a completed feature or a material
+architecture, dependency, API-flow, ADR, or documentation change — never after a routine edit — and
+the refresh is committed **after** the source commit it analyzes, so its recorded build stamp names
+a commit that actually contains the analyzed source.
+
+Direct reading of `graphify-out/` is denied at the project level by a `Read(graphify-out/**)` rule
+in `.claude/settings.json`; `graph.json` alone is ~1.1 MB. The rule constrains the agent's file
+tools only, leaving the `graphify` CLI free to build and query the graph. `.claudeignore` is not a
+Claude Code feature and was removed after being verified absent from the installed 2.1.250 binary.
 
 Shared editor configuration is limited to `.editorconfig`, adopted as an explicit project decision
 in T1 so that PhpStorm, VS Code, and Cursor apply the same whitespace and encoding rules to one
@@ -627,4 +742,6 @@ Recorded so they are not rediscovered as surprises:
 
 - [Roadmap](../../roadmap.md)
 - [Runtime contract](../../operations/runtime-contract.md)
+- [Outbox delivery](../payments/outbox-delivery.md) — T7's implementation evidence.
+- [ADR 0004](../../adr/0004-lock-through-push-outbox-relay.md)
 - [Resilience test plan](../../testing/payments-resilience.md)

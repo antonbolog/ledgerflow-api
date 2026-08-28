@@ -152,9 +152,14 @@ start: ## Start the local services
 	$(DC) ps
 
 # `stop`, never `down`: containers halt, volumes and their data survive.
+#
+# --profile relay, even here where the profile is never STARTED by this file's
+# own targets: `stop` selects containers by currently active profile, not by
+# what happens to be running, so a scheduler an operator started by hand with
+# `relay-start` would otherwise survive a plain `stop` untouched.
 .PHONY: stop
-stop: ## Stop the local services, keeping all data
-	$(DC) stop
+stop: ## Stop the local services, keeping all data (also reaches the opt-in scheduler, if running)
+	$(DC) --profile relay stop
 
 .PHONY: destroy
 destroy: ## Remove containers, networks and volumes (CONFIRM=destroy)
@@ -165,7 +170,26 @@ destroy: ## Remove containers, networks and volumes (CONFIRM=destroy)
 	  echo "  Re-run with: make destroy CONFIRM=destroy"; \
 	  exit 1; \
 	fi
-	$(DC) down --volumes --remove-orphans
+	$(DC) --profile relay down --volumes --remove-orphans
+
+# ---------------------------------------------------------------------------
+# Opt-in local scheduler
+#
+# Disposable evidence only. Neither `install` nor `start` ever passes
+# --profile relay, so a clean install's four default services never change;
+# these two targets exist so an operator — or T7's own disposable Compose
+# measurement — can add and remove the scheduler without touching the rest of
+# the stack. T8 owns the production-like activation that starts this
+# alongside its Horizon-supervised consumer.
+# ---------------------------------------------------------------------------
+
+.PHONY: relay-start
+relay-start: ## Start the opt-in scheduler service (disposable evidence only)
+	$(DC) --profile relay up -d --wait scheduler
+
+.PHONY: relay-stop
+relay-stop: ## Stop the opt-in scheduler service, leaving the rest of the stack running
+	$(DC) --profile relay stop scheduler
 
 # ---------------------------------------------------------------------------
 # Database lifecycle

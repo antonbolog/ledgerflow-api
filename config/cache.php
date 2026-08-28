@@ -86,6 +86,27 @@ return [
             'lock_connection' => env('REDIS_CACHE_LOCK_CONNECTION', 'default'),
         ],
 
+        /*
+        | The relay's heartbeat store.
+        |
+        | NEVER THE DEFAULT STORE. The default driver and its Redis connection are
+        | env-driven and carry the inherited client retries; a heartbeat write that
+        | retried or blocked would delay the relay pass it is supposed to describe.
+        | This store is pinned to the bounded `payments` connection defined in
+        | config/database.php.
+        |
+        | ITS OWN LITERAL PREFIX, not the env-derived cache.prefix. The heartbeat
+        | key must be one stable literal an operator can read with redis-cli and a
+        | test can delete by name; deriving it from APP_NAME would make the key
+        | change with a display string.
+        */
+        'payments-relay' => [
+            'driver' => 'redis',
+            'connection' => 'payments',
+            'lock_connection' => 'payments',
+            'prefix' => 'payments-relay:',
+        ],
+
         'dynamodb' => [
             'driver' => 'dynamodb',
             'key' => env('AWS_ACCESS_KEY_ID'),

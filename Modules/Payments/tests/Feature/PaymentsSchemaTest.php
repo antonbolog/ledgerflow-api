@@ -7,6 +7,7 @@ use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Modules\Merchant\Infrastructure\Persistence\Eloquent\Merchant;
+use Modules\Payments\Infrastructure\Persistence\RetryingAtomicTransaction;
 
 /*
 |--------------------------------------------------------------------------
@@ -507,4 +508,120 @@ it('refuses a second outbox envelope for one aggregate version', function (): vo
     insertOutboxRow(eventId: (string) Str::uuid7(), aggregateUuid: (string) Str::uuid7(), aggregateVersion: 1);
 
     expect(DB::table('payment_outbox')->count())->toBe(4);
+});
+
+/*
+|--------------------------------------------------------------------------
+| T7 — the two transport counters T7 owns
+|--------------------------------------------------------------------------
+|
+| T5 deliberately shipped no CHECK on any of the three counters, because no
+| production writer existed and a constraint added then would have guarded
+| columns nothing wrote. The decision splits along the same ownership line as
+| the columns: T7 owns publish_count and consecutive_transport_failures; T8
+| owns projection_failure_count.
+|
+| MEASURED FIRST, NOT ASSUMED. Laravel maps unsignedInteger to a plain PostgreSQL
+| `integer` — the shape assertion above already reads `type => integer` from the
+| catalog — so nothing rejected a negative counter before this migration. That is
+| what makes the constraint load-bearing rather than decorative, and the
+| measurement is the red run of the two tests below.
+|
+| T8's column is NOT asserted to stay unconstrained. A "globally unconstrained"
+| assertion would mean T8 could not add its own constraint without deleting a
+| test, which would make this file a veto over a decision it does not own.
+|
+*/
+
+/**
+ * Every CHECK constraint on a table, by name, with the server's own rendering of
+ * its expression.
+ *
+ * Read from pg_constraint rather than from the migration source, for the reason
+ * the file header already gives: re-reading the migration would only prove the
+ * file says what it says.
+ *
+ * @return array<string, string>
+ */
+function t7CheckConstraints(string $table): array
+{
+    $rows = DB::select(
+        <<<'SQL'
+        select conname as name, pg_get_constraintdef(oid) as definition
+          from pg_constraint
+         where conrelid = to_regclass(?)::oid
+           and contype = 'c'
+         order by conname
+        SQL,
+        [$table],
+    );
+
+    $constraints = [];
+
+    foreach ($rows as $row) {
+        $constraints[(string) $row->name] = (string) $row->definition;
+    }
+
+    return $constraints;
+}
+
+it('constrains both transport counters T7 owns, under names PostgreSQL can still address', function (): void {
+    $checks = t7CheckConstraints('payment_outbox');
+
+    expect(array_keys($checks))->toContain(
+        'payment_outbox_publish_count_non_negative',
+        'payment_outbox_consecutive_transport_failures_non_negative',
+    );
+
+    // The expression, read from the catalog. A constraint with the right name and
+    // the wrong predicate would otherwise pass.
+    expect($checks['payment_outbox_publish_count_non_negative'])
+        ->toContain('publish_count')
+        ->toContain('>= 0');
+
+    expect($checks['payment_outbox_consecutive_transport_failures_non_negative'])
+        ->toContain('consecutive_transport_failures')
+        ->toContain('>= 0');
+
+    // PostgreSQL truncates identifiers at 63 bytes, and a truncated name cannot be
+    // dropped by the name a later migration computes. Measured, not eyeballed.
+    foreach (array_keys($checks) as $name) {
+        expect(strlen($name))->toBeLessThan(64);
+    }
+});
+
+it('refuses a negative publish_count and a negative consecutive_transport_failures', function (string $column): void {
+    // DB::transaction() for the reason the file header gives: a failed statement
+    // aborts the whole PostgreSQL transaction, and RefreshDatabase already has
+    // this test inside one.
+    $eventId = insertOutboxRow();
+
+    expect(fn () => DB::transaction(fn () => DB::table('payment_outbox')
+        ->where('event_id', $eventId)
+        ->update([$column => -1])))
+        ->toThrow(QueryException::class);
+
+    // The row is untouched: the savepoint rolled back, not the whole test.
+    expect((int) DB::table('payment_outbox')->where('event_id', $eventId)->value($column))->toBe(0);
+})->with(['publish_count', 'consecutive_transport_failures']);
+
+it('reports 23514 naming the violated transport constraint', function (): void {
+    // The SQLSTATE, read with the same classifier production uses, so a change to
+    // that reader cannot silently stop this test from checking what it claims.
+    $eventId = insertOutboxRow();
+
+    try {
+        DB::transaction(fn () => DB::table('payment_outbox')
+            ->where('event_id', $eventId)
+            ->update(['publish_count' => -1]));
+
+        $sqlState = null;
+        $message = '';
+    } catch (QueryException $exception) {
+        $sqlState = RetryingAtomicTransaction::sqlStateOf($exception);
+        $message = $exception->getMessage();
+    }
+
+    expect($sqlState)->toBe('23514')
+        ->and($message)->toContain('payment_outbox_publish_count_non_negative');
 });

@@ -13,9 +13,16 @@
 # irreproducible over time, which the development environment specification
 # forbids.
 #
-# Worker and scheduler processes are NOT defined here. They arrive with their
-# own milestones and will reuse the `app` image with a `command:` override,
-# which the entrypoint's `exec "$@"` already supports.
+# Worker processes beyond `scheduler` are NOT defined here. They arrive with
+# their own milestones and will reuse the `app` image with a `command:`
+# override, which the entrypoint's `exec "$@"` already supports.
+#
+# `scheduler` IS defined, and is opt-in behind the `relay` profile. A profiled
+# service is excluded from every plain `up`/`start`/`stop`/`destroy` unless
+# `--profile relay` is passed, so a clean install's four default services never
+# change. T7 proves the lock-through-push evidence chain against it; T8 owns
+# the production-like activation that starts it — together with its
+# Horizon-supervised consumer — for real.
 
 name: ${COMPOSE_PROJECT_NAME:-ledgerflow}
 
@@ -130,6 +137,57 @@ services:
       timeout: 3s
       retries: 5
       start_period: 10s
+
+  # Opt-in only: `profiles` keeps this out of every plain `up`, including the
+  # ones `install`/`start` run. It exists so `relay-start`/`relay-stop` can
+  # bring the scheduler up and down without disturbing the four default
+  # services, and so the disposable T7 evidence run has something to prove
+  # `stop`/`destroy` also reach.
+  scheduler:
+    profiles: ["relay"]
+    build:
+      context: .
+      target: dev
+      args:
+        HOST_UID: ${HOST_UID:-1000}
+        HOST_GID: ${HOST_GID:-1000}
+    restart: unless-stopped
+    # The SAME image the entrypoint's `exec "$@"` contract already documents —
+    # only the command differs from `app`'s default `php-fpm`.
+    command: ["php", "artisan", "schedule:work"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./:/var/www/html
+    healthcheck:
+      # NOT mere process existence. payments:outbox:status exits 0 only when
+      # the scheduler heartbeat is fresh AND the PostgreSQL backlog query
+      # succeeds, so a wedged loop or a lost database both fail this check
+      # rather than a `schedule:work` process that is merely still running.
+      #
+      # start_period 75s, MEASURED, not guessed. Laravel's ScheduleWorkCommand
+      # spawns a fresh `schedule:run` subprocess only at second === 0 of each
+      # minute (ScheduleWorkCommand::work()); that subprocess is what actually
+      # loops every 100ms checking repeatable (everySecond()) events until the
+      # end of the minute (ScheduleRunCommand::runDueEventsWithinAMinute()). A
+      # container that starts right after a minute boundary can therefore wait
+      # up to ~60 real seconds before its first tick, independent of anything
+      # this project controls — the disposable T7 evidence run reproduced a
+      # `docker compose up --wait` failure at a 20s start_period for exactly
+      # this reason, with an inherited-from-Redis STALE (not missing) heartbeat
+      # on screen the whole time. Once the first tick lands, every later one is
+      # ~1s apart, so this margin is for the one cold first tick only.
+      test: ["CMD", "php", "artisan", "payments:outbox:status"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 75s
 
 volumes:
   postgres-data:

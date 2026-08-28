@@ -35,6 +35,15 @@ The initial AWS deployment may keep this internal, recoverable queue on ElastiCa
 production readiness requires the same process supervision, restart, alerting, backup authority,
 and failure evidence expected from any application worker.
 
+**Resolved by T7.** The relay side of this pipeline is live: a dedicated Redis connection `payments`
+(bounded timeouts, zero client-side retries — the relay's own PostgreSQL-backed backoff is the single
+retry owner), the queue connection and queue name both literally `payments-projection`, and
+`after_commit => false` so a message is only ever visible after the publishing transaction commits or
+not at all. Horizon supervision of this queue does not exist yet; the consumer half of the pipeline —
+and the Horizon configuration that names `payments-projection` as a supervised queue — is T8's. See
+[outbox delivery](../specifications/payments/outbox-delivery.md#scheduler-contract) and
+[ADR 0004](../adr/0004-lock-through-push-outbox-relay.md).
+
 ## SQS adoption boundary
 
 SQS/DLQ is added for a distinct workload that benefits from AWS-native durable delivery,

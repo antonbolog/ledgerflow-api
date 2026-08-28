@@ -497,3 +497,135 @@ it('carries no frontend, module config or example routing', function (string $mo
         );
     }
 })->with('modules');
+
+/*
+|--------------------------------------------------------------------------
+| Payments relay source must never opt into after-commit dispatch
+|--------------------------------------------------------------------------
+|
+| Queue::shouldDispatchAfterCommit() checks ShouldQueueAfterCommit and a truthy
+| $afterCommit property BEFORE it reads the connection's after_commit config
+| (Queue/Queue.php:396-408). Either would silently override the literal
+| after_commit => false on the payments-projection connection, and the third
+| spelling — ->afterCommit() at the dispatch site — would do the same while
+| leaving NO runtime trace for a reflection test to find.
+|
+| Immediate publication inside the still-open transaction is what turns a crash
+| before COMMIT into one documented safe duplicate instead of a lost projection,
+| so this is a correctness rule.
+|
+| SCOPED TO ONE DIRECTORY, DELIBERATELY. A repository-wide ban would also forbid a
+| future job that legitimately wants after-commit dispatch, which is a decision no
+| architecture test owns. Modules/Payments/app/Infrastructure/Relay is the whole
+| publisher — the message AND the dispatch site — and it is exactly where the third
+| spelling will appear, because ->afterCommit() is written at the push, not on the
+| message. Scanning only the message class would leave that spelling unguarded in
+| the one file most likely to carry it.
+|
+*/
+
+const LEDGERFLOW_RELAY_SOURCE = __DIR__.'/../../Modules/Payments/app/Infrastructure/Relay';
+
+/**
+ * The three spellings, found in a token stream.
+ *
+ * A pure function over tokens rather than a scan of the real file, so the failure
+ * path is exercised against fabricated input — the same discipline
+ * ledgerflowDomainViolations() already follows. Comments cannot trigger it:
+ * token_get_all() yields one T_COMMENT/T_DOC_COMMENT token for a whole comment, so
+ * the docblock naming all three traps is invisible here.
+ *
+ * @param  list<array{0: int, 1: string, 2: int}|string>  $tokens
+ * @return list<string>
+ */
+function ledgerflowAfterCommitOptIns(array $tokens): array
+{
+    $found = [];
+
+    foreach ($tokens as $index => $token) {
+        if (! is_array($token)) {
+            continue;
+        }
+
+        [$type, $text] = [$token[0], $token[1]];
+
+        if (in_array($type, [T_NAME_QUALIFIED, T_NAME_FULLY_QUALIFIED, T_STRING], true)
+            && str_ends_with(ltrim($text, '\\'), 'ShouldQueueAfterCommit')) {
+            $found[] = 'implements ShouldQueueAfterCommit';
+
+            continue;
+        }
+
+        // $afterCommit, declared or assigned.
+        if ($type === T_VARIABLE && strtolower($text) === '$aftercommit') {
+            $found[] = '$afterCommit property';
+
+            continue;
+        }
+
+        // ->afterCommit(). PHP method names are case-insensitive, so the comparison
+        // is too; a rule that matched only the canonical casing would measure
+        // spelling rather than behaviour.
+        if ($type === T_STRING
+            && strtolower($text) === 'aftercommit'
+            && ledgerflowNextSymbol($tokens, $index) === '('
+            && in_array(
+                ledgerflowPreviousToken($tokens, $index),
+                [T_OBJECT_OPERATOR, T_NULLSAFE_OBJECT_OPERATOR, T_DOUBLE_COLON],
+                true,
+            )) {
+            $found[] = '->afterCommit() call';
+        }
+    }
+
+    return array_values(array_unique($found));
+}
+
+it('keeps every Payments relay source file clear of after-commit opt-ins', function (): void {
+    expect(is_dir(LEDGERFLOW_RELAY_SOURCE))->toBeTrue(
+        'The Payments relay directory has moved; this rule now scans nothing and passes vacuously.'
+    );
+
+    $scanned = [];
+    $violations = [];
+
+    foreach (Finder::create()->files()->in(LEDGERFLOW_RELAY_SOURCE)->name('*.php') as $file) {
+        $scanned[] = $file->getFilename();
+
+        foreach (ledgerflowAfterCommitOptIns(token_get_all((string) $file->getContents())) as $violation) {
+            $violations[] = $file->getRelativePathname().': '.$violation;
+        }
+    }
+
+    expect($violations)->toBeEmpty(implode(PHP_EOL, $violations));
+
+    // A DIRECTORY SCAN CAN GO EMPTY WITHOUT THE PATH BEING WRONG — a rename inside
+    // it, a move to another layer — and an empty scan reports success. The message
+    // class is named because it is the one file guaranteed to be here; the count
+    // catches the rest disappearing.
+    expect($scanned)->toContain('ProjectPaymentEvent.php');
+    expect(count($scanned))->toBeGreaterThanOrEqual(count(glob(LEDGERFLOW_RELAY_SOURCE.'/*.php') ?: []));
+});
+
+it('detects each after-commit spelling in fabricated source', function (string $source, string $expected): void {
+    // Without these, a rule that returned a constant empty array would leave the
+    // test above green forever.
+    expect(ledgerflowAfterCommitOptIns(token_get_all($source)))->toBe([$expected]);
+})->with([
+    ['<?php class M implements \Illuminate\Contracts\Queue\ShouldQueueAfterCommit {}', 'implements ShouldQueueAfterCommit'],
+    ['<?php final class M { public bool $afterCommit = true; }', '$afterCommit property'],
+    ['<?php dispatch(new M())->afterCommit();', '->afterCommit() call'],
+    ['<?php dispatch(new M())->AfterCommit();', '->afterCommit() call'],
+]);
+
+it('does not mistake a comment or an unrelated name for an opt-in', function (): void {
+    // The real file's docblock names all three traps in prose. If comments counted,
+    // the rule above would fail on the very documentation that explains it.
+    expect(ledgerflowAfterCommitOptIns(token_get_all(
+        '<?php /** never use $afterCommit, ->afterCommit() or ShouldQueueAfterCommit */ final class M {}'
+    )))->toBeEmpty();
+
+    expect(ledgerflowAfterCommitOptIns(token_get_all(
+        '<?php final class M { public function afterCommitHook(): void {} }'
+    )))->toBeEmpty();
+});

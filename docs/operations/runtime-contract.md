@@ -19,6 +19,19 @@ scaled, restarted, and observed.
 The first Payments slice requires HTTP/API, Horizon, and scheduler/relay. Reverb and SQS workers
 arrive only with their milestones.
 
+**Scheduler/relay, as implemented by T7.** `Schedule::command('payments:outbox:relay')->everySecond()`
+in root `routes/console.php`, run by `php artisan schedule:work`. `payments:outbox:status` is the
+health surface: exit `0` only when the scheduler heartbeat is fresh (one of five states — `fresh`,
+`stale`, `missing`, `unavailable`, `invalid`) **and** one snapshot-consistent PostgreSQL aggregate
+succeeds; JSON carries no exception message. Local Compose runs it as the opt-in `scheduler` service
+behind profile `relay`, reusing the `app` image's `dev` target with `command: php artisan
+schedule:work` and a `payments:outbox:status` healthcheck; `make install`/`make start` never bring it
+up, `make relay-start`/`make relay-stop` toggle it alone, and `make stop`/`make destroy` are
+profile-aware so they still reach it if an operator started it by hand. **The relay stays dormant
+until T8 activates the scheduler and its Horizon-supervised `payments-projection` consumer together**
+— see [outbox delivery](../specifications/payments/outbox-delivery.md#scheduler-contract) and
+[ADR 0004](../adr/0004-lock-through-push-outbox-relay.md).
+
 PostgreSQL stores business and delivery truth. Redis supports cache, coordination, Pub/Sub, and
 internal queues; it is never the sole recovery source for financial state.
 
@@ -51,6 +64,15 @@ The initial logical queue is `payments-projection` on Redis, supervised by Horiz
 ```text
 outbox relay -> Redis payments-projection -> Horizon consumer -> payment_details
 ```
+
+**Resolved by T7.** Three literal names, validated at container resolution by
+`Modules\Payments\Infrastructure\Relay\RelayConfiguration` rather than read ad hoc: Redis connection
+`payments` (bounded connect/read timeouts, `max_retries => 0` — the relay's own PostgreSQL-backed
+backoff is the single retry owner), queue connection and queue name `payments-projection`
+(`after_commit => false`, so `push()` — never `pushRaw()` — publishes inside the open transaction),
+and cache store `payments-relay` (pinned to the same bounded `payments` Redis connection, never the
+default cache store, for the scheduler heartbeat only). Horizon supervision of this queue is not yet
+configured; T8 adds it alongside the consumer.
 
 SQS/DLQ is not a second copy of that queue. A later milestone selects a distinct durable workload,
 defines its message and idempotency contract, and runs ordinary Laravel SQS workers on ECS.
@@ -87,6 +109,7 @@ those artifacts rather than building application source. See
 
 ## Related
 
+- [ADR 0004](../adr/0004-lock-through-push-outbox-relay.md) — the scheduler/relay decision record.
 - [Development environment](../specifications/foundation/development-environment.md)
 - [Outbox delivery](../specifications/payments/outbox-delivery.md)
 - [Interfaces and realtime](../architecture/interfaces-and-realtime.md)
