@@ -168,6 +168,55 @@ return [
             'backoff_cap' => env('REDIS_BACKOFF_CAP', 1000),
         ],
 
+        /*
+        | The Payments relay transport, and the heartbeat cache store that shares
+        | it. Dedicated rather than reusing `default`, because every value below is
+        | a bound the relay needs and the shared connection must not be given.
+        |
+        | SHORT TIMEOUTS ARE A DATABASE-OCCUPANCY CONTROL HERE, NOT A TRANSPORT
+        | NICETY. The relay publishes INSIDE an open PostgreSQL transaction holding
+        | a row lock, so a slow Redis directly extends how long that lock is held.
+        | docs/specifications/payments/outbox-delivery.md names short transport
+        | timeouts as one of the four things preventing unbounded database
+        | occupancy.
+        |
+        | max_retries IS A LITERAL 0, AND THAT IS THE POINT. phpredis would
+        | otherwise retry inside the same locked transaction, multiplying the hold
+        | time by a factor nothing in the relay can see. The single retry owner is
+        | the PostgreSQL-backed backoff written to available_at, which is durable,
+        | observable and bounded. Laravel reads this key with array_key_exists, so
+        | 0 is honoured rather than treated as absent
+        | (Redis/Connectors/PhpRedisConnector.php:88-90).
+        |
+        | No backoff_algorithm/base/cap: with zero retries there is nothing to back
+        | off, and copying them from `default` would only suggest otherwise.
+        */
+        'payments' => [
+            // NO 'url' KEY, AND ITS ABSENCE IS THE PROTECTION.
+            //
+            // RedisManager::parseConnectionConfiguration() runs every connection
+            // through ConfigurationUrlParser::parseConfiguration(), which returns
+            // array_merge($config, $primaryOptions, $queryOptions) — so a URL's path
+            // overrides `database`, and ANY query-string key overrides ANY value
+            // below. One shared REDIS_URL of the form
+            // `redis://host:6379/0?max_retries=3&read_timeout=10` would silently put
+            // the relay back on the developer's logical database, restore the client
+            // retries this connection exists to disable, and widen the read timeout
+            // that bounds how long a row lock is held.
+            //
+            // The other connections keep their `url` deliberately: they have no
+            // literal worth defeating. This one is assembled from discrete parts so
+            // that no single environment variable can reach past them.
+            'host' => env('REDIS_HOST', '127.0.0.1'),
+            'username' => env('REDIS_USERNAME'),
+            'password' => env('REDIS_PASSWORD'),
+            'port' => env('REDIS_PORT', '6379'),
+            'database' => env('REDIS_PAYMENTS_DB', '2'),
+            'timeout' => (float) env('PAYMENTS_RELAY_REDIS_TIMEOUT', 0.25),
+            'read_timeout' => (float) env('PAYMENTS_RELAY_REDIS_READ_TIMEOUT', 0.25),
+            'max_retries' => 0,
+        ],
+
         'cache' => [
             'url' => env('REDIS_URL'),
             'host' => env('REDIS_HOST', '127.0.0.1'),

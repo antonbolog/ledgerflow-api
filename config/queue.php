@@ -75,6 +75,34 @@ return [
             'after_commit' => false,
         ],
 
+        /*
+        | The Payments projection transport.
+        |
+        | NAMES ARE LITERALS. docs/operations/runtime-contract.md and the Horizon
+        | supervision T8 adds both name `payments-projection`; an env-tunable name
+        | is how those two drift apart with nothing failing.
+        |
+        | after_commit IS A CORRECTNESS LITERAL, NEVER env(). The relay pushes
+        | while its PostgreSQL transaction is still open, which is what turns a
+        | crash before COMMIT into one documented safe duplicate instead of a lost
+        | projection. An env() here would let a .env edit defer publication past
+        | COMMIT and silently delete that property.
+        |
+        | It is necessary but NOT sufficient: Queue::shouldDispatchAfterCommit()
+        | checks the JOB first (Queue/Queue.php:396-408), so a message implementing
+        | ShouldQueueAfterCommit or carrying a truthy $afterCommit would override
+        | this. ProjectPaymentEvent does neither, asserted by its unit test and by
+        | the source rule in tests/Architecture/ModuleBoundaryTest.php.
+        */
+        'payments-projection' => [
+            'driver' => 'redis',
+            'connection' => 'payments',
+            'queue' => 'payments-projection',
+            'retry_after' => (int) env('PAYMENTS_RELAY_QUEUE_RETRY_AFTER', 90),
+            'block_for' => null,
+            'after_commit' => false,
+        ],
+
         'deferred' => [
             'driver' => 'deferred',
         ],
