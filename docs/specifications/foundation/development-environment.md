@@ -21,10 +21,10 @@ Implemented in T2: the `Merchant` and `Payments` modules with enforced layer bou
 `Modules/Merchant` behind a Sanctum-authenticated application contract, a required and indexed
 `users.merchant_id` foreign key, and two deterministic seeded merchants and users.
 
-**All application validation runs through public Make targets** — CI installs from a clean checkout
-with `make install` and validates with the single `make check` contract, and contains no Composer,
-Pest, Pint, Rector, PHPStan, or Artisan invocation of its own. CI *additionally* performs four
-explicitly documented classes of assertion, none of which validate application code:
+**All validation runs through public Make targets.** CI installs from a clean checkout with
+`make install`, then calls the single full-pipeline target `make ci`. That target composes the normal
+`make check` application validation with three additional contract classes; the workflow contains no
+Composer, Pest, Pint, Rector, PHPStan, Artisan, or image-build sequence of its own:
 
 - **guard assertions** — `destroy`, `db-reset`, `db-migrate`, and `db-seed` must refuse, each with
   its documented refusal message;
@@ -32,9 +32,8 @@ explicitly documented classes of assertion, none of which validate application c
   untouched while the suite resets `ledgerflow_test`;
 - **image-contract builds** — `docker build --target production` and `--target web`, because
   Compose only ever builds the `dev` target;
-- **failure diagnostics** — `docker compose ps` and `logs`, on failure only.
-
-These are contract assertions about the Makefile and the image, not a second validation path.
+Failure diagnostics remain workflow orchestration only. The guard and image commands live behind
+public Make targets, so local and CI behavior cannot drift into two implementations.
 
 The entrypoint ends in `exec "$@"` with `CMD ["php-fpm"]`, so Horizon, the scheduler/relay, Reverb,
 and future SQS workers reuse the same image with a `command:` override and no image change. That
@@ -63,13 +62,13 @@ The first milestone must establish a small public surface in these directions:
 | Setup | `install` | Build/configure the project from a clean checkout |
 | Lifecycle | `start`, `stop` | Start and stop local services without deleting data |
 | Destructive lifecycle | `destroy` | Remove generated containers/volumes only after explicit confirmation |
-| Validation | `test`, `quality`, `check` | Run supported tests, quality tools, and the CI-equivalent full check |
+| Validation | `agent-check`, `test`, `quality`, `check` | Run instruction parity, supported tests, quality tools, and normal local validation |
+| Full CI | `ci-contract`, `image-contract`, `ci` | Assert guards/isolation, build deployable image targets, and compose the CI-equivalent contract |
 | Database | `db-migrate`, `db-seed` | Apply schema and deterministic development fixtures |
 | Destructive database | `db-reset` | Reset local/test data only after explicit confirmation |
 
-T1 may adjust exact target names when implementation reveals a better contract. Afterward,
-`AGENTS.md` must document prerequisites, effects, and expected evidence. CI must call the same
-public targets instead of duplicating hidden command sequences.
+`AGENTS.md` documents prerequisites, effects, and expected evidence. CI must call the same public
+targets instead of duplicating hidden command sequences.
 
 ## Tooling requirements
 
@@ -703,8 +702,9 @@ proves the seeder's logic — idempotence, collision refusal, transactional roll
 tests call `$this->seed()` directly. Running `make db-seed` twice against the development database is
 what proves the command contract. Both are required; neither substitutes for the other.
 
-Validation must not be invented ad hoc: `check` is the only CI-equivalent entry point, and CI calls
-it rather than reproducing its steps.
+Validation must not be invented ad hoc: `check` is the normal local entry point; after `install`,
+`ci` is the CI-equivalent entry point. The workflow calls those public targets rather than
+reproducing their steps.
 
 ## Known deferred concerns
 

@@ -4,7 +4,7 @@
 #
 #   environment lifecycle   install  start  stop  destroy
 #   database lifecycle      db-migrate  db-seed  db-reset
-#   validation              quality  test  check
+#   validation              agent-check  quality  test  check  ci
 #
 # CI derives all validation from these targets. Ad-hoc `artisan`, `tinker` and
 # `psql` access is ordinary developer work and is not a violation of that rule.
@@ -98,7 +98,7 @@ endef
 help: ## Show the public command surface
 	@echo "Ledgerflow — public command interface"
 	@echo ""
-	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## /{printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## /{printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
 	@echo "Destructive targets require explicit confirmation:"
 	@echo "  make destroy  CONFIRM=destroy"
@@ -215,9 +215,8 @@ db-migrate: ## Apply migrations to the development database
 	$(call assert_local_db,$(DEV_DB),)
 	$(EXEC) app php artisan migrate --force
 
-# T1 establishes only the command contract: this must run, exit zero and be
-# repeatable. DatabaseSeeder is intentionally empty; T2 owns merchant-user
-# identity and the deterministic merchants and users.
+# The seeder is deterministic and repeatable; tests own collision and rollback
+# evidence while this target owns the development command contract.
 .PHONY: db-seed
 db-seed: ## Run the deterministic development seeders
 	@echo "==> seeding $(DEV_DB)"
@@ -247,8 +246,9 @@ db-reset: ## Drop and rebuild local and test data (CONFIRM=db-reset)
 # ---------------------------------------------------------------------------
 # Validation
 #
-# `check` is the single CI-equivalent entry point. CI runs this and nothing
-# else; it must never need a command sequence that does not exist here.
+# `check` is the normal local validation entry point. `ci` is the full
+# CI-equivalent contract after `install`: it adds destructive-guard assertions,
+# development-database isolation evidence, and production/web image builds.
 #
 # Non-destructive by contract: `quality` only reads files, and `test` mutates
 # exactly one thing — the isolated ledgerflow_test database, which the suite
@@ -259,8 +259,15 @@ db-reset: ## Drop and rebuild local and test data (CONFIRM=db-reset)
 # starts postgres and redis itself and leaves them running.
 # ---------------------------------------------------------------------------
 
-# Every tool here only reads files, so this runs in a throwaway container with
-# no service dependencies and works with the stack stopped. All four run in ONE
+# The agent instruction check runs on the host because Git is part of the
+# documented prerequisites and the adapters must be inspectable before a
+# container starts.
+.PHONY: agent-check
+agent-check: ## Verify canonical and path-scoped agent instruction parity
+	@./scripts/verify-agent-instructions.sh
+
+# Every PHP tool here only reads files, so this runs in a throwaway container
+# with no service dependencies and works with the stack stopped. All four run in ONE
 # container, chained with && so the first failure aborts: four separate `run`
 # invocations would pay four container starts on a target used constantly.
 #
@@ -269,7 +276,7 @@ db-reset: ## Drop and rebuild local and test data (CONFIRM=db-reset)
 # the skeleton was a separate, deliberate act, not something a validation
 # target performs.
 .PHONY: quality
-quality: ## Run formatting, refactoring and static analysis checks (read-only)
+quality: agent-check ## Run instruction, formatting, refactoring and static analysis checks (read-only)
 	@echo "==> quality (read-only: no file is modified)"
 	$(RUN) sh -c '\
 	  composer validate --strict && \
@@ -299,6 +306,18 @@ test: ## Run the Pest suite against the isolated test database (starts postgres+
 	$(RUN_DB) vendor/bin/pest --colors=always
 
 .PHONY: check
-check: ## Full CI-equivalent validation: quality then test
+check: ## Run normal local validation: quality then test
 	$(MAKE) --no-print-directory quality
 	$(MAKE) --no-print-directory test
+
+.PHONY: ci-contract
+ci-contract: ## Assert Make guards and development-database isolation around one check
+	@./scripts/ci/assert-contracts.sh
+
+.PHONY: image-contract
+image-contract: ## Build the production and web image targets
+	docker build --target production -t ledgerflow-api:ci .
+	docker build --target web -t ledgerflow-web:ci .
+
+.PHONY: ci
+ci: ci-contract image-contract ## Run the full CI-equivalent contract after install
