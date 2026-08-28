@@ -33,29 +33,8 @@ unrelated implementation details.
 - Every implementation task links to the smallest relevant specification instead of one monolithic
   plan.
 
-## Current status
+## Delivery status
 
-The architecture and first Payments vertical slice are approved. **T1 and T2 are complete**: the
-Laravel 13 skeleton, Docker runtime, Makefile command contract, and validation surface, plus the
-`Merchant` and `Payments` modules with enforced layer boundaries, merchant-user identity behind a
-Sanctum-authenticated application contract, and two deterministic seeded merchants and users.
-`AGENTS.md` documents the commands that actually work, and
-[ADR 0001](adr/0001-custom-ddd-module-layout.md) records the module layout.
-
-T3 and T4 proved the blocking compatibility invariants, and T5 landed the production Payments
-domain, the four Payments migrations and
-[ADR 0002](adr/0002-payments-domain-event-sourcing-allowlist.md). Payments' `Domain` holds
-`PaymentAggregate`, `PaymentInitiated` and two domain exceptions; Merchant's `Domain` remains
-deliberately empty.
-
-T6 closed M3 and serves the first HTTP endpoint, `POST /api/payments`: one transaction commits the
-idempotency receipt, the stored event and the outbox envelope or none of them, an identical retry
-replays the exact stored bytes, and every `/api/*` failure is RFC 9457 Problem Details. See
-[ADR 0003](adr/0003-postgresql-idempotency-arbitration.md).
-
-T7 opens M4 and delivers the envelope: a scheduler-driven, lock-through-push outbox relay publishes
-one eligible row per short PostgreSQL transaction to Redis, with capped backoff on transport
-rejection, a safe duplicate on crash, and a read-only JSON health surface combining a five-state
-scheduler heartbeat with a PostgreSQL backlog aggregate. See
-[ADR 0004](adr/0004-lock-through-push-outbox-relay.md). **Nothing consumes that envelope yet — T8 is
-next.**
+The write path and scheduler-driven outbox relay are implemented. The projection consumer, Horizon
+supervision, read model, and payment query endpoint are not. The [roadmap](roadmap.md) is the only
+canonical source for task history, current sequencing, and completion status.

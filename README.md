@@ -1,117 +1,106 @@
 # Ledgerflow API
 
 Ledgerflow is a production-like fintech learning and portfolio system built around DDD, CQRS,
-Event Sourcing, idempotency, asynchronous delivery, and explicit failure recovery.
+event sourcing, idempotency, asynchronous delivery, and explicit failure recovery.
 
-This repository contains the Laravel API and the internal Filament administration panel. The
-first vertical slice proves that payment initiation remains consistent under repeated requests,
-queue redelivery, worker interruption, and read-model rebuild.
+This repository contains the Laravel API, domain modules, application workers, Docker image, and
+runtime contracts, and owns the future internal Filament administration panel. It is the
+architecture anchor for the three-repository Ledgerflow system.
 
-## Status
+## What exists today
 
-T1 and T2 are complete. The repository has its Docker runtime, Makefile command contract and
-validation surface, the `Merchant` and `Payments` modules with enforced layer boundaries
-([ADR 0001](docs/adr/0001-custom-ddd-module-layout.md)), merchant-user identity inside
-`Modules/Merchant` behind a Sanctum-authenticated application contract, and two deterministic
-seeded merchants and users.
+- `POST /api/payments` initiates a payment for an authenticated merchant. The idempotency receipt,
+  stored event, and outbox envelope commit in one PostgreSQL transaction or not at all.
+- Identical retries replay the exact stored response; conflicting payloads return `409`; supported
+  transient database failures retry as a whole and exhaust into `503`.
+- API failures use RFC 9457 `application/problem+json`.
+- A scheduler-driven outbox relay publishes eligible event IDs to the logical
+  `payments-projection` Redis queue with PostgreSQL-backed transport retry state and a read-only JSON
+  health surface.
+- The relay is deliberately dormant in normal deployments until its Horizon-supervised projection
+  consumer lands. The read model and `GET /api/payments/{id}` do not exist yet.
 
-T1–T6 are complete. The Payments `Domain` exists: `PaymentAggregate` records an immutable
-`PaymentInitiated`, admitted by
-[ADR 0002](docs/adr/0002-payments-domain-event-sourcing-allowlist.md)'s exact two-class allowlist,
-and four migrations create `stored_events`, `snapshots`, `payment_idempotency_receipts` and
-`payment_outbox`. Merchant's `Domain` is still deliberately empty.
-
-`POST /api/payments` is served. An authenticated merchant user initiates a payment; the idempotency
-receipt, the stored event and the outbox envelope commit in one transaction on one connection or not
-at all; an identical merchant/key/payload replays the exact stored response bytes; a mismatched
-payload is `409`; allowlisted PostgreSQL failures retry with fresh objects and exhaust into a `503`.
-Every `/api/*` failure is RFC 9457 `application/problem+json`. See
-[ADR 0003](docs/adr/0003-postgresql-idempotency-arbitration.md).
-
-**Nothing delivers the envelope yet.** The relay, the projection consumer, the read model and
-`GET /api/payments/{id}` belong to T7 and later, described in [the roadmap](docs/roadmap.md) — so the
-`Location` header points at a route that does not exist yet. **T7 is next.**
+The [roadmap](docs/roadmap.md) is the canonical source for delivery status and sequencing.
 
 ## Quickstart
 
-Requires Docker with Compose v2, GNU Make, and Git. **No host PHP or Composer** — everything runs
-in containers.
+Requires Docker with Compose v2, GNU Make, and Git. No host PHP or Composer is required.
 
 ```bash
 make install   # build, install dependencies, start services, migrate
-make check     # composer validate + Pint + Rector + PHPStan + Pest
+make check     # instruction parity + Composer + Pint + Rector + PHPStan + Pest
 ```
 
-`make install` leaves four healthy services and the API on <http://127.0.0.1:8080> (loopback only);
-`GET /up` is the health endpoint and `POST /api/payments` is the initiation endpoint, which requires
-a Sanctum bearer token and an `Idempotency-Key` header. `make` on its own prints the full command
-surface. Destructive targets require a typed confirmation: `make destroy CONFIRM=destroy`,
+The API is available at <http://127.0.0.1:8080> (loopback only). `GET /up` is the health endpoint;
+`POST /api/payments` requires a Sanctum bearer token and an `Idempotency-Key` header.
+
+Run `make` to see the complete command surface. Destructive targets require target-specific typed
+confirmation, for example `make destroy CONFIRM=destroy` and
 `make db-reset CONFIRM=db-reset`.
 
-The Laravel foundation, Docker runtime, command contract, validation surface, module layout,
-Merchant identity and the Payments write path are all in place. Asynchronous delivery, the read
-model, verification and rebuild arrive in later milestones — see the [roadmap](docs/roadmap.md).
+## Architecture
+
+The application uses bounded contexts with a custom DDD module layout:
+
+```text
+Modules/<Context>/app/
+├── Domain
+├── Application
+├── Infrastructure
+└── Http
+```
+
+- `Payments` is event-sourced and owns payment lifecycle, idempotency, outbox, projection, and
+  rebuild semantics.
+- `Merchant` owns merchant-user identity and conventional CRUD persistence.
+- PostgreSQL is the durable authority for financial and delivery state.
+- Redis supports internal recoverable queues, cache, coordination, and Pub/Sub; SQS is reserved for
+  separately owned durable workloads.
+
+See [ADR 0001](docs/adr/0001-custom-ddd-module-layout.md) for module boundaries and
+[messaging and queues](docs/architecture/messaging-and-queues.md) for transport ownership.
 
 ## Repository ecosystem
 
 | Repository | Responsibility | Visibility |
 |---|---|---|
-| [`ledgerflow-api`](https://github.com/mythern/ledgerflow-api) | Laravel API, Payments and Merchant modules, Filament `/admin`, application workers, and runtime contracts | Private now, public later |
-| [`ledgerflow-spa`](https://github.com/mythern/ledgerflow-spa) | Next.js/React merchant dashboard | Private now, public later |
-| [`ledgerflow-infra`](https://github.com/mythern/ledgerflow-infra) | Terraform, AWS resources, environments, and deployment topology | Private permanently |
+| [`ledgerflow-api`](https://github.com/antonbolog/ledgerflow-api) | Laravel API, modules, Filament `/admin`, workers, and runtime contracts | Private now, public later |
+| [`ledgerflow-spa`](https://github.com/antonbolog/ledgerflow-spa) | Next.js/React merchant dashboard | Private now, public later |
+| [`ledgerflow-infra`](https://github.com/antonbolog/ledgerflow-infra) | Terraform, AWS resources, environments, and deployment topology | Private permanently |
 
-This repository is the current architecture anchor for the complete Ledgerflow system. Each
-repository remains authoritative for its own implementation and local operating rules.
+Each repository is authoritative for its own implementation and local operating rules.
 
-## Planned stack
+## Technology
 
-- PHP 8.4 and Laravel 13 (image pinned to `php:8.4.24-fpm-alpine`; `composer.json` requires
-  `^8.4.1`, the minimum the locked dependency graph resolves against)
-- PostgreSQL locally and Amazon RDS for PostgreSQL on AWS
-- Redis locally and Amazon ElastiCache for cache, locks, rate limiting, Pub/Sub, and Laravel queues
-- Laravel Horizon for Redis queue supervision
-- Amazon SQS and DLQ for separately owned durable workloads
-- Laravel Reverb for authenticated WebSocket communication
-- Laravel Sanctum for API authentication
-- Filament at `/admin` for business administration workflows
-- Spatie Laravel Event Sourcing for the Payments module
-- Docker, Make, GitHub Actions, Amazon ECR, and ECS Fargate
-- CloudWatch for runtime evidence and operational alerts
-- Amazon OpenSearch Service as a later search/reporting option, subject to a cost and use-case gate
+Current application stack:
 
-Redis queues and SQS are not duplicate transports for the same production job. Each logical queue
-has one owner and one selected transport. Redis Pub/Sub used by Reverb is also distinct from both
-queue transports.
+- PHP 8.4, Laravel 13, and Sanctum
+- PostgreSQL 18 and Redis 8
+- Spatie Laravel Event Sourcing for `Payments`
+- Docker, GNU Make, Pest, PHPStan, Pint, Rector, and GitHub Actions
+
+Planned runtime capabilities arrive only with an owning use case and contract: Horizon for Redis
+queue supervision, Reverb for authenticated realtime updates, SQS/DLQ for a distinct durable
+workload, and ECS Fargate/RDS/ElastiCache/CloudWatch through `ledgerflow-infra`. OpenSearch remains
+behind an explicit use-case and cost gate.
 
 ## User-facing surfaces
 
 - `/api/*` — merchant-facing JSON API consumed by `ledgerflow-spa`.
-- `/admin` — internal Filament panel for authorized business operators.
-- authenticated WebSocket channels — realtime merchant-facing updates through Reverb.
+- `/admin` — planned internal Filament workflows for authorized business operators.
+- Authenticated WebSocket channels — planned realtime merchant updates through Reverb.
 
-AWS, Horizon, queue, DLQ, outbox-repair, and infrastructure controls remain developer/DevOps
-surfaces. They are not exposed through the merchant dashboard or general-purpose admin CRUD.
+AWS, Horizon, queue, DLQ, outbox-repair, and infrastructure controls are developer/DevOps surfaces,
+not general-purpose merchant or admin CRUD.
 
 ## Documentation
 
-- [Architecture map](ARCHITECTURE.md) — compact navigation across system documentation.
-- [Documentation index](docs/README.md) — where each project concern is documented.
-- [Roadmap](docs/roadmap.md) — milestones, implementation tasks, dependencies, and tracker links.
-- [System overview](docs/architecture/system-overview.md) — boundaries, sources of truth, and key
-  design trade-offs.
-- [Interfaces and realtime](docs/architecture/interfaces-and-realtime.md) — API, admin, SPA, and
-  WebSocket boundaries.
-- [Messaging and queues](docs/architecture/messaging-and-queues.md) — outbox, Redis/Horizon, SQS,
-  and Pub/Sub responsibilities.
-- [Deployment boundaries](docs/architecture/deployment-boundaries.md) — image, CI/CD, Terraform,
-  and AWS ownership.
-- [Payments flow](docs/architecture/payments-flow.md) — end-to-end write, delivery, projection, and
-  query flow.
-- [Development environment](docs/specifications/foundation/development-environment.md) — Docker,
-  editor neutrality, and the intended Makefile interface.
-- [Payments specifications](docs/specifications/payments/README.md) — canonical behavior of the
-  first vertical slice.
-- [Resilience test plan](docs/testing/payments-resilience.md) — executable acceptance and failure
-  coverage.
-- [Runtime contract](docs/operations/runtime-contract.md) — application process topology and
-  operational evidence.
+- [Architecture map](ARCHITECTURE.md)
+- [Documentation index](docs/README.md)
+- [Roadmap](docs/roadmap.md)
+- [System overview](docs/architecture/system-overview.md)
+- [Payments flow](docs/architecture/payments-flow.md)
+- [Development environment](docs/specifications/foundation/development-environment.md)
+- [Payments specifications](docs/specifications/payments/README.md)
+- [Resilience test plan](docs/testing/payments-resilience.md)
+- [Runtime contract](docs/operations/runtime-contract.md)
