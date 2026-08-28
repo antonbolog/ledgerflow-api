@@ -4,15 +4,24 @@ declare(strict_types=1);
 
 namespace Modules\Payments\Providers;
 
+use Illuminate\Contracts\Cache\Factory as CacheFactory;
 use Illuminate\Contracts\Foundation\Application;
+use Illuminate\Contracts\Queue\Factory as QueueFactory;
 use Illuminate\Database\ConnectionInterface;
+use Illuminate\Database\DatabaseManager;
 use Illuminate\Support\ServiceProvider;
 use Modules\Payments\Application\Initiation\AtomicTransaction;
 use Modules\Payments\Application\Initiation\IdempotencyReceipts;
+use Modules\Payments\Infrastructure\Console\PaymentOutboxStatusCommand;
+use Modules\Payments\Infrastructure\Console\RelayPaymentOutboxCommand;
 use Modules\Payments\Infrastructure\Persistence\DatabaseIdempotencyReceipts;
 use Modules\Payments\Infrastructure\Persistence\RetryingAtomicTransaction;
 use Modules\Payments\Infrastructure\Projectors\PaymentOutboxWriter;
+use Modules\Payments\Infrastructure\Relay\OutboxRelay;
+use Modules\Payments\Infrastructure\Relay\RelayConfiguration;
+use Modules\Payments\Infrastructure\Relay\RelayHeartbeat;
 use Override;
+use Psr\Log\LoggerInterface;
 use Spatie\EventSourcing\Projectionist;
 
 /**
@@ -50,6 +59,79 @@ class PaymentsServiceProvider extends ServiceProvider
                 $app->make(ConnectionInterface::class),
             ),
         );
+
+        // VALIDATED AT RESOLUTION, WHICH IS BEFORE ANY ROW IS TOUCHED. Every relay
+        // value is either a duration that ends up inside a PostgreSQL interval or a
+        // limit that bounds a loop, and PostgreSQL accepts a negative interval
+        // without complaint. The transport bounds come from database.redis.payments
+        // because that is the array Laravel's PhpRedisConnector actually reads.
+        $this->app->scoped(
+            RelayConfiguration::class,
+            fn (): RelayConfiguration => RelayConfiguration::fromArray(
+                (array) config('payments.relay'),
+                (array) config('database.redis.payments'),
+            ),
+        );
+
+        // THE CONCRETE Connection, NOT ConnectionInterface. The relay owns its
+        // transaction lifecycle explicitly — beginTransaction, commit, rollBack —
+        // and inspects transactionLevel(), none of which ConnectionInterface
+        // promises in the shape needed here.
+        //
+        // DatabaseManager::connection() with no name returns the DEFAULT connection,
+        // cached per name, so this is the SAME object DatabaseIdempotencyReceipts
+        // and PaymentOutboxWriter already hold. That identity is the relay's whole
+        // safety story: the row lock, the publication and the update must run on one
+        // backend, or FOR UPDATE protects nothing the UPDATE then changes.
+        $this->app->scoped(
+            OutboxRelay::class,
+            fn (Application $app): OutboxRelay => new OutboxRelay(
+                $app->make(DatabaseManager::class)->connection(),
+                $app->make(QueueFactory::class),
+                $app->make(RelayConfiguration::class),
+                $app->make(LoggerInterface::class),
+            ),
+        );
+
+        $this->app->scoped(
+            RelayHeartbeat::class,
+            fn (Application $app): RelayHeartbeat => new RelayHeartbeat(
+                $app->make(CacheFactory::class),
+                $app->make(RelayConfiguration::class),
+                $app->make(LoggerInterface::class),
+            ),
+        );
+
+        // BOUND EXPLICITLY BECAUSE OF THE CLOSURE. The command takes a monotonic
+        // clock so the start budget can be proved without a pass that genuinely
+        // takes 750 ms, and a Closure is the one constructor parameter the
+        // container cannot autowire.
+        //
+        // hrtime(), not microtime(): the budget must survive an NTP step or a
+        // daylight-saving jump. A wall clock going backwards mid-pass would make the
+        // elapsed time negative and the budget effectively infinite.
+        $this->app->scoped(
+            RelayPaymentOutboxCommand::class,
+            fn (Application $app): RelayPaymentOutboxCommand => new RelayPaymentOutboxCommand(
+                $app->make(OutboxRelay::class),
+                $app->make(RelayConfiguration::class),
+                $app->make(RelayHeartbeat::class),
+                $app->make(LoggerInterface::class),
+                static fn (): int => (int) hrtime(true),
+            ),
+        );
+
+        // THE CONCRETE Connection, for the same reason OutboxRelay takes it: the
+        // status query's own read-only transaction inspects transactionLevel(),
+        // which ConnectionInterface does not promise in the shape needed here.
+        $this->app->scoped(
+            PaymentOutboxStatusCommand::class,
+            fn (Application $app): PaymentOutboxStatusCommand => new PaymentOutboxStatusCommand(
+                $app->make(RelayHeartbeat::class),
+                $app->make(DatabaseManager::class)->connection(),
+                $app->make(RelayConfiguration::class),
+            ),
+        );
     }
 
     public function boot(): void
@@ -64,5 +146,16 @@ class PaymentsServiceProvider extends ServiceProvider
         // and its ConnectionInterface is injected. EventHandlerCollection keys
         // handlers by class name, so registering twice cannot make it run twice.
         $this->app->make(Projectionist::class)->addProjector(PaymentOutboxWriter::class);
+
+        // Registered by CLASS NAME, so Artisan resolves each command through the
+        // container and the bindings above apply. nwidart/laravel-modules discovers
+        // providers, not commands, so without this line `payments:outbox:relay`
+        // simply does not exist and the schedule entry silently resolves nothing.
+        if ($this->app->runningInConsole()) {
+            $this->commands([
+                RelayPaymentOutboxCommand::class,
+                PaymentOutboxStatusCommand::class,
+            ]);
+        }
     }
 }

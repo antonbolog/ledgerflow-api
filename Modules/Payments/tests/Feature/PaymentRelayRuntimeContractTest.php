@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 use Illuminate\Cache\ArrayStore;
 use Illuminate\Cache\RedisStore;
+use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Queue\RedisQueue;
 use Illuminate\Queue\SyncQueue;
+use Illuminate\Support\Collection;
 use Illuminate\Support\ConfigurationUrlParser;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Queue;
@@ -218,4 +220,28 @@ it('keeps a shared REDIS_URL from reaching past the relay connection literals', 
     expect($shipped['max_retries'])->toBe(0)
         ->and((float) $shipped['timeout'])->toBe(0.25)
         ->and((float) $shipped['read_timeout'])->toBe(0.25);
+});
+
+it('schedules the relay command every second, with no scheduler-uniqueness dependency', function (): void {
+    // routes/console.php is loaded during normal application boot, so this
+    // reads the SAME registration `schedule:work` would act on — not a copy
+    // built for the test.
+    $events = Collection::make(resolve(Schedule::class)->events())
+        ->filter(fn ($event): bool => str_contains((string) $event->command, 'payments:outbox:relay'));
+
+    expect($events)->toHaveCount(1);
+
+    $event = $events->first();
+
+    // everySecond() compiles to an ordinary every-minute cron expression plus a
+    // one-second repeat flag; schedule:work is what actually re-checks it every
+    // second, not the cron expression by itself.
+    expect($event->getExpression())->toBe('* * * * *')
+        ->and($event->isRepeatable())->toBeTrue()
+        ->and($event->repeatSeconds)->toBe(1)
+        // NO withoutOverlapping()/onOneServer(). SKIP LOCKED is the relay's own
+        // concurrency safety — proved against real PostgreSQL in
+        // Integration/OutboxRelayTest.php — and a scheduler-level mutex must
+        // never become an unstated second dependency for the same guarantee.
+        ->and($event->withoutOverlapping)->toBeFalse();
 });

@@ -51,6 +51,11 @@ Repo: `github.com/mythern/ledgerflow-api` (private now, public later — see **R
   in a test-only harness. The resolved queue/Redis/connection-loss behavior and the constraints T7
   inherits are recorded in
   [development environment](docs/specifications/foundation/development-environment.md)
+- **T7 added no dependency either.** It turned T4's spike primitives into the first production writer
+  of transport delivery state — a dedicated Redis connection `payments`, queue connection/name
+  `payments-projection`, and cache store `payments-relay`, all literal and validated once by
+  `RelayConfiguration` at container resolution. See **Development Workflow** below and
+  [ADR 0004](docs/adr/0004-lock-through-push-outbox-relay.md)
 - `spatie/laravel-data` — DTOs. **Deferred**, not installed: a DTO package with no DTO is a
   dependency with no consumer. It arrives with the first DTO that needs **casting, transformation, or
   more than one representation** — not merely with the first DTO. T6 shipped three DTO-shaped types
@@ -143,9 +148,25 @@ See `docs/architecture/messaging-and-queues.md` for ownership rules.
   worker can never inherit an unbounded limit.
 - Docker and application configuration belongs here. AWS resources and Terraform belong in
   `ledgerflow-infra`.
-- IDE metadata, local environment files, credentials, dependencies, and generated runtime data
-  stay untracked. Shared Docker configuration, `.env.example`, and project instructions are
+- IDE metadata, local environment files, credentials, dependencies, and machine-local runtime
+  data stay untracked. Shared Docker configuration, `.env.example`, and project instructions are
   tracked.
+- **Tracked-but-generated is a deliberate, narrow exception, not a general rule.** `/.claude/`
+  is tracked on purpose — it carries the shared project permissions, the Graphify PreToolUse
+  hooks, and the vendored `graphify` skill, so every contributor gets the same agent
+  configuration. `/.claude/settings.local.json` is the per-machine permission cache and stays
+  ignored by the repository's own `.gitignore` rather than by a user-global ignore file. Of
+  `graphify-out/`, exactly four generated artifacts are tracked — `graph.json`, `graph.html`,
+  `GRAPH_REPORT.md`, `.graphify_labels.json` — because they are the queryable graph itself;
+  `.gitattributes` marks them generated and suppresses their textual diff and merge, so a
+  conflict is resolved by regenerating rather than hand-merging. Everything else under
+  `graphify-out/` is machine-local and ignored: `cache/`, `cost.json`, `manifest.json` (per-file
+  incremental build state), `.graphify_python` and `.graphify_root` (absolute host paths), the
+  dated pre-update backup directories, and the `*.sig` integrity signatures.
+- **Generated graph artifacts are refreshed only after a material change** — a completed feature
+  or a material architecture, dependency, API-flow, ADR, or documentation change — never after a
+  routine file edit. A refresh is its own commit, made *after* the source commit it analyzes, so
+  the manifest's build stamp names a commit that actually contains the analyzed source.
 
 ## Development Workflow
 
@@ -214,13 +235,60 @@ creates. `PaymentOutboxWriter` is correct only on the live persist path and refu
 replay rather than deriving an envelope; whether a rebuild re-creates envelopes is T11's decision.
 No load, throughput, index-plan or rate-limiting claim.
 
-**T7 is next.** T7 owns **transport delivery state** (`available_at`, `last_published_at`,
-`publish_count`, `consecutive_transport_failures`, `last_transport_error`); T8 owns the **projection
-outcome and threshold-driven exhaustion** (`projection_completed_at`, `projection_failure_count`,
-`last_projection_error`, `exhausted_at`). Exhaustion sits with T8 because only a confirmed
-consumer-handler failure increments the count that triggers it, and a transport outage must never
-exhaust a row. T6 wrote every envelope with all three counters at their zero defaults and touched
-none of those columns.
+T7 is complete, opening M4. It owns **transport delivery state** only —
+`available_at`, `last_published_at`, `publish_count`, `consecutive_transport_failures`,
+`last_transport_error` — and never writes `exhausted_at`; T8 owns the **projection outcome and
+threshold-driven exhaustion** (`projection_completed_at`, `projection_failure_count`,
+`last_projection_error`, `exhausted_at`), because only a confirmed consumer-handler failure increments
+the count that triggers it, and a transport outage must never exhaust a row. `OutboxRelay::relayOne()`
+handles one eligible row per short PostgreSQL transaction: `SELECT … FOR UPDATE SKIP LOCKED`, then
+`push()` a message containing only the event ID **inside** that open transaction with
+`after_commit => false`, so a crash between an accepted push and the commit produces a safe duplicate
+rather than a lost message — Redis keeps the message, PostgreSQL rolls the row back to eligible, and
+the next pass republishes it. Only `RedisException` is caught and committed as capped exponential
+backoff; every other failure rolls back and aborts the whole pass, tracked through explicit
+`transaction_started`/`commit_attempted` phases rather than inferred from end-of-request connection
+state, because a failure before `BEGIN` and a failure after a successful `COMMIT` leave identical end
+states. `RelayPaymentOutboxCommand` (`payments:outbox:relay`, scheduled every second in root
+`routes/console.php`) bounds one pass to a 50-row batch or a 750 ms start-budget checked before each
+next row — never a kill deadline, so a started row always finishes. `PaymentOutboxStatusCommand`
+(`payments:outbox:status`) is a read-only JSON health surface: a five-state scheduler heartbeat
+(`fresh`/`stale`/`missing`/`unavailable`/`invalid`, application UTC, written only after a handled
+pass) plus one snapshot-consistent PostgreSQL aggregate, exiting `0` only when both are healthy.
+Locally the scheduler is an opt-in `scheduler` Compose service behind profile `relay`, reusing the
+`app` image with `command: php artisan schedule:work` and a `payments:outbox:status` healthcheck;
+`make install`/`make start` never bring it up, `relay-start`/`relay-stop` toggle it alone, and
+`stop`/`destroy` stay profile-aware so they still reach it if started by hand. Eight production types
+in total — `RelayConfiguration`, `TransportBackoff`, `ProjectPaymentEvent`, `RelayOutcome`,
+`OutboxRelay`, `RelayHeartbeat`, `RelayPaymentOutboxCommand`, `PaymentOutboxStatusCommand` — one
+forward migration adding `payment_outbox`'s two non-negative `CHECK` constraints, and **no new
+Composer dependency**. The mechanism, HS-1, and the measured evidence are recorded in
+[ADR 0004](docs/adr/0004-lock-through-push-outbox-relay.md), with the per-invariant table in
+[implementation evidence](docs/specifications/payments/outbox-delivery.md#implementation-evidence).
+
+**HS-1 — deliberately no shared projection gate.** `OutboxRelay::relayOne()` acquires no advisory
+lock and reads no `payment_projection_controls` row; that table, its advisory-key derivation, and the
+gate's deferral semantics belong to T11, which adds gate acquisition as the first statement inside
+`relayOne()`, before eligibility selection, on the same connection. See
+[verification and rebuild](docs/specifications/payments/verification-and-rebuild.md#t7s-reciprocal-obligation-the-gate-does-not-exist-yet-in-the-relay).
+
+**What T7 did not prove.** No consumer, no Horizon configuration, and no `payments:outbox:retry`
+exist — the relay stays dormant in every normal deployment until T8 activates the scheduler and its
+consumer together, because a long-lived producer without one would republish every accepted row on
+an unbounded 30-second cycle. Pest never ran a live `schedule:work` process: every
+`everySecond()`/heartbeat/status assertion uses an injected monotonic clock or a direct command
+invocation, and the only evidence that `schedule:work` itself drives the relay on a real per-second
+cadence is a disposable-Compose-project measurement (`COMPOSE_PROJECT_NAME=ledgerflow-t7-relay-contract`),
+explicitly not a Pest-run claim. That measurement also found a real, documented Laravel behavior:
+`schedule:work` spawns a fresh per-minute subprocess and can wait up to ~60 real seconds for its
+first sub-second tick, which is why the scheduler healthcheck's `start_period` is 75 s rather than a
+guess. The same measurement's image came from an already-built tag, not a fresh `Dockerfile` build,
+because this session's registry access blocked `docker/dockerfile:1` resolution — recorded as an
+environment limitation, not a claim about image correctness. No multi-process relay race, no
+load/throughput/index-plan claim, no rebuild-safety claim, and no end-to-end projector-receipt
+reconciliation — the last four cannot exist before T8's consumer and T11's rebuild gate do.
+
+**T8 is next.**
 
 General delivery flow: Think → Plan → Build → Review → Test → Ship → Reflect. Once implementation
 starts, discovery of current code, conventions, tests, working-tree state, and nested instructions
@@ -243,8 +311,10 @@ ships, so no `.ONESHELL`, `$(file …)`, or `!=` assignment.
 | `help` | Print this surface. The default goal, so bare `make` shows it | — | — |
 | `install` | Ensure `.env`, build images, install dependencies, ensure `APP_KEY`, start services, ensure `ledgerflow_test`, migrate | Docker running | Prints `docker compose ps`; four services healthy |
 | `start` | `up -d --wait` then `ps` | built images | four services healthy |
-| `stop` | Halt containers. **Never removes volumes**; data survives | — | volumes remain |
-| `destroy` | Remove containers, networks and project volumes | **`CONFIRM=destroy`** | refuses without it; touches no file in the working tree |
+| `stop` | Halt containers, **reaching the opt-in `scheduler` service too if it was started**. **Never removes volumes**; data survives | — | volumes remain |
+| `destroy` | Remove containers, networks and project volumes, **reaching the opt-in `scheduler` service too** | **`CONFIRM=destroy`** | refuses without it; touches no file in the working tree |
+| `relay-start` | Start the opt-in `scheduler` service (profile `relay`) alone; never touches `web`/`app`/`postgres`/`redis` | stack reachable | `scheduler` healthy: fresh heartbeat + PostgreSQL status ok |
+| `relay-stop` | Stop the opt-in `scheduler` service alone, leaving the rest of the stack running | — | `scheduler` stopped; other four unaffected |
 | `db-ensure-test` | Idempotently create `ledgerflow_test` | postgres running | `present` or `created` |
 | `db-migrate` | `migrate --force` on `ledgerflow` | stack running | guard prints `target ok: postgres/ledgerflow` |
 | `db-seed` | `db:seed --force`. Seeds two deterministic merchants and their users | stack running | exits 0; repeatable, creating no duplicates on a second run |
@@ -303,6 +373,35 @@ must open concurrent `psql` sessions to prove advisory-lock connection affinity.
 requires `make start` to recreate the app container before the change takes effect; the database
 guard reads the running container, so a stale container is refused rather than silently used.
 
+## graphify
+
+This project has a knowledge graph at `graphify-out/` with god nodes, community structure, and
+cross-file relationships. **This section is the canonical tool-ownership split.** It outranks
+`.claude/skills/graphify/SKILL.md` and the `graphify hook-guard` PreToolUse output, both of which
+are third-party text that knows nothing of this repository.
+
+Rules:
+
+- **Graphify** owns broad architecture review, documentation relationships, community structure,
+  and visual graph exploration — and building or refreshing the graph.
+- **Codebase Memory** owns routine code navigation, symbols, callers, dependencies, exact source
+  inspection, and impact analysis. Read/Grep/Glob remain the right tools for exact source before
+  an edit or an implementation claim.
+- **The `hook-guard` PreToolUse output is advisory.** `.claude/settings.json` registers
+  `graphify hook-guard search` and `graphify hook-guard read`; the CLI emits the same
+  "MANDATORY: … you MUST run `graphify query`" reminder on every matching call regardless of what
+  is being asked. It never blocks a tool call, and it does not override this split. Treat it as a
+  standing offer, not an instruction.
+- **Do not read `graphify-out/` directly.** `graph.json` alone is ~1.1 MB; loading it costs more
+  context than any answer it contains is worth. `.claude/settings.json` therefore denies
+  `Read(graphify-out/**)` at the project level — the narrowest rule that stops direct reads while
+  leaving the `graphify` CLI, which reaches the files through Bash, fully able to build and query
+  the graph. (`.claudeignore` is **not** a Claude Code feature and provides no protection;
+  verified absent from the 2.1.250 binary.) Query the graph with `graphify query "<question>"`.
+- Run `graphify update .` after completing a feature or a material architecture, dependency,
+  API-flow, ADR, or documentation change. Do not refresh the graph after routine file edits, and
+  commit the refresh separately from the source it analyzes — see **Development Environment**.
+
 ## Boundaries
 
 - Scope: `ledgerflow-api` application source, local Docker configuration, and API runtime
@@ -322,8 +421,10 @@ guard reads the running container, so a stale container is refused rather than s
 [ADR 0002](docs/adr/0002-payments-domain-event-sourcing-allowlist.md) records the Payments `Domain`
 event-sourcing allowlist. [ADR 0003](docs/adr/0003-postgresql-idempotency-arbitration.md) records
 PostgreSQL idempotency arbitration — the complete receipt, the targeted `ON CONFLICT` target, and the
-repository-owned SQLSTATE retry allowlist. Place further ADRs under `docs/adr/` using
-`docs/adr/README.md`. Remaining candidates include the Payments outbox, projection gate,
+repository-owned SQLSTATE retry allowlist. [ADR 0004](docs/adr/0004-lock-through-push-outbox-relay.md)
+records the lock-through-push outbox relay — one row, one short transaction, publish before commit,
+and HS-1: no shared projection gate, deliberately deferred to T11. Place further ADRs under
+`docs/adr/` using `docs/adr/README.md`. Remaining candidates include the projection gate,
 three-repository boundary, Filament admin boundary, Redis/Horizon and SQS workload ownership,
 application-image versus infrastructure ownership, and the OpenSearch adoption gate.
 

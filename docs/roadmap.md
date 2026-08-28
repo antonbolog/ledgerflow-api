@@ -12,7 +12,10 @@ event-sourcing configuration, and [ADR 0002](adr/0002-payments-domain-event-sour
 producers of `payment_idempotency_receipts` and `payment_outbox`, recorded in
 [ADR 0003](adr/0003-postgresql-idempotency-arbitration.md) with its evidence in the
 [implementation evidence](specifications/payments/initiation-and-idempotency.md#implementation-evidence)
-table. **T7 is next**, and M4 opens with it.
+table. **T7 is complete**, opening M4: the scheduler-driven lock-through-push outbox relay, recorded
+in [ADR 0004](adr/0004-lock-through-push-outbox-relay.md) with its evidence in the
+[implementation evidence](specifications/payments/outbox-delivery.md#implementation-evidence) table.
+**T8 is next.**
 
 ## Outcome
 
@@ -102,9 +105,35 @@ requests are proved only across two connections in one process. Genuine multi-pr
 
 Complete the asynchronous tracer bullet on Redis/Horizon.
 
-- T7 — Implement scheduler-driven outbox relay and separated failure semantics.
+- T7 — Implement scheduler-driven outbox relay and separated failure semantics. **Complete.**
+  `OutboxRelay` publishes one eligible row per short PostgreSQL transaction — `SELECT … FOR UPDATE
+  SKIP LOCKED`, `push()` inside the open transaction with `after_commit => false`, then commit
+  accepted state or capped-backoff transport-rejection state; every other failure rolls back and
+  aborts the whole pass, tracked through explicit `transaction_started`/`commit_attempted` phases
+  rather than inferred from end-of-request connection state. `RelayPaymentOutboxCommand`
+  (`payments:outbox:relay`, scheduled every second) bounds one pass to a 50-row batch or a 750 ms
+  start-budget checked before each next row. `PaymentOutboxStatusCommand`
+  (`payments:outbox:status`) is a read-only JSON health surface combining a five-state scheduler
+  heartbeat with one snapshot-consistent PostgreSQL aggregate, exiting `0` only when both are healthy.
+  The scheduler runs locally as an opt-in Compose service behind profile `relay`, proven healthy
+  against a disposable project — `make install`/`make start` never bring it up. Eight production
+  types, one forward migration, no new Composer dependency. Recorded in
+  [ADR 0004](adr/0004-lock-through-push-outbox-relay.md), which also records HS-1: **no shared
+  projection gate is acquired**, deliberately deferred to T11's reciprocal obligation in
+  [verification and rebuild](specifications/payments/verification-and-rebuild.md#t7s-reciprocal-obligation-the-gate-does-not-exist-yet-in-the-relay).
 - T8 — Implement idempotent projection consumer and marker self-healing.
 - T9 — Implement owned projected/pending payment query.
+
+**What T7 did not prove.** No consumer, no Horizon configuration, and no `payments:outbox:retry`
+exist — the relay stays dormant in every normal deployment until T8 activates the scheduler and its
+Horizon-supervised consumer together. Pest never ran a live `schedule:work` process; the only
+evidence that it drives the relay on a real per-second cadence is a disposable-Compose-project
+measurement, not a Pest run, and that measurement's image came from an already-built tag rather than
+a fresh `Dockerfile` build because of a registry-access limitation in that session — see
+[development environment](specifications/foundation/development-environment.md#what-t7-added-and-what-it-deliberately-did-not).
+No multi-process relay race, no load/throughput/index-plan claim, no rebuild-safety claim, and no
+end-to-end projector-receipt reconciliation — none of the last four can exist before T8's consumer
+and T11's rebuild gate do.
 
 Exit: POST -> outbox -> Redis -> Horizon consumer -> GET works, including outage, duplicate,
 backlog, scheduler-stop, and poison-handler cases.

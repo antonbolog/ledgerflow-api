@@ -59,6 +59,23 @@ mutual exclusion.
 - Losing or reconnecting the pinned session aborts the rebuild. Code never assumes the old lock
   survived.
 
+### T7's reciprocal obligation: the gate does not exist yet in the relay
+
+**T11 owns adding it.** T7 shipped `OutboxRelay::relayOne()` — one row, one short transaction,
+`SKIP LOCKED`, publish before commit — without acquiring any shared lock or reading
+`payment_projection_controls`, because that table, its advisory-key derivation, and this gate's
+deferral semantics are this task's design, not T7's. Recorded as HS-1 in
+[outbox delivery](outbox-delivery.md#hs-1-no-shared-projection-gate-is-acquired) and in
+[ADR 0004](../../adr/0004-lock-through-push-outbox-relay.md).
+
+Concretely, T11 must add gate acquisition as the **first statement** inside `relayOne()`, before
+eligibility selection, on the same injected `Connection` the relay already holds — not a second
+connection, and not a call wrapped around the existing method, because the shared lock and the row
+lock it protects must report the same backend pid the way Q6's evidence already requires. T11 also
+adds the deferral semantics on the consumer side of this same design. Until T11 lands, the relay
+runs with **no** gate: a rebuild started by hand today would race an active relay pass with nothing
+to stop it, which is exactly the gap this section exists to close.
+
 ### Compatibility evidence for this gate
 
 T4 measured the two clauses above against PostgreSQL 18.4 and Laravel 13.24.0. The result table lives
@@ -128,5 +145,7 @@ recovery at every transition.
 ## Related
 
 - [Projection and query](projection-and-query.md)
-- [Outbox delivery](outbox-delivery.md)
+- [Outbox delivery](outbox-delivery.md) — HS-1, the deviation this gate obligation answers.
+- [ADR 0004](../../adr/0004-lock-through-push-outbox-relay.md) — the relay decision record that defers
+  gate acquisition to this task.
 - [Resilience test plan](../../testing/payments-resilience.md)

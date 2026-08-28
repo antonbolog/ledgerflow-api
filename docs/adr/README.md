@@ -27,10 +27,13 @@ Use sequential names such as `0001-custom-ddd-module-layout.md`; do not put date
 - [0003](0003-postgresql-idempotency-arbitration.md) — Arbitrate payment idempotency in PostgreSQL
   with a complete receipt, a targeted `ON CONFLICT` target, and a repository-owned SQLSTATE retry
   allowlist. Accepted, implemented by T6.
+- [0004](0004-lock-through-push-outbox-relay.md) — Publish the payment outbox with a lock-through-push
+  scheduler-driven relay — one row, one short transaction, publish before commit, no shared
+  projection gate. Accepted, implemented by T7. Records HS-1: the projection gate is deliberately
+  omitted and becomes T11's reciprocal obligation.
 
 ## Candidates
 
-- Use a Payments-specific transactional outbox for the learning slice.
 - Use a connection-affine PostgreSQL advisory-lock gate for projection rebuild.
 - Split the system into `ledgerflow-api`, `ledgerflow-spa`, and `ledgerflow-infra` with explicit
   ownership.

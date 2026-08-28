@@ -42,8 +42,8 @@ final readonly class RelayConfiguration
     ) {}
 
     /**
-     * @param  array<string, mixed>  $config  `payments.relay`
-     * @param  array<string, mixed>  $transport  `database.redis.payments`
+     * @param  array<array-key, mixed>  $config  `payments.relay`
+     * @param  array<array-key, mixed>  $transport  `database.redis.payments`
      *
      * The transport bounds are validated HERE, beside the relay's own limits, even
      * though they live in config/database.php — which is where they must live,
@@ -111,7 +111,7 @@ final readonly class RelayConfiguration
     }
 
     /**
-     * @param  array<string, mixed>  $config
+     * @param  array<array-key, mixed>  $config
      */
     private static function name(array $config, string $key): string
     {
@@ -129,7 +129,7 @@ final readonly class RelayConfiguration
     }
 
     /**
-     * @param  array<string, mixed>  $config
+     * @param  array<array-key, mixed>  $config
      */
     private static function atLeast(array $config, string $key, int $minimum): int
     {
@@ -171,7 +171,7 @@ final readonly class RelayConfiguration
      * The message names the environment variable rather than only the config key,
      * because .env is where the operator will fix it.
      *
-     * @param  array<string, mixed>  $transport
+     * @param  array<array-key, mixed>  $transport
      */
     private static function positiveSeconds(array $transport, string $key): float
     {
@@ -204,7 +204,7 @@ final readonly class RelayConfiguration
     }
 
     /**
-     * @param  array<string, mixed>  $config
+     * @param  array<array-key, mixed>  $config
      */
     private static function required(array $config, string $key, string $namespace = 'payments.relay'): mixed
     {

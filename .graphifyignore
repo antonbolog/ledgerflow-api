@@ -1,0 +1,6 @@
+# Exclude AI-agent configuration and generated Graphify output from the project knowledge graph.
+.agents/
+.claude/
+.codex/
+.cursor/
+graphify-out/

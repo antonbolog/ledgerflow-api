@@ -51,5 +51,11 @@ deliberately empty.
 T6 closed M3 and serves the first HTTP endpoint, `POST /api/payments`: one transaction commits the
 idempotency receipt, the stored event and the outbox envelope or none of them, an identical retry
 replays the exact stored bytes, and every `/api/*` failure is RFC 9457 Problem Details. See
-[ADR 0003](adr/0003-postgresql-idempotency-arbitration.md). **Nothing delivers that envelope yet —
-T7 is next.**
+[ADR 0003](adr/0003-postgresql-idempotency-arbitration.md).
+
+T7 opens M4 and delivers the envelope: a scheduler-driven, lock-through-push outbox relay publishes
+one eligible row per short PostgreSQL transaction to Redis, with capped backoff on transport
+rejection, a safe duplicate on crash, and a read-only JSON health surface combining a five-state
+scheduler heartbeat with a PostgreSQL backlog aggregate. See
+[ADR 0004](adr/0004-lock-through-push-outbox-relay.md). **Nothing consumes that envelope yet — T8 is
+next.**
