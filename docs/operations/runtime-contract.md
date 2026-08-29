@@ -28,9 +28,24 @@ behind profile `relay`, reusing the `app` image's `dev` target with `command: ph
 schedule:work` and a `payments:outbox:status` healthcheck; `make install`/`make start` never bring it
 up, `make relay-start`/`make relay-stop` toggle it alone, and `make stop`/`make destroy` are
 profile-aware so they still reach it if an operator started it by hand. **The relay stays dormant
-until T8 activates the scheduler and its Horizon-supervised `payments-projection` consumer together**
-— see [outbox delivery](../specifications/payments/outbox-delivery.md#scheduler-contract) and
+until an operator starts the scheduler and its Horizon-supervised `payments-projection` consumer
+together**, which T8 makes possible - see
+[outbox delivery](../specifications/payments/outbox-delivery.md#scheduler-contract) and
 [ADR 0004](../adr/0004-lock-through-push-outbox-relay.md).
+
+**Accepted for T8, not yet implemented.** T8 replaces the scheduler-only `relay` profile with one
+opt-in `projection` profile containing both the `scheduler` and a `horizon` service, exposed through
+one paired `make projection-start`/`make projection-stop` contract that starts them only after
+migrations have run; `make install`/`make start` stay worker-free. Activation therefore becomes an
+explicit paired operator action, superseding both the "normal deployment" and "T8 activates"
+phrasings still carried by the roadmap, outbox delivery, and ADR 0004's consequences. The
+`projection` profile, the `horizon` service, and both Make targets do not exist yet.
+
+That consumer gets **one Horizon execution per published job**; outbox reconciliation, not Horizon,
+owns republication after grace. Accepted starting values: one process, a 15-second Horizon worker
+timeout, the existing 90-second queue reservation, and a new 2-second projection-local PostgreSQL
+statement timeout, with `statement_timeout < worker timeout < retry_after` asserted by config tests.
+Retained failed-job records are operational history; PostgreSQL outbox state remains delivery truth.
 
 PostgreSQL stores business and delivery truth. Redis supports cache, coordination, Pub/Sub, and
 internal queues; it is never the sole recovery source for financial state.

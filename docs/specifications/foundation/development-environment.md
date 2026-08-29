@@ -618,7 +618,12 @@ for an environment reason unrelated to `compose.yaml` or the `Dockerfile`.
 
 - **No consumer, no Horizon configuration, no `payments:outbox:retry`.** T8 owns all three; nothing
   in T7 reads `payment_outbox` for projection purposes or writes `projection_completed_at`,
-  `projection_failure_count`, `last_projection_error`, or `exhausted_at`.
+  `projection_failure_count`, `last_projection_error`, or `exhausted_at`. T8's accepted - and still
+  unimplemented - runtime decision also replaces the scheduler-only `relay` profile above with one
+  opt-in `projection` profile carrying both `scheduler` and `horizon`, driven by paired
+  `make projection-start`/`make projection-stop` targets that start them only after migrations,
+  while `make install`/`make start` stay worker-free. Until that lands, profile `relay` and
+  `relay-start`/`relay-stop` remain the implemented contract.
 - **No shared projection gate.** `OutboxRelay::relayOne()` acquires no advisory lock and reads no
   `payment_projection_controls` row — recorded as HS-1 in
   [outbox delivery](../payments/outbox-delivery.md#hs-1-no-shared-projection-gate-is-acquired) and as

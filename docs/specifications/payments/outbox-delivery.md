@@ -82,7 +82,8 @@ envelope exists and is immediately eligible, and nothing yet publishes, consumes
   same connection inside the same transaction, which makes jsonb-equality with the stored event true
   by construction instead of by test. It supplies none of the three counters, so all of them take
   their zero defaults, and `available_at` is set to the insert time — immediately eligible. Every
-  later mutation of that column belongs to T7.
+  later mutation of that column belongs to T7, apart from the one narrow operator-retry exception
+  recorded below.
 
   It refuses **loudly** when `Projectionist::isReplaying()` is true, writing nothing: a replayed event
   is fully derivable, so a standard rebuild would otherwise re-create envelopes or die on the
@@ -94,6 +95,11 @@ envelope exists and is immediately eligible, and nothing yet publishes, consumes
   a confirmed handler failure `projection_failure_count`, `last_projection_error` **and the
   threshold-driven `exhausted_at`, in one transaction**.
 
+  One further column joins that T8-owned set: `projection_failure_generation`, a monotonic
+  non-negative fence defaulting to `0` that only a successful operator retry increments, so a delayed
+  failure recorder cannot charge its increment to a new retry cycle. **Accepted and pending
+  implementation** - T8's forward migration adds it, and it does not exist yet.
+
   Exhaustion belongs with the counter that triggers it. The rules above already require it: an
   arbitrarily long transport outage never sets `exhausted_at`, only a confirmed consumer-handler
   exception increments the poison count, and exhaustion is reached when that count crosses its
@@ -102,7 +108,15 @@ envelope exists and is immediately eligible, and nothing yet publishes, consumes
   row early or never. One writer, one transaction, no race.
 
   `payments:outbox:retry {eventId}` **clears** `exhausted_at` after operator correction. That is a
-  third surface, neither relay nor consumer, and it is the only path that unsets the column.
+  third surface, neither relay nor consumer, and it is the only path that unsets the column. The
+  command is **T8-owned and does not exist yet**.
+
+  **Accepted and pending implementation**, one narrow exception to T7's ownership of every post-insert
+  `available_at` mutation: a successful retry atomically sets `available_at = now()` in the same
+  locked statement, so a corrected exhausted row becomes immediately relay-eligible instead of waiting
+  for a transport schedule it never earns. Ordinary transport scheduling - backoff, grace, and
+  acceptance - stays T7's alone. The full reset list, including the `projection_failure_generation`
+  increment, belongs to [projection and query](projection-and-query.md) and is not repeated here.
 
 ## Initial relay algorithm
 
@@ -158,8 +172,9 @@ eligible
 - Only a confirmed consumer-handler exception increments the poison count.
 - Five confirmed handler failures are the initial exhaustion threshold. Worker termination,
   backlog, and missing receipt are not poison evidence.
-- `payments:outbox:retry {eventId}` clears exhaustion after operator correction while retaining
-  historical evidence in logs.
+- `payments:outbox:retry {eventId}` clears exhaustion after operator correction and sets
+  `available_at` to `now()`, while retaining historical evidence in logs. T8 owns it; it does not
+  exist yet.
 
 Initial timings are operational defaults, not domain rules: start with a 30-second reconciliation
 grace, capped exponential backoff, and one application-level consumer attempt per published job.
@@ -189,8 +204,8 @@ Local development runs the scheduler as an **opt-in** Compose service, `schedule
 fail the check. A clean `make install`/`make start` never brings this profile up; `make relay-start`
 and `make relay-stop` toggle it without touching the four default services, and `make stop`/`make
 destroy` are profile-aware so they reach a scheduler an operator started by hand. **The relay stays
-dormant in every normal deployment until T8 activates the scheduler and its Horizon-supervised
-consumer together** — a long-lived producer without its consumer would otherwise republish every
+dormant until an operator starts the scheduler and its Horizon-supervised consumer together**, which
+T8 makes possible - a long-lived producer without its consumer would otherwise republish every
 accepted row on an unbounded 30-second cycle. Production deployment must supervise a scheduler process
 the same way and interrupt the previous release after new code is live.
 
