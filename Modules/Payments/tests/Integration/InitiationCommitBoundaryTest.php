@@ -60,6 +60,7 @@ afterEach(function (): void {
     IntegrationDatabase::rollbackOpenTransactions();
     IntegrationDatabase::releaseLocks();
     IntegrationDatabase::truncate();
+    IntegrationDatabase::disconnectAll();
 });
 
 it('starts from a clean, unwrapped, empty database', function (): void {

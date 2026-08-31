@@ -16,6 +16,8 @@ use Modules\Payments\Infrastructure\Console\PaymentOutboxStatusCommand;
 use Modules\Payments\Infrastructure\Console\RelayPaymentOutboxCommand;
 use Modules\Payments\Infrastructure\Persistence\DatabaseIdempotencyReceipts;
 use Modules\Payments\Infrastructure\Persistence\RetryingAtomicTransaction;
+use Modules\Payments\Infrastructure\Projection\PaymentProjectionConsumer;
+use Modules\Payments\Infrastructure\Projection\ProjectionFailureRecorder;
 use Modules\Payments\Infrastructure\Projectors\PaymentOutboxWriter;
 use Modules\Payments\Infrastructure\Relay\OutboxRelay;
 use Modules\Payments\Infrastructure\Relay\RelayConfiguration;
@@ -89,6 +91,38 @@ class PaymentsServiceProvider extends ServiceProvider
                 $app->make(DatabaseManager::class)->connection(),
                 $app->make(QueueFactory::class),
                 $app->make(RelayConfiguration::class),
+                $app->make(LoggerInterface::class),
+            ),
+        );
+
+        // THE SAME Connection OBJECT AS THE CONSUMER, and that is required rather
+        // than convenient: the recorder's transaction opens only after the
+        // consumer's has rolled back, on the connection that rolled it back. A
+        // separate connection would be a second backend whose metadata transaction
+        // could overlap the projection transaction being discarded.
+        $this->app->scoped(
+            ProjectionFailureRecorder::class,
+            fn (Application $app): ProjectionFailureRecorder => new ProjectionFailureRecorder(
+                $app->make(DatabaseManager::class)->connection(),
+                $app->make(LoggerInterface::class),
+            ),
+        );
+
+        // THE CONCRETE Connection, for the same reason the relay takes it: the
+        // consumer owns its transaction lifecycle explicitly and inspects
+        // transactionLevel(), neither of which ConnectionInterface promises in the
+        // shape needed here.
+        //
+        // THE SAME DEFAULT CONNECTION OBJECT the relay and the write path hold.
+        // That identity is the consumer's safety story exactly as it is the relay's:
+        // the envelope lock, the receipt insert, the read-row insert and the marker
+        // update must run on ONE backend, or FOR UPDATE protects nothing the later
+        // statements then change.
+        $this->app->scoped(
+            PaymentProjectionConsumer::class,
+            fn (Application $app): PaymentProjectionConsumer => new PaymentProjectionConsumer(
+                $app->make(DatabaseManager::class)->connection(),
+                $app->make(ProjectionFailureRecorder::class),
                 $app->make(LoggerInterface::class),
             ),
         );
