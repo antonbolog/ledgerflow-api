@@ -199,13 +199,13 @@ UTC — not PostgreSQL `now()` — only after a fully handled pass, because it r
 made progress, which a database outage must not be able to fake as a scheduler outage.
 
 Local development runs the scheduler as an **opt-in** Compose service, `scheduler`, behind profile
-`relay`: the same `dev`-target image as `app`, `command: php artisan schedule:work`, healthchecked by
-`payments:outbox:status` itself — not mere process existence, so a wedged loop or a lost database both
-fail the check. A clean `make install`/`make start` never brings this profile up; `make relay-start`
-and `make relay-stop` toggle it without touching the four default services, and `make stop`/`make
-destroy` are profile-aware so they reach a scheduler an operator started by hand. **The relay stays
-dormant until an operator starts the scheduler and its Horizon-supervised consumer together**, which
-T8 makes possible - a long-lived producer without its consumer would otherwise republish every
+`projection`: the same `dev`-target image as `app`, `command: php artisan schedule:work`, healthchecked
+by `payments:outbox:status` itself — not mere process existence, so a wedged loop or a lost database
+both fail the check. A clean `make install`/`make start` never brings this profile up;
+`make projection-start` and `make projection-stop` toggle it **together with the `horizon` consumer
+that shares its profile**, and `make stop`/`make destroy` are profile-aware so they reach both.
+**The relay stays dormant until an operator starts the scheduler and its Horizon-supervised consumer
+together** - a long-lived producer without its consumer would otherwise republish every
 accepted row on an unbounded 30-second cycle. Production deployment must supervise a scheduler process
 the same way and interrupt the previous release after new code is live.
 

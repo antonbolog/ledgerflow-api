@@ -75,11 +75,12 @@ environment lifecycle, database lifecycle, validation, and CI contracts.
 | `make destroy CONFIRM=destroy` | Remove only project containers, networks, and volumes |
 | `make db-migrate` / `make db-seed` | Mutate only the allowlisted local development database |
 | `make db-reset CONFIRM=db-reset` | Rebuild only the allowlisted development and test databases |
-| `make relay-start` / `make relay-stop` | Toggle only the opt-in local scheduler |
+| `make projection-start` / `make projection-stop` | Start or stop the scheduler and Horizon consumer together, never one alone |
 | `make agent-check` | Verify instruction adapters, scoping, and local-config exclusions |
 | `make quality` | Read-only Composer, Pint, Rector, and PHPStan checks |
 | `make test` | Run Pest against `ledgerflow_test`; leaves PostgreSQL and Redis running |
 | `make check` | Run the normal local validation contract: `quality` then `test` |
+| `make projection-contract` | Prove the scheduler+Horizon pair in a disposable Compose project |
 | `make ci` | After `make install`, run the full CI guard, isolation, validation, and image contract |
 
 Use only these repository-defined validation commands. `make check` must not mutate source or the
