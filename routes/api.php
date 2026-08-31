@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Support\Facades\Route;
 use Modules\Payments\Http\Controllers\InitiatePaymentController;
+use Modules\Payments\Http\Controllers\QueryPaymentController;
 
 /*
 |--------------------------------------------------------------------------
@@ -30,4 +31,11 @@ use Modules\Payments\Http\Controllers\InitiatePaymentController;
 
 Route::middleware('auth:sanctum')->group(function (): void {
     Route::post('/payments', InitiatePaymentController::class)->name('payments.initiate');
+
+    // NO ->whereUuid('paymentId'). A route constraint would make a malformed id
+    // fall through to the generic 404 not_found, so a syntactically invalid unknown
+    // id would be a DISTINGUISHABLE error class from a valid unknown one. The query
+    // adapter refuses malformed input itself and answers payment_not_found, which
+    // is the same answer a stranger's payment gets.
+    Route::get('/payments/{paymentId}', QueryPaymentController::class)->name('payments.show');
 });

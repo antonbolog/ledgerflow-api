@@ -108,17 +108,33 @@ primary and unique keys above; a later index requires measured query-plan eviden
 **Owned by T9, and the gate check inside it by T11.** T8 delivers neither; the contract is recorded
 here because it constrains what the consumer must make durable.
 
-`GET /api/payments/{paymentId}` is merchant-scoped and runs its gate check plus read on one short
-PostgreSQL transaction:
+`GET /api/payments/{paymentId}` is merchant-scoped and resolves the merchant only through
+`MerchantContext`. The `payment_details` lookup and, only when that lookup finds nothing, the
+`payment_idempotency_receipts` fallback run inside one short PostgreSQL transaction owned by a single
+query adapter on one injected default connection, so **T11 prepends its gate check to that same
+transaction** without relocating either read:
 
-- owned `PaymentDetails` -> `200 OK` with projected business fields;
-- owned idempotency receipt without projection -> `202 Accepted`, `projection_pending`, and
-  `Retry-After: 1`;
-- no owned projection or receipt -> `404 payment_not_found`;
-- active rebuild -> `503 projection_rebuilding` with retry guidance, reachable only once T11's
-  rebuild and gate exist.
+- owned `PaymentDetails` -> `200 OK` carrying exactly `payment_id`, `amount_minor`, `currency`,
+  `status` and `initiated_at`. `initiated_at` is UTC ISO-8601 with six fractional digits and a
+  `+00:00` offset, matching durable event-time precision. `merchant_id`, `source_event_id` and
+  `aggregate_version` are internal and are never serialized.
+- owned idempotency receipt without projection -> `202 Accepted` carrying exactly `payment_id` and
+  `status: projection_pending`, plus `Retry-After: 1`. That is read-model transport state, not a
+  domain payment status, and nothing durable records it. The body carries no completion estimate and
+  no queue or worker state.
+- no owned projection or receipt -> `404 payment_not_found`. A malformed payment ID shares this exact
+  contract and is refused inside the query boundary before PostgreSQL receives an invalid UUID, so a
+  syntactically invalid unknown identifier is not a distinguishable error class.
+- active rebuild -> `503 projection_rebuilding` with retry guidance. **T11 owns this branch
+  outright**: the control row, the advisory-key derivation, the shared gate lock, and the only code
+  path that can produce the response. It is unreachable until T11 ships, so T9 adds neither the
+  problem code nor a provisional key or control table.
 
-Another merchant's payment returns the same not-found shape. The endpoint never rehydrates
+A projected lookup short-circuits the receipt fallback, so an owned projection is never followed by
+a receipt read. Another merchant's payment returns the same not-found shape as a missing one. The
+query adapter, `DatabasePaymentQuery`, may read only `payment_details` and
+`payment_idempotency_receipts` and writes nothing; the surrounding authenticated request still
+performs its normal Sanctum and `MerchantContext` identity queries. The endpoint never rehydrates
 `PaymentAggregate` and never treats Redis/SQS state as proof that a payment exists.
 
 ## Failure handling
@@ -210,12 +226,19 @@ T8:
 
 T9:
 
-- Pending, projected, missing, and other-merchant HTTP states have stable contracts.
+- Projected, pending, missing, malformed, and other-merchant HTTP states have stable contracts.
+- Malformed, missing, and foreign requests use the same `payment_not_found` problem schema, and
+  missing and foreign requests for the same valid payment ID produce the same response body.
+- The `payment_details` lookup and, when it is needed, the `payment_idempotency_receipts` fallback
+  run inside one adapter-owned transaction on one injected connection object; the query adapter reads
+  no other table and issues no write.
 
 T11:
 
 - The rebuilding HTTP state has a stable contract, and gate lock and protected work use the same
   PostgreSQL backend connection.
+- That backend-affinity evidence is T11's alone: it cannot be produced before a gate lock exists to
+  prove it against.
 
 ## Implementation evidence
 

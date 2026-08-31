@@ -22,7 +22,8 @@ The first accepted request returns `202 Accepted`, a UUIDv7 payment ID, `status:
 - `200` when the owned `PaymentDetails` projection exists;
 - `202 projection_pending` with `Retry-After: 1` when the owned receipt exists but projection lags;
 - `404 payment_not_found` when no owned receipt or projection exists;
-- `503 projection_rebuilding` while the Payments projection gate is closed.
+- `503 projection_rebuilding` while the Payments projection gate is closed. That gate, and therefore
+  this branch, is T11's; it is unreachable until T11 ships.
 
 Queries never rehydrate the aggregate.
 

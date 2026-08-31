@@ -144,7 +144,10 @@ Complete the asynchronous tracer bullet on Redis/Horizon.
   T8's crash evidence is a deterministic in-process commit-boundary failpoint plus a live Horizon
   stop/backlog/restart smoke; literal SIGTERM/SIGKILL process suites stay
   [T12's](testing/payments-resilience.md).
-- T9 — Implement owned projected/pending payment query.
+- T9 — Implement the owned projected/pending/missing payment query, without the shared projection
+  gate. The `503 projection_rebuilding` branch and the shared-lock backend-affinity evidence stay
+  T11's, per
+  [projection and query](specifications/payments/projection-and-query.md#query-contract).
 
 **What T7 did not prove.** *(Frozen as written at T7. T8 has since supplied the consumer, the Horizon
 configuration and `payments:outbox:retry`; what T8 itself did not prove is recorded in
@@ -251,9 +254,9 @@ worktrees must not modify the same Payments persistence contracts.
 | T6 | P1 | [Initiation/idempotency](specifications/payments/initiation-and-idempotency.md) | PostgreSQL concurrency and HTTP contract tests |
 | T7 | P1 | [Outbox delivery](specifications/payments/outbox-delivery.md) | Redis/PostgreSQL relay and scheduler tests |
 | T8 | P1 | [Projection/query](specifications/payments/projection-and-query.md) | Duplicate, rollback, backlog, deterministic crash-boundary, Horizon restart, poison, and operator-retry tests |
-| T9 | P1 | [Projection/query](specifications/payments/projection-and-query.md) | Projected/pending/missing/rebuilding and ownership tests |
+| T9 | P1 | [Projection/query](specifications/payments/projection-and-query.md) | Projected/pending/missing/malformed and ownership tests |
 | T10 | P2 | [Verification/rebuild](specifications/payments/verification-and-rebuild.md) | Read-only corruption matrix and targeted repair |
-| T11 | P1 | [Verification/rebuild](specifications/payments/verification-and-rebuild.md) | Lock race, batch, kill/restart, and replay tests |
+| T11 | P1 | [Verification/rebuild](specifications/payments/verification-and-rebuild.md) | Rebuilding HTTP contract, shared-lock backend affinity, lock race, batch, kill/restart, and replay tests |
 | T12 | P1 | [Resilience test plan](testing/payments-resilience.md) | Full real-service resilience suite |
 | T13 | P2 | [Runtime contract](operations/runtime-contract.md) | Clean-checkout five-minute demo |
 
