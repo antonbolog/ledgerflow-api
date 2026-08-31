@@ -191,6 +191,33 @@ return [
         | No backoff_algorithm/base/cap: with zero retries there is nothing to back
         | off, and copying them from `default` would only suggest otherwise.
         */
+        /*
+        | HORIZON'S OWN BOOKKEEPING, ON ITS OWN LOGICAL DATABASE.
+        |
+        | SEPARATE FROM `payments` BECAUSE THE BOUNDS THERE ARE THE RELAY'S, NOT
+        | HORIZON'S. That connection carries 0.25-second connect and read timeouts
+        | and `max_retries => 0` because the relay publishes inside an open
+        | PostgreSQL transaction holding a row lock; Horizon's long-lived supervisor
+        | and metrics reads would fail against them, and widening them to suit
+        | Horizon would silently delete the relay's database-occupancy control.
+        |
+        | SEPARATE FROM `default` BECAUSE OF THE KEYSPACE. Horizon trims and expires
+        | its own keys on its own schedule; sharing a logical database with the
+        | application's cache and sessions would put that housekeeping in a keyspace
+        | other code also writes.
+        |
+        | It keeps `url` unlike `payments`: there is no literal here worth defeating,
+        | because none of these values bounds a held row lock.
+        */
+        'horizon' => [
+            'url' => env('REDIS_URL'),
+            'host' => env('REDIS_HOST', '127.0.0.1'),
+            'username' => env('REDIS_USERNAME'),
+            'password' => env('REDIS_PASSWORD'),
+            'port' => env('REDIS_PORT', '6379'),
+            'database' => env('REDIS_HORIZON_DB', '3'),
+        ],
+
         'payments' => [
             // NO 'url' KEY, AND ITS ABSENCE IS THE PROTECTION.
             //

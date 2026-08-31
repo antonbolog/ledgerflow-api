@@ -46,12 +46,12 @@ use Throwable;
  * below are known rather than reconstructed from an end state that cannot
  * distinguish "never started" from "already durable".
  *
- * NO STATEMENT TIMEOUT YET, deliberately. The 2-second projection-local bound and
- * the ordering rule that keeps it below Horizon's worker timeout and the queue's
- * `retry_after` arrive with the Horizon configuration that owns all three; a value
- * hardcoded here would become a second owner of it. Until then the only unbounded
- * wait is the envelope lock, which a concurrent duplicate holds for the length of
- * one short transaction.
+ * ONE BOUND ON THE WHOLE TRANSACTION, set as SET LOCAL immediately after BEGIN and
+ * read from ProjectionConfiguration rather than hardcoded here. It is the shortest
+ * link of the ordering chain
+ * `statement_timeout < worker timeout < retry_after`, which is what makes "one
+ * Horizon execution per published job" true; that class owns the chain and refuses
+ * a configuration that breaks it.
  *
  * WHAT THIS CLASS DOES NOT DO: it does not count failures, write
  * `last_projection_error`, or set `exhausted_at`. A deterministic refusal escapes
@@ -75,6 +75,7 @@ final readonly class PaymentProjectionConsumer
 
     public function __construct(
         private Connection $connection,
+        private ProjectionConfiguration $config,
         private ProjectionFailureRecorder $recorder,
         private LoggerInterface $logger,
     ) {}
@@ -100,6 +101,19 @@ final readonly class PaymentProjectionConsumer
         try {
             $this->connection->beginTransaction();
             $transactionStarted = true;
+
+            // BOUNDS EVERY STATEMENT BELOW, INCLUDING THE ENVELOPE LOCK'S WAIT.
+            // SET LOCAL, so it dies with this transaction rather than leaking into
+            // whatever the worker's connection does next.
+            //
+            // It must fire BEFORE the lock is taken: a concurrent duplicate holding
+            // the row is the one wait that can be arbitrarily long, and it is
+            // precisely the wait this bound exists to cut short. PostgreSQL then
+            // cancels the statement as 57014 — a classifiable, non-countable
+            // failure on a connection this process still owns — rather than the
+            // worker's own alarm killing the process mid-transaction thirteen
+            // seconds later.
+            $this->connection->statement($this->config->statementTimeoutStatement());
 
             $row = $this->connection->table('payment_outbox')
                 ->where('event_id', $eventId)

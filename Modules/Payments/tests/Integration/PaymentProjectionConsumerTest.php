@@ -9,12 +9,15 @@ use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Modules\Merchant\Infrastructure\Persistence\Eloquent\Merchant;
 use Modules\Payments\Infrastructure\Persistence\RetryingAtomicTransaction;
 use Modules\Payments\Infrastructure\Projection\PaymentProjectionConsumer;
+use Modules\Payments\Infrastructure\Projection\ProjectionConfiguration;
 use Modules\Payments\Infrastructure\Projection\ProjectionEnvelopeMissing;
 use Modules\Payments\Infrastructure\Projection\ProjectionEnvelopeRejected;
+use Modules\Payments\Infrastructure\Projection\ProjectionFailureRecorder;
 use Modules\Payments\Infrastructure\Projection\ProjectionOutcome;
 use Modules\Payments\Tests\Integration\IntegrationDatabase;
 
@@ -904,6 +907,95 @@ it('carries the SQLSTATE of a database failure into the abort log', function ():
     // Null rather than absent for a failure that carries no SQLSTATE, so the field
     // is always present and a consumer of the log never has to guess.
     expect(array_keys($aborted[0]))->toContain('sql_state');
+});
+
+/*
+|--------------------------------------------------------------------------
+| The projection-local statement timeout
+|--------------------------------------------------------------------------
+*/
+
+it('applies its statement timeout inside the transaction and lets it die with it', function (): void {
+    // READ FROM POSTGRESQL, FROM INSIDE THE TRANSACTION. TransactionCommitting
+    // fires at the last instant the transaction is provably still open, which is
+    // where the bound has to be in effect.
+    $eventId = projectionEnvelope();
+
+    $inside = null;
+
+    Event::listen(TransactionCommitting::class, function () use (&$inside): void {
+        $inside = DB::selectOne('show statement_timeout')?->statement_timeout;
+    });
+
+    expect(projectionConsumer()->project($eventId))->toBe(ProjectionOutcome::Projected);
+
+    // The configured 2000 ms, as PostgreSQL renders it.
+    expect($inside)->toBe('2s');
+
+    // AND GONE AFTERWARDS, which is what makes it SET LOCAL rather than SET. A
+    // session-level bound would outlive this transaction and silently apply to
+    // every later statement on a worker connection that lives for hours.
+    expect(DB::selectOne('show statement_timeout')?->statement_timeout)->toBe('0');
+});
+
+it('cancels a statement that outlives the bound rather than waiting for the worker', function (): void {
+    // THE BOUND DOING ITS JOB, against a real lock held by a second backend. With a
+    // deliberately tiny timeout the wait is milliseconds rather than the configured
+    // two seconds, so this is real evidence without a slow test.
+    //
+    // 57014 is query_canceled — the SQLSTATE the classification treats as
+    // non-countable, which is the entire reason the bound must fire BEFORE the
+    // worker's own alarm: a worker kill mid-transaction is not classifiable at all.
+    $eventId = projectionEnvelope();
+
+    app()->bind(PaymentProjectionConsumer::class, fn (): PaymentProjectionConsumer => new PaymentProjectionConsumer(
+        DB::connection(),
+        ProjectionConfiguration::fromArray(
+            array_merge((array) config('payments.projection'), ['statement_timeout_ms' => 150]),
+            (array) config('queue.connections.payments-projection'),
+        ),
+        resolve(ProjectionFailureRecorder::class),
+        Log::getFacadeRoot(),
+    ));
+
+    $lock = DB::connection(IntegrationDatabase::LOCK);
+    $lock->beginTransaction();
+    $lock->select('select event_id from payment_outbox where event_id = ? for update', [$eventId]);
+
+    // A SESSION-LEVEL FLOOR UNDERNEATH THE CONSUMER'S OWN BOUND, for the reason
+    // ContentionProbe records: `SET LOCAL` does nothing when there is no
+    // transaction to be local to, so deleting the consumer's bound made this test
+    // HANG on the row lock rather than fail — the worst way for a mutation to be
+    // caught. Found exactly that way.
+    //
+    // Deliberately far longer than the 150 ms under test, so it never pre-empts the
+    // 57014 this test exists to produce; it only ever speaks when the LOCAL bound
+    // has evaporated. The elapsed-time assertion below is what tells the two apart,
+    // since both raise the same SQLSTATE.
+    DB::statement("set statement_timeout = '5s'");
+
+    $sqlState = null;
+    $startedAt = hrtime(true);
+
+    try {
+        resolve(PaymentProjectionConsumer::class)->project($eventId);
+    } catch (QueryException $exception) {
+        $sqlState = RetryingAtomicTransaction::sqlStateOf($exception);
+    }
+
+    $elapsedMs = (int) ((hrtime(true) - $startedAt) / 1_000_000);
+
+    DB::statement('set statement_timeout = default');
+    $lock->rollBack();
+
+    // THE CONSUMER'S BOUND FIRED, NOT THE FLOOR. hrtime, not microtime: an NTP step
+    // mid-test must not decide this.
+    expect($elapsedMs)->toBeLessThan(2_000)
+        ->and($sqlState)->toBe('57014')
+        // Nothing was written, and nothing was charged: a cancelled statement says
+        // nothing about the envelope.
+        ->and(projectionReceiptCount($eventId))->toBe(0)
+        ->and((int) projectionEnvelopeRow($eventId)['projection_failure_count'])->toBe(0);
 });
 
 /*

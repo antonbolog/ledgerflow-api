@@ -18,6 +18,7 @@ use Modules\Payments\Infrastructure\Console\RelayPaymentOutboxCommand;
 use Modules\Payments\Infrastructure\Persistence\DatabaseIdempotencyReceipts;
 use Modules\Payments\Infrastructure\Persistence\RetryingAtomicTransaction;
 use Modules\Payments\Infrastructure\Projection\PaymentProjectionConsumer;
+use Modules\Payments\Infrastructure\Projection\ProjectionConfiguration;
 use Modules\Payments\Infrastructure\Projection\ProjectionFailureRecorder;
 use Modules\Payments\Infrastructure\Projectors\PaymentOutboxWriter;
 use Modules\Payments\Infrastructure\Relay\OutboxRelay;
@@ -119,10 +120,24 @@ class PaymentsServiceProvider extends ServiceProvider
         // the envelope lock, the receipt insert, the read-row insert and the marker
         // update must run on ONE backend, or FOR UPDATE protects nothing the later
         // statements then change.
+        // VALIDATED AT RESOLUTION, WHICH IS BEFORE ANY JOB IS CONSUMED. The three
+        // ordered timeouts are one correctness chain, and a broken chain is
+        // invisible at run time until the exact conditions that need it occur.
+        // retry_after is read from config/queue.php because that is the array
+        // Laravel's RedisQueue actually reads.
+        $this->app->scoped(
+            ProjectionConfiguration::class,
+            fn (): ProjectionConfiguration => ProjectionConfiguration::fromArray(
+                (array) config('payments.projection'),
+                (array) config('queue.connections.payments-projection'),
+            ),
+        );
+
         $this->app->scoped(
             PaymentProjectionConsumer::class,
             fn (Application $app): PaymentProjectionConsumer => new PaymentProjectionConsumer(
                 $app->make(DatabaseManager::class)->connection(),
+                $app->make(ProjectionConfiguration::class),
                 $app->make(ProjectionFailureRecorder::class),
                 $app->make(LoggerInterface::class),
             ),
