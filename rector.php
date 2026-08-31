@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Rector\Config\RectorConfig;
+use Rector\Php55\Rector\String_\StringClassNameToClassConstantRector;
 use RectorLaravel\Rector\ArrayDimFetch\EnvVariableToEnvHelperRector;
 use RectorLaravel\Rector\ArrayDimFetch\ServerVariableToRequestFacadeRector;
 use RectorLaravel\Set\LaravelSetList;
@@ -53,4 +54,15 @@ return RectorConfig::configure()
         // resolve, so rewriting it to use those helpers would delete the guard.
         EnvVariableToEnvHelperRector::class => [__DIR__.'/tests/bootstrap.php'],
         ServerVariableToRequestFacadeRector::class => [__DIR__.'/tests/bootstrap.php'],
+
+        // ProjectPaymentEvent's fully-qualified name is a WIRE CONTRACT: messages
+        // the relay published before T8 are sitting on Redis serialised against
+        // that exact string, so a rename would make every one of them fail to
+        // restore. The test rebuilds that legacy payload from the name written as
+        // a literal, precisely so a rename FAILS there instead of being followed
+        // silently. Rewriting it to ::class would make the literal track the class
+        // and delete the only thing the test checks.
+        StringClassNameToClassConstantRector::class => [
+            __DIR__.'/Modules/Payments/tests/Integration/PaymentOutboxRetryTest.php',
+        ],
     ]);

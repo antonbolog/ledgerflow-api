@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Contracts\Queue\ShouldQueueAfterCommit;
+use Modules\Payments\Infrastructure\Projection\PaymentProjectionConsumer;
 use Modules\Payments\Infrastructure\Relay\ProjectPaymentEvent;
 
 /*
@@ -53,11 +54,21 @@ it('opts into nothing that could defer publication past commit', function (): vo
     expect(property_exists(ProjectPaymentEvent::class, 'afterCommit'))->toBeFalse();
 });
 
-it('refuses loudly rather than silently draining the queue before T8 exists', function (): void {
-    // A handle() that did nothing would let a stray `queue:work --queue=payments-projection`
-    // consume every message and leave the outbox looking delivered while nothing was
-    // ever projected — a false green with no error anywhere. T8 replaces this body
-    // with the real consumer.
-    expect(fn () => new ProjectPaymentEvent('01984f6f-6a20-7000-8000-000000000001')->handle())
-        ->toThrow(LogicException::class, '01984f6f-6a20-7000-8000-000000000001');
+it('takes its consumer as a handle() parameter, never as serialised state', function (): void {
+    // THE SERIALIZATION CONSTRAINT, asserted rather than described. A constructor
+    // dependency would be serialised onto Redis with the message — a Connection, a
+    // logger and a PDO handle inside a queue payload — and unserialised into a
+    // worker where none of it is valid. Laravel resolves a type-hinted handle()
+    // parameter through the container at call time, so the dependency is built
+    // fresh in the worker and never crosses the transport.
+    $handle = new ReflectionMethod(ProjectPaymentEvent::class, 'handle');
+
+    expect($handle->getNumberOfParameters())->toBe(1)
+        ->and($handle->getParameters()[0]->getType()?->__toString())
+        ->toBe(PaymentProjectionConsumer::class);
+
+    // The constructor still takes exactly the event id, which is the half of the
+    // wire contract a message already sitting on the queue depends on.
+    expect(new ReflectionMethod(ProjectPaymentEvent::class, '__construct')->getNumberOfParameters())
+        ->toBe(1);
 });

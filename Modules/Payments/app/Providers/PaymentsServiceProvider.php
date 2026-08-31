@@ -12,6 +12,7 @@ use Illuminate\Database\DatabaseManager;
 use Illuminate\Support\ServiceProvider;
 use Modules\Payments\Application\Initiation\AtomicTransaction;
 use Modules\Payments\Application\Initiation\IdempotencyReceipts;
+use Modules\Payments\Infrastructure\Console\PaymentOutboxRetryCommand;
 use Modules\Payments\Infrastructure\Console\PaymentOutboxStatusCommand;
 use Modules\Payments\Infrastructure\Console\RelayPaymentOutboxCommand;
 use Modules\Payments\Infrastructure\Persistence\DatabaseIdempotencyReceipts;
@@ -155,6 +156,18 @@ class PaymentsServiceProvider extends ServiceProvider
             ),
         );
 
+        // THE CONCRETE Connection, for the same reason the consumer takes it: the
+        // retry owns its transaction lifecycle explicitly and holds a row lock
+        // across a SELECT and an UPDATE, and it must be the SAME connection object
+        // the consumer and the relay use, or the lock would protect nothing.
+        $this->app->scoped(
+            PaymentOutboxRetryCommand::class,
+            fn (Application $app): PaymentOutboxRetryCommand => new PaymentOutboxRetryCommand(
+                $app->make(DatabaseManager::class)->connection(),
+                $app->make(LoggerInterface::class),
+            ),
+        );
+
         // THE CONCRETE Connection, for the same reason OutboxRelay takes it: the
         // status query's own read-only transaction inspects transactionLevel(),
         // which ConnectionInterface does not promise in the shape needed here.
@@ -189,6 +202,7 @@ class PaymentsServiceProvider extends ServiceProvider
             $this->commands([
                 RelayPaymentOutboxCommand::class,
                 PaymentOutboxStatusCommand::class,
+                PaymentOutboxRetryCommand::class,
             ]);
         }
     }
