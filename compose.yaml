@@ -17,12 +17,16 @@
 # their own milestones and will reuse the `app` image with a `command:`
 # override, which the entrypoint's `exec "$@"` already supports.
 #
-# `scheduler` IS defined, and is opt-in behind the `relay` profile. A profiled
-# service is excluded from every plain `up`/`start`/`stop`/`destroy` unless
-# `--profile relay` is passed, so a clean install's four default services never
-# change. T7 proves the lock-through-push evidence chain against it; T8 owns
-# the production-like activation that starts it — together with its
-# Horizon-supervised consumer — for real.
+# `scheduler` and `horizon` ARE defined, both opt-in behind the SAME
+# `projection` profile. A profiled service is excluded from every plain
+# `up`/`start`/`stop`/`destroy` unless `--profile projection` is passed, so a
+# clean install's four default services never change.
+#
+# ONE PROFILE FOR BOTH, AND NO TARGET FOR EITHER ALONE. The relay publishes into
+# `payments-projection` and Horizon is the only thing that drains it, so a
+# scheduler without a consumer produces a growing backlog that looks like a
+# consumer fault rather than a missing process. Activation is therefore a paired
+# operator action: `make projection-start` / `make projection-stop`.
 
 name: ${COMPOSE_PROJECT_NAME:-ledgerflow}
 
@@ -57,6 +61,13 @@ services:
       start_period: 20s
 
   app:
+    # A STABLE TAG, so the image is addressable by name rather than by project.
+    # Compose's default is `<project>-<service>`, which means a disposable project
+    # would build its own copy of an image that already exists. Naming it here
+    # makes `projection-contract` able to reuse the development build instead of
+    # spending minutes rebuilding it, and changes nothing for the default project:
+    # the name is exactly what Compose already produced.
+    image: ${LEDGERFLOW_APP_IMAGE:-ledgerflow-app:latest}
     build:
       context: .
       target: dev
@@ -139,12 +150,13 @@ services:
       start_period: 10s
 
   # Opt-in only: `profiles` keeps this out of every plain `up`, including the
-  # ones `install`/`start` run. It exists so `relay-start`/`relay-stop` can
-  # bring the scheduler up and down without disturbing the four default
-  # services, and so the disposable T7 evidence run has something to prove
-  # `stop`/`destroy` also reach.
+  # ones `install`/`start` run. It is started and stopped only as HALF OF A PAIR,
+  # by `projection-start`/`projection-stop`, which name it alongside `horizon` on
+  # one command line — see the header comment on why there is no target for
+  # either alone.
   scheduler:
-    profiles: ["relay"]
+    profiles: ["projection"]
+    image: ${LEDGERFLOW_APP_IMAGE:-ledgerflow-app:latest}
     build:
       context: .
       target: dev
@@ -188,6 +200,53 @@ services:
       timeout: 3s
       retries: 3
       start_period: 75s
+
+  # The consumer half of the `projection` pair. It is in the SAME profile as the
+  # scheduler and has no Make target of its own, because a scheduler running
+  # without a consumer is the one state this project must not be able to reach by
+  # accident: the relay would publish into a queue nothing drains, every envelope
+  # would sit out its reconciliation grace, and the backlog would look like a
+  # consumer problem rather than a missing process.
+  horizon:
+    profiles: ["projection"]
+    image: ${LEDGERFLOW_APP_IMAGE:-ledgerflow-app:latest}
+    build:
+      context: .
+      target: dev
+      args:
+        HOST_UID: ${HOST_UID:-1000}
+        HOST_GID: ${HOST_GID:-1000}
+    restart: unless-stopped
+    # The same image again; only the command differs, exactly as `scheduler` does.
+    command: ["php", "artisan", "horizon"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./:/var/www/html
+    # SIGTERM REACHES HORIZON DIRECTLY, so it can finish the job in flight before
+    # exiting. Compose's default 10s is below the 15s worker timeout, which would
+    # SIGKILL a worker mid-projection — the one failure the classification cannot
+    # attribute to an envelope. 20s leaves margin above that timeout.
+    stop_grace_period: 20s
+    healthcheck:
+      # NOT mere process existence. `horizon:status` reads the master supervisor
+      # record out of Redis and exits 0 only while Horizon is RUNNING: 2 when no
+      # master is registered at all, 1 when every master is paused. A supervisor
+      # that died, or one an operator paused, therefore fails this check while its
+      # container is still very much alive.
+      test: ["CMD", "php", "artisan", "horizon:status"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      # Far below the scheduler's 75s: Horizon registers its master supervisor
+      # within a second or two of starting, with no minute boundary to wait for.
+      start_period: 20s
 
 volumes:
   postgres-data:

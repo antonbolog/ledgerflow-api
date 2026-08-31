@@ -60,6 +60,8 @@ final class IntegrationDatabase
      * @var list<string>
      */
     public const array TABLES = [
+        'payment_details',
+        'payment_projector_receipts',
         'payment_outbox',
         'payment_idempotency_receipts',
         'stored_events',
@@ -277,6 +279,38 @@ final class IntegrationDatabase
         }
 
         DB::purge(self::LOCK);
+    }
+
+    /**
+     * Close every PostgreSQL backend this test opened, INCLUDING the default one.
+     *
+     * MEASURED, AFTER THE SUITE HIT `sorry, too many clients already`. Laravel's
+     * TestCase discards the whole application — and with it the DatabaseManager —
+     * in tearDown, so register()'s purge in beforeEach runs against a BRAND-NEW
+     * manager that holds no connections at all. It frees nothing, and every test
+     * left one idle backend behind: 60 Integration tests plus the Feature suite
+     * crossed PostgreSQL's max_connections of 100, and the run died in a beforeEach
+     * with a connection error that named nothing relevant.
+     *
+     * Purging in afterEach works because the manager that OWNS the connections is
+     * still the current one at that point.
+     *
+     * PURGING THE DEFAULT HERE DOES NOT CONTRADICT the class rule above. That rule
+     * forbids purging it MID-TEST, while RetryingAtomicTransaction,
+     * DatabaseIdempotencyReceipts, PaymentOutboxWriter and the consumer each hold a
+     * resolved Connection that would be left pointing at a dead PDO. By the time
+     * this runs the test is over, truncation is done, and the next test resolves
+     * everything again from a fresh container.
+     *
+     * LAST IN afterEach, always: truncate() and releaseLocks() both need a live
+     * connection, and rollbackOpenTransactions() must have closed anything still
+     * open — a purge would otherwise discard a transaction rather than end it.
+     */
+    public static function disconnectAll(): void
+    {
+        DB::purge(self::OBSERVER);
+        DB::purge(self::LOCK);
+        DB::purge();
     }
 
     /** Row counts read from the OBSERVER, so only COMMITTED rows are counted. */

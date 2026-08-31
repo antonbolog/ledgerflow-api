@@ -27,9 +27,19 @@ compatibility evidence live in
 - The scheduler-driven outbox relay publishes eligible event IDs to the logical
   `payments-projection` Redis queue inside short PostgreSQL transactions. Its local scheduler is
   opt-in and exposes a read-only JSON status command.
-- No projection consumer, Horizon supervision, read model, or `GET /api/payments/{id}` exists yet.
-  The relay remains dormant in normal deployments until the consumer lands. T8 is next; the
-  [roadmap](docs/roadmap.md) owns delivery order and task status.
+- A Horizon-supervised consumer drains that queue in one deterministic PostgreSQL transaction: it
+  locks the envelope, writes a projector receipt with `ON CONFLICT DO NOTHING`, inserts
+  `payment_details`, and sets the completion marker together. A duplicate changes no business field
+  and may repair only a missing marker; corruption and contradictory identity fail visibly.
+- Confirmed deterministic failures are counted in a separate short transaction behind a monotonic
+  `projection_failure_generation` fence; the fifth sets `exhausted_at`, and
+  `payments:outbox:retry {eventId}` is the sole reactivation path. Backlog, locks, transport and
+  commit uncertainty are never counted.
+- The scheduler and Horizon are activated together through `make projection-start`/`projection-stop`
+  and never one alone; `make projection-contract` proves the pair end to end in a disposable Compose
+  project.
+- No read model query (`GET /api/payments/{id}`) and no shared projection gate exist yet. T9 owns the
+  query and T11 owns the gate; the [roadmap](docs/roadmap.md) owns delivery order and task status.
 
 ## Architecture and boundaries
 
@@ -75,11 +85,12 @@ environment lifecycle, database lifecycle, validation, and CI contracts.
 | `make destroy CONFIRM=destroy` | Remove only project containers, networks, and volumes |
 | `make db-migrate` / `make db-seed` | Mutate only the allowlisted local development database |
 | `make db-reset CONFIRM=db-reset` | Rebuild only the allowlisted development and test databases |
-| `make relay-start` / `make relay-stop` | Toggle only the opt-in local scheduler |
+| `make projection-start` / `make projection-stop` | Start or stop the scheduler and Horizon consumer together, never one alone |
 | `make agent-check` | Verify instruction adapters, scoping, and local-config exclusions |
 | `make quality` | Read-only Composer, Pint, Rector, and PHPStan checks |
 | `make test` | Run Pest against `ledgerflow_test`; leaves PostgreSQL and Redis running |
 | `make check` | Run the normal local validation contract: `quality` then `test` |
+| `make projection-contract` | Prove the scheduler+Horizon pair in a disposable Compose project |
 | `make ci` | After `make install`, run the full CI guard, isolation, validation, and image contract |
 
 Use only these repository-defined validation commands. `make check` must not mutate source or the

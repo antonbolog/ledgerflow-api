@@ -162,7 +162,8 @@ apart, so this margin is for the one cold first tick only.
   edge case a future incident rediscovers: a restarted scheduler is briefly `stale`, never falsely
   `fresh`, before its own next tick.
 - The relay is dormant in every normal deployment: `schedule:work` never runs outside the `relay`
-  Compose profile until T8 activates the scheduler and its Horizon-supervised consumer together. A
+  Compose profile; T8 has since replaced that with the paired `projection` profile, which activates
+  the scheduler and its Horizon-supervised consumer together. A
   long-lived producer without its consumer would otherwise republish every accepted row on an
   unbounded 30-second cycle.
 - `40P01` and `40001` remain allowlisted and unit-classified for the relay's own failure path, exactly

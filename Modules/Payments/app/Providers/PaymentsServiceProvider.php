@@ -12,10 +12,14 @@ use Illuminate\Database\DatabaseManager;
 use Illuminate\Support\ServiceProvider;
 use Modules\Payments\Application\Initiation\AtomicTransaction;
 use Modules\Payments\Application\Initiation\IdempotencyReceipts;
+use Modules\Payments\Infrastructure\Console\PaymentOutboxRetryCommand;
 use Modules\Payments\Infrastructure\Console\PaymentOutboxStatusCommand;
 use Modules\Payments\Infrastructure\Console\RelayPaymentOutboxCommand;
 use Modules\Payments\Infrastructure\Persistence\DatabaseIdempotencyReceipts;
 use Modules\Payments\Infrastructure\Persistence\RetryingAtomicTransaction;
+use Modules\Payments\Infrastructure\Projection\PaymentProjectionConsumer;
+use Modules\Payments\Infrastructure\Projection\ProjectionConfiguration;
+use Modules\Payments\Infrastructure\Projection\ProjectionFailureRecorder;
 use Modules\Payments\Infrastructure\Projectors\PaymentOutboxWriter;
 use Modules\Payments\Infrastructure\Relay\OutboxRelay;
 use Modules\Payments\Infrastructure\Relay\RelayConfiguration;
@@ -93,6 +97,52 @@ class PaymentsServiceProvider extends ServiceProvider
             ),
         );
 
+        // THE SAME Connection OBJECT AS THE CONSUMER, and that is required rather
+        // than convenient: the recorder's transaction opens only after the
+        // consumer's has rolled back, on the connection that rolled it back. A
+        // separate connection would be a second backend whose metadata transaction
+        // could overlap the projection transaction being discarded.
+        $this->app->scoped(
+            ProjectionFailureRecorder::class,
+            fn (Application $app): ProjectionFailureRecorder => new ProjectionFailureRecorder(
+                $app->make(DatabaseManager::class)->connection(),
+                $app->make(LoggerInterface::class),
+            ),
+        );
+
+        // THE CONCRETE Connection, for the same reason the relay takes it: the
+        // consumer owns its transaction lifecycle explicitly and inspects
+        // transactionLevel(), neither of which ConnectionInterface promises in the
+        // shape needed here.
+        //
+        // THE SAME DEFAULT CONNECTION OBJECT the relay and the write path hold.
+        // That identity is the consumer's safety story exactly as it is the relay's:
+        // the envelope lock, the receipt insert, the read-row insert and the marker
+        // update must run on ONE backend, or FOR UPDATE protects nothing the later
+        // statements then change.
+        // VALIDATED AT RESOLUTION, WHICH IS BEFORE ANY JOB IS CONSUMED. The three
+        // ordered timeouts are one correctness chain, and a broken chain is
+        // invisible at run time until the exact conditions that need it occur.
+        // retry_after is read from config/queue.php because that is the array
+        // Laravel's RedisQueue actually reads.
+        $this->app->scoped(
+            ProjectionConfiguration::class,
+            fn (): ProjectionConfiguration => ProjectionConfiguration::fromArray(
+                (array) config('payments.projection'),
+                (array) config('queue.connections.payments-projection'),
+            ),
+        );
+
+        $this->app->scoped(
+            PaymentProjectionConsumer::class,
+            fn (Application $app): PaymentProjectionConsumer => new PaymentProjectionConsumer(
+                $app->make(DatabaseManager::class)->connection(),
+                $app->make(ProjectionConfiguration::class),
+                $app->make(ProjectionFailureRecorder::class),
+                $app->make(LoggerInterface::class),
+            ),
+        );
+
         $this->app->scoped(
             RelayHeartbeat::class,
             fn (Application $app): RelayHeartbeat => new RelayHeartbeat(
@@ -118,6 +168,18 @@ class PaymentsServiceProvider extends ServiceProvider
                 $app->make(RelayHeartbeat::class),
                 $app->make(LoggerInterface::class),
                 static fn (): int => (int) hrtime(true),
+            ),
+        );
+
+        // THE CONCRETE Connection, for the same reason the consumer takes it: the
+        // retry owns its transaction lifecycle explicitly and holds a row lock
+        // across a SELECT and an UPDATE, and it must be the SAME connection object
+        // the consumer and the relay use, or the lock would protect nothing.
+        $this->app->scoped(
+            PaymentOutboxRetryCommand::class,
+            fn (Application $app): PaymentOutboxRetryCommand => new PaymentOutboxRetryCommand(
+                $app->make(DatabaseManager::class)->connection(),
+                $app->make(LoggerInterface::class),
             ),
         );
 
@@ -155,6 +217,7 @@ class PaymentsServiceProvider extends ServiceProvider
             $this->commands([
                 RelayPaymentOutboxCommand::class,
                 PaymentOutboxStatusCommand::class,
+                PaymentOutboxRetryCommand::class,
             ]);
         }
     }

@@ -55,7 +55,8 @@ mutual exclusion.
   and read the control row on the same explicit connection.
 - Rebuild holds a session-level exclusive lock on one pinned connection.
 - While rebuilding, Payments HTTP returns retryable `503`; relay/consumer work is deferred without
-  consuming delivery budgets. Health and unrelated modules remain available.
+  consuming projection failure budget or transport budget. Health and unrelated modules remain
+  available.
 - Losing or reconnecting the pinned session aborts the rebuild. Code never assumes the old lock
   survived.
 
@@ -75,6 +76,21 @@ lock it protects must report the same backend pid the way Q6's evidence already 
 adds the deferral semantics on the consumer side of this same design. Until T11 lands, the relay
 runs with **no** gate: a rebuild started by hand today would race an active relay pass with nothing
 to stop it, which is exactly the gap this section exists to close.
+
+### T8's reciprocal obligation: the consumer arrives without a gate either
+
+**Implemented, and the gate is still absent by design.** T8's consumer exists and ships with **no**
+gate: `PaymentProjectionConsumer::project()` opens its transaction by locking and loading the
+`payment_outbox` envelope by `event_id`, as [projection and query](projection-and-query.md) records -
+for the same reason T7 took none: the control row, its advisory-key derivation, and the deferral
+semantics are this task's design. The consumer's own docblock names the insertion point.
+
+**T11 owns adding it here too**, and the obligation runs both ways: T11 prepends connection-affine
+gate acquisition to that now-existing consumer transaction, before the envelope lock, on the same
+injected `Connection` the consumer already holds - not a second connection and not a wrapper around
+the transaction - and adds the consumer deferral semantics beside it. Deferred work consumes no
+projection failure budget and no transport budget, per the clause above: a deferral is neither a
+confirmed handler failure nor a transport rejection.
 
 ### Compatibility evidence for this gate
 

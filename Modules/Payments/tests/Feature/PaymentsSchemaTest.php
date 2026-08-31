@@ -14,9 +14,9 @@ use Modules\Payments\Infrastructure\Persistence\RetryingAtomicTransaction;
 | Payments persistence schema
 |--------------------------------------------------------------------------
 |
-| Asserts the LIVE shape of the four tables T5 creates, read from the PostgreSQL
-| catalogs rather than from the migration source. A test that re-read the
-| migration would only prove the file says what it says.
+| Asserts the LIVE shape of the four tables T5 creates and the two T8 adds, read
+| from the PostgreSQL catalogs rather than from the migration source. A test that
+| re-read the migration would only prove the file says what it says.
 |
 | Read from CATALOG SEMANTICS, not rendered SQL. pg_get_expr and pg_indexes
 | re-render expressions with the server's own parenthesisation and spacing,
@@ -40,6 +40,14 @@ use Modules\Payments\Infrastructure\Persistence\RetryingAtomicTransaction;
 |
 */
 
+/** Every table Payments owns, in the order the migrations create them. */
+const PAYMENTS_TABLES = [
+    'payment_idempotency_receipts',
+    'payment_outbox',
+    'payment_projector_receipts',
+    'payment_details',
+];
+
 /** The complete set of Payments-owned timestamp columns, qualified. */
 const T5_TIMESTAMP_COLUMNS = [
     'payment_idempotency_receipts.created_at',
@@ -51,6 +59,8 @@ const T5_TIMESTAMP_COLUMNS = [
     'payment_outbox.occurred_at',
     'payment_outbox.projection_completed_at',
     'payment_outbox.updated_at',
+    'payment_projector_receipts.created_at',
+    'payment_details.initiated_at',
 ];
 
 /**
@@ -317,6 +327,7 @@ it('gives payment_outbox its exact documented shape', function (): void {
         'payload', 'occurred_at', 'available_at', 'last_published_at',
         'projection_completed_at', 'exhausted_at', 'publish_count',
         'consecutive_transport_failures', 'projection_failure_count',
+        'projection_failure_generation',
         'last_transport_error', 'last_projection_error', 'created_at', 'updated_at',
     ])
         ->and($columns['event_id'])->toMatchArray(['type' => 'uuid', 'nullable' => false])
@@ -329,7 +340,15 @@ it('gives payment_outbox its exact documented shape', function (): void {
     // THREE SEPARATE COUNTERS, each defaulting to zero. The specification's whole
     // failure model rests on this: a transport outage must never consume poison
     // budget, and one shared counter cannot express that.
-    foreach (['publish_count', 'consecutive_transport_failures', 'projection_failure_count'] as $counter) {
+    // T8 adds a FOURTH zero-defaulted integer, and it is not a counter: it is the
+    // monotonic generation fence a failure recorder captures under the projection
+    // lock so a late write cannot charge a newer operator-retry cycle.
+    foreach ([
+        'publish_count',
+        'consecutive_transport_failures',
+        'projection_failure_count',
+        'projection_failure_generation',
+    ] as $counter) {
         expect($columns[$counter])->toMatchArray(['type' => 'integer', 'nullable' => false, 'default' => '0']);
     }
 
@@ -376,7 +395,7 @@ it('keeps every Payments-owned timestamp at microsecond precision with a time zo
     // $table->timestamp() yields timestamp(0), which ROUNDS to whole seconds.
     $found = [];
 
-    foreach (['payment_idempotency_receipts', 'payment_outbox'] as $table) {
+    foreach (PAYMENTS_TABLES as $table) {
         foreach (t5Columns($table) as $name => $column) {
             if (str_starts_with($column['type'], 'timestamp')) {
                 $found[] = "{$table}.{$name}";
@@ -624,4 +643,425 @@ it('reports 23514 naming the violated transport constraint', function (): void {
 
     expect($sqlState)->toBe('23514')
         ->and($message)->toContain('payment_outbox_publish_count_non_negative');
+});
+
+/*
+|--------------------------------------------------------------------------
+| T8 — the durable projection surface
+|--------------------------------------------------------------------------
+|
+| Two new tables and the third counter constraint, read from the catalogs for the
+| reason the file header already gives.
+|
+| The two tables are asserted to carry EXACTLY the keys they document and nothing
+| else. That is the assertion that keeps a speculative (merchant_id, payment_id),
+| receipt event_id or standalone merchant_id index out of T8: each would need a
+| measured query plan behind it, and the exact-set expectation is what forces that
+| conversation instead of letting one appear quietly.
+|
+| payment_details has NO updated_at, and the shape assertion is what enforces it.
+| At-least-once delivery means a duplicate must converge without rewriting
+| business fields; with no mutable column there is nothing legitimate for a
+| duplicate to touch, so the absence is a durable contract rather than an
+| oversight.
+|
+*/
+
+/**
+ * The PRIMARY KEY CONSTRAINT, from pg_constraint rather than from pg_index.
+ *
+ * t5IndexCatalog() sees the backing index, which is enough to know the columns
+ * are unique and in which order, but NOT enough to know a primary key exists:
+ * a plain unique index over the same NOT NULL columns looks identical there.
+ * Only contype = 'p' distinguishes them.
+ *
+ * WHY THAT DISTINCTION IS WORTH ASSERTING. Not because PostgreSQL requires a
+ * primary key for the operations T8 performs — it does not. `ON CONFLICT
+ * (columns) DO NOTHING` infers any matching unique index, and a foreign key may
+ * reference any appropriate unique key, so a unique-index-only variant of either
+ * table would still function. The assertion exists because H2 approved a specific
+ * schema, and `(projector_name, event_id)` and `payment_id` are PRIMARY KEYS in
+ * it. This is a schema-contract check, not a functional prerequisite.
+ *
+ * Columns are ordered by conkey position, which is the key's own order.
+ *
+ * @return array{name: string, columns: string}|null
+ */
+function t8PrimaryKey(string $table): ?array
+{
+    $rows = DB::select(
+        <<<'SQL'
+        select c.conname as name,
+               (select string_agg(a.attname, ',' order by k.ord)
+                  from unnest(c.conkey) with ordinality as k(attnum, ord)
+                  join pg_attribute a
+                    on a.attrelid = c.conrelid and a.attnum = k.attnum) as columns
+          from pg_constraint c
+         where c.conrelid = to_regclass(?)::oid
+           and c.contype = 'p'
+        SQL,
+        [$table],
+    );
+
+    if ($rows === []) {
+        return null;
+    }
+
+    return ['name' => (string) $rows[0]->name, 'columns' => (string) $rows[0]->columns];
+}
+
+/**
+ * Foreign keys by name, with the LOCAL columns, the referenced table AND its
+ * columns, and the ON DELETE action read as the catalog's single-letter code:
+ * 'r' restrict, 'c' cascade, 'a' no action, 'n' set null, 'd' set default.
+ *
+ * All four parts matter, and none of them is visible in the constraint name.
+ * A key pointing at the wrong local column, at the wrong referenced column, or
+ * carrying ON DELETE CASCADE would remove a financial record as a side effect of
+ * deleting a merchant, under a name that still reads correctly.
+ *
+ * @return array<string, array{columns: string, references: string, on_delete: string}>
+ */
+function t8ForeignKeys(string $table): array
+{
+    $rows = DB::select(
+        <<<'SQL'
+        select c.conname as name,
+               (select string_agg(a.attname, ',' order by k.ord)
+                  from unnest(c.conkey) with ordinality as k(attnum, ord)
+                  join pg_attribute a
+                    on a.attrelid = c.conrelid and a.attnum = k.attnum) as columns,
+               r.relname as referenced_table,
+               (select string_agg(a.attname, ',' order by k.ord)
+                  from unnest(c.confkey) with ordinality as k(attnum, ord)
+                  join pg_attribute a
+                    on a.attrelid = c.confrelid and a.attnum = k.attnum) as referenced_columns,
+               c.confdeltype as on_delete
+          from pg_constraint c
+          join pg_class r on r.oid = c.confrelid
+         where c.conrelid = to_regclass(?)::oid
+           and c.contype = 'f'
+         order by c.conname
+        SQL,
+        [$table],
+    );
+
+    return collect($rows)->keyBy('name')->map(fn (object $r): array => [
+        'columns' => (string) $r->columns,
+        'references' => "{$r->referenced_table}.{$r->referenced_columns}",
+        'on_delete' => (string) $r->on_delete,
+    ])->all();
+}
+
+/** One projector receipt. Fresh event id unless overridden. */
+function insertProjectorReceipt(
+    string $projectorName = 'payment_details',
+    ?string $eventId = null,
+): string {
+    $eventId ??= (string) Str::uuid7();
+
+    DB::table('payment_projector_receipts')->insert([
+        'projector_name' => $projectorName,
+        'event_id' => $eventId,
+        'created_at' => now(),
+    ]);
+
+    return $eventId;
+}
+
+/** One projected payment row. Fresh payment id and source event id unless overridden. */
+function insertPaymentDetails(
+    ?int $merchantId = null,
+    ?string $paymentId = null,
+    ?string $sourceEventId = null,
+): string {
+    $paymentId ??= (string) Str::uuid7();
+
+    DB::table('payment_details')->insert([
+        'payment_id' => $paymentId,
+        'source_event_id' => $sourceEventId ?? (string) Str::uuid7(),
+        'merchant_id' => $merchantId ?? Merchant::factory()->create()->getKey(),
+        'amount_minor' => 1_250,
+        'currency' => 'EUR',
+        'status' => 'initiated',
+        'aggregate_version' => 1,
+        'initiated_at' => now(),
+    ]);
+
+    return $paymentId;
+}
+
+it('gives payment_projector_receipts its exact documented shape and composite key', function (): void {
+    $columns = t5Columns('payment_projector_receipts');
+
+    expect(array_keys($columns))->toEqualCanonicalizing(['projector_name', 'event_id', 'created_at'])
+        ->and($columns['projector_name'])->toMatchArray(['type' => 'character varying', 'nullable' => false, 'length' => 255])
+        ->and($columns['event_id'])->toMatchArray(['type' => 'uuid', 'nullable' => false])
+        // NOT NULL explicitly: the receipt's whole meaning is "this projector
+        // consumed this event AT this time", and a nullable created_at would let
+        // a row exist that cannot say when.
+        ->and($columns['created_at'])->toMatchArray(['type' => 'timestamp with time zone', 'nullable' => false]);
+
+    $indexes = t5IndexCatalog('payment_projector_receipts');
+
+    // The primary key is the ONLY index. Nothing here reads by event_id alone in
+    // T8, and an index for a query that does not exist is dead weight.
+    expect(array_keys($indexes))->toEqualCanonicalizing(['payment_projector_receipts_pkey']);
+
+    // Columns IN THIS ORDER, read from the catalog rather than inferred from the
+    // name: projector_name leads, because it is what a second projector over the
+    // same events would differ on.
+    expect($indexes['payment_projector_receipts_pkey'])
+        ->toMatchArray([
+            'columns' => 'projector_name,event_id',
+            'unique' => true,
+            'partial' => false,
+        ]);
+
+    // The approved H2 shape says PRIMARY KEY, so that is what is asserted, read
+    // from pg_constraint because the index assertion above cannot tell a primary
+    // key from a plain unique index over the same NOT NULL columns. The
+    // consumer's ON CONFLICT (projector_name, event_id) DO NOTHING would infer
+    // either one; the contract, not the inference, is what this pins.
+    expect(t8PrimaryKey('payment_projector_receipts'))->toBe([
+        'name' => 'payment_projector_receipts_pkey',
+        'columns' => 'projector_name,event_id',
+    ]);
+
+    // NO foreign key, in either direction. payment_outbox is rebuildable delivery
+    // state and stored_events is kept identical to the vendor stub; the receipt
+    // has to outlive both, and a key to either would make every future
+    // reconciliation a schema negotiation.
+    expect(t8ForeignKeys('payment_projector_receipts'))->toBeEmpty();
+});
+
+it('arbitrates projector receipts by projector name and event id together', function (): void {
+    // The composite key IS the idempotency mechanism: the consumer inserts with
+    // ON CONFLICT DO NOTHING and reads the conflict as "already projected". If the
+    // key were on event_id alone, a second projector could never consume the same
+    // event; if it were on projector_name alone, the first event would lock the
+    // projector out of every later one.
+    $eventId = (string) Str::uuid7();
+
+    insertProjectorReceipt(eventId: $eventId);
+
+    expect(fn () => DB::transaction(fn () => insertProjectorReceipt(eventId: $eventId)))
+        ->toThrow(UniqueConstraintViolationException::class, 'payment_projector_receipts_pkey');
+
+    // POSITIVE CONTROLS, both directions of the key.
+    insertProjectorReceipt(projectorName: 'payment_audit', eventId: $eventId);
+    insertProjectorReceipt();
+
+    expect(DB::table('payment_projector_receipts')->count())->toBe(3);
+});
+
+it('gives payment_details its exact documented shape with no mutable column', function (): void {
+    $columns = t5Columns('payment_details');
+
+    // The exact set is the contract. An added updated_at would give a duplicate
+    // delivery something legitimate to rewrite, which is precisely what the
+    // at-least-once convergence rule forbids.
+    expect(array_keys($columns))->toEqualCanonicalizing([
+        'payment_id', 'source_event_id', 'merchant_id', 'amount_minor',
+        'currency', 'status', 'aggregate_version', 'initiated_at',
+    ])
+        ->and($columns['payment_id'])->toMatchArray(['type' => 'uuid', 'nullable' => false])
+        ->and($columns['source_event_id'])->toMatchArray(['type' => 'uuid', 'nullable' => false])
+        ->and($columns['merchant_id'])->toMatchArray(['type' => 'bigint', 'nullable' => false])
+        // Minor units in an integer column: money never touches a float here.
+        ->and($columns['amount_minor'])->toMatchArray(['type' => 'bigint', 'nullable' => false])
+        // char(3), not varchar: an ISO 4217 alphabetic code is always exactly 3.
+        ->and($columns['currency'])->toMatchArray(['type' => 'character', 'nullable' => false, 'length' => 3])
+        ->and($columns['status'])->toMatchArray(['type' => 'character varying', 'nullable' => false, 'length' => 32])
+        ->and($columns['aggregate_version'])->toMatchArray(['type' => 'bigint', 'nullable' => false])
+        // NOT NULL explicitly. initiated_at is derived from the event's
+        // occurred_at, which is itself NOT NULL on payment_outbox, so a nullable
+        // column here would only ever record that the derivation was skipped.
+        ->and($columns['initiated_at'])->toMatchArray(['type' => 'timestamp with time zone', 'nullable' => false]);
+
+    // No column default anywhere: every value is derived from the source event, so
+    // a missing one must fail rather than quietly take a fallback.
+    foreach ($columns as $name => $column) {
+        expect($column['default'])->toBeNull($name);
+    }
+
+    $indexes = t5IndexCatalog('payment_details');
+
+    // Exactly two keys, and no third. The point lookups T8 performs are served by
+    // both; a (merchant_id, payment_id) or standalone merchant_id index needs
+    // measured query-plan evidence T8 does not have.
+    expect(array_keys($indexes))->toEqualCanonicalizing([
+        'payment_details_pkey',
+        'payment_details_source_event_id_unique',
+    ])
+        ->and($indexes['payment_details_pkey'])
+        ->toMatchArray(['columns' => 'payment_id', 'unique' => true, 'partial' => false])
+        ->and($indexes['payment_details_source_event_id_unique'])
+        ->toMatchArray(['columns' => 'source_event_id', 'unique' => true, 'partial' => false]);
+
+    // PRIMARY KEY on payment_id, per the approved H2 shape, rather than a unique
+    // index that would read the same in the catalog above.
+    expect(t8PrimaryKey('payment_details'))->toBe([
+        'name' => 'payment_details_pkey',
+        'columns' => 'payment_id',
+    ]);
+
+    // EXACTLY ONE foreign key, asserted as a whole array rather than by
+    // toHaveKey: a second key added later — to payment_outbox or stored_events,
+    // both of which this table must outlive — has to fail here rather than pass
+    // unnoticed beside the one being checked. Local column, referenced
+    // merchants.id, and RESTRICT are all read from the catalog.
+    expect(t8ForeignKeys('payment_details'))->toBe([
+        'payment_details_merchant_id_foreign' => [
+            'columns' => 'merchant_id',
+            'references' => 'merchants.id',
+            'on_delete' => 'r',
+        ],
+    ]);
+});
+
+it('refuses a contradictory payment id or source event id rather than upserting it', function (): void {
+    // BOTH keys asserted BY NAME. A row carries two, so a test that only checked
+    // for UniqueConstraintViolationException would pass whether or not the key it
+    // means to prove exists. Contradictory history must fail visibly: the consumer
+    // never upserts this table, because an upsert would let a second, disagreeing
+    // event silently overwrite a projected payment.
+    $merchant = Merchant::factory()->create()->getKey();
+    $paymentId = (string) Str::uuid7();
+    $sourceEventId = (string) Str::uuid7();
+
+    insertPaymentDetails(merchantId: $merchant, paymentId: $paymentId, sourceEventId: $sourceEventId);
+
+    expect(fn () => DB::transaction(fn () => insertPaymentDetails(
+        merchantId: $merchant,
+        paymentId: $paymentId,
+    )))->toThrow(UniqueConstraintViolationException::class, 'payment_details_pkey');
+
+    expect(fn () => DB::transaction(fn () => insertPaymentDetails(
+        merchantId: $merchant,
+        sourceEventId: $sourceEventId,
+    )))->toThrow(UniqueConstraintViolationException::class, 'payment_details_source_event_id_unique');
+
+    // POSITIVE CONTROL: a different payment for the same merchant is the normal
+    // case and must pass, so neither key is accidentally merchant-wide.
+    insertPaymentDetails(merchantId: $merchant);
+
+    expect(DB::table('payment_details')->count())->toBe(2);
+});
+
+it('refuses to delete a merchant that owns a projected payment', function (): void {
+    // The behavioural half of the on_delete assertion above: restrictOnDelete, not
+    // cascade, for the same reason payment_idempotency_receipts uses it.
+    $merchant = Merchant::factory()->create();
+    insertPaymentDetails(merchantId: $merchant->getKey());
+
+    expect(fn () => $merchant->delete())->toThrow(QueryException::class);
+});
+
+it('constrains the projection counter and the generation fence T8 owns, under addressable names', function (): void {
+    $checks = t7CheckConstraints('payment_outbox');
+
+    expect(array_keys($checks))->toContain(
+        'payment_outbox_projection_failure_count_non_negative',
+        'payment_outbox_projection_failure_generation_non_negative',
+    );
+
+    // THE EXACT PREDICATE, not two toContain() probes. A constraint reading
+    // `check (projection_failure_count >= 0 and projection_failure_count <= 5)`
+    // contains both fragments and would have satisfied the looser assertion,
+    // while silently making the fifth confirmed failure unwritable. Parentheses
+    // and spacing are the server's rendering and are normalised away, exactly as
+    // the eligibility-index predicate assertion does.
+    expect(t5NormalisePredicate($checks['payment_outbox_projection_failure_count_non_negative']))
+        ->toBe('CHECK projection_failure_count >= 0');
+
+    expect(t5NormalisePredicate($checks['payment_outbox_projection_failure_generation_non_negative']))
+        ->toBe('CHECK projection_failure_generation >= 0');
+
+    // 63-byte identifier limit, measured rather than eyeballed: the longer of the
+    // two names is 57 bytes, and a truncated name cannot be dropped by the name
+    // down() computes.
+    foreach (array_keys($checks) as $name) {
+        expect(strlen($name))->toBeLessThan(64);
+    }
+});
+
+it('refuses a negative projection_failure_count and a negative projection_failure_generation', function (string $column): void {
+    // Laravel maps unsignedInteger to a plain PostgreSQL `integer` — the shape
+    // assertion above reads `type => integer` from the catalog — so this CHECK is
+    // the only thing rejecting a negative from an operator UPDATE or a later
+    // repair command. Red first: without the constraint the update succeeds.
+    $eventId = insertOutboxRow();
+
+    expect(fn () => DB::transaction(fn () => DB::table('payment_outbox')
+        ->where('event_id', $eventId)
+        ->update([$column => -1])))
+        ->toThrow(QueryException::class);
+
+    // The row is untouched: the savepoint rolled back, not the whole test.
+    expect((int) DB::table('payment_outbox')->where('event_id', $eventId)->value($column))->toBe(0);
+
+    // POSITIVE CONTROL, and the half that makes the refusal above mean something.
+    // Without it a constraint of `check (column = 0)` would still reject -1 and
+    // pass this test, while making every legitimate write impossible: the failure
+    // counter must reach five for exhaustion, and the generation must climb past
+    // zero on the first operator retry.
+    DB::table('payment_outbox')->where('event_id', $eventId)->update([$column => 5]);
+
+    expect((int) DB::table('payment_outbox')->where('event_id', $eventId)->value($column))->toBe(5);
+})->with(['projection_failure_count', 'projection_failure_generation']);
+
+it('lets the projection counter and the generation fence advance independently', function (): void {
+    // The two columns are written by DIFFERENT owners — the failure recorder
+    // increments the count, operator retry resets it and increments the
+    // generation — so a constraint or default coupling them would break the reset
+    // cycle. Walks a full cycle: four failures, exhaustion at five, then the
+    // retry that zeroes the counter and advances the fence past zero.
+    $eventId = insertOutboxRow();
+    $row = fn (): object => (object) (array) DB::table('payment_outbox')->where('event_id', $eventId)->first();
+
+    for ($count = 1; $count <= 5; $count++) {
+        DB::table('payment_outbox')->where('event_id', $eventId)->update(['projection_failure_count' => $count]);
+    }
+
+    expect((int) $row()->projection_failure_count)->toBe(5)
+        ->and((int) $row()->projection_failure_generation)->toBe(0);
+
+    DB::table('payment_outbox')->where('event_id', $eventId)->update([
+        'projection_failure_count' => 0,
+        'projection_failure_generation' => DB::raw('projection_failure_generation + 1'),
+    ]);
+
+    expect((int) $row()->projection_failure_count)->toBe(0)
+        ->and((int) $row()->projection_failure_generation)->toBe(1);
+
+    // MONOTONIC IN PRACTICE, not merely non-negative: a second retry cycle must
+    // produce a fence value the first cycle's late recorder cannot match.
+    DB::table('payment_outbox')->where('event_id', $eventId)->update([
+        'projection_failure_generation' => DB::raw('projection_failure_generation + 1'),
+    ]);
+
+    expect((int) $row()->projection_failure_generation)->toBe(2);
+});
+
+it('reports 23514 naming the violated projection constraint', function (): void {
+    // The SQLSTATE, read with the same classifier production uses, because T8's
+    // failure classification is required to key on SQLSTATE and owned constraint
+    // identity rather than on exception-message matching.
+    $eventId = insertOutboxRow();
+
+    try {
+        DB::transaction(fn () => DB::table('payment_outbox')
+            ->where('event_id', $eventId)
+            ->update(['projection_failure_count' => -1]));
+
+        $sqlState = null;
+        $message = '';
+    } catch (QueryException $exception) {
+        $sqlState = RetryingAtomicTransaction::sqlStateOf($exception);
+        $message = $exception->getMessage();
+    }
+
+    expect($sqlState)->toBe('23514')
+        ->and($message)->toContain('payment_outbox_projection_failure_count_non_negative');
 });

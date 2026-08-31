@@ -24,13 +24,59 @@ in root `routes/console.php`, run by `php artisan schedule:work`. `payments:outb
 health surface: exit `0` only when the scheduler heartbeat is fresh (one of five states — `fresh`,
 `stale`, `missing`, `unavailable`, `invalid`) **and** one snapshot-consistent PostgreSQL aggregate
 succeeds; JSON carries no exception message. Local Compose runs it as the opt-in `scheduler` service
-behind profile `relay`, reusing the `app` image's `dev` target with `command: php artisan
+behind profile `projection`, reusing the `app` image's `dev` target with `command: php artisan
 schedule:work` and a `payments:outbox:status` healthcheck; `make install`/`make start` never bring it
-up, `make relay-start`/`make relay-stop` toggle it alone, and `make stop`/`make destroy` are
-profile-aware so they still reach it if an operator started it by hand. **The relay stays dormant
-until T8 activates the scheduler and its Horizon-supervised `payments-projection` consumer together**
-— see [outbox delivery](../specifications/payments/outbox-delivery.md#scheduler-contract) and
+up, and `make stop`/`make destroy` are profile-aware so they still reach it. **The relay stays
+dormant until an operator starts the scheduler and its Horizon-supervised `payments-projection`
+consumer together** - see
+[outbox delivery](../specifications/payments/outbox-delivery.md#scheduler-contract) and
 [ADR 0004](../adr/0004-lock-through-push-outbox-relay.md).
+
+**Implemented.** One opt-in `projection` profile carries both the `scheduler` and the `horizon`
+service, and both run the same `app` image with only their `command:` differing. Activation is a
+paired operator action through `make projection-start` / `make projection-stop`;
+`projection-start` depends on `db-migrate`, so workers never start against a schema without
+`payment_projector_receipts` and `payment_details`. `make install`/`make start` stay worker-free.
+
+**There is deliberately no target that starts one without the other.** The relay publishes into
+`payments-projection` and Horizon is the only thing that drains it, so a scheduler running alone
+produces a growing backlog that reads as a consumer fault rather than as a missing process. This
+supersedes both the "normal deployment" and "T8 activates" phrasings still carried by the roadmap,
+outbox delivery, and ADR 0004's consequences.
+
+The `horizon` service's healthcheck is `php artisan horizon:status`, which reads the master
+supervisor record from Redis and exits `0` only while Horizon is running - `2` when no master is
+registered, `1` when every master is paused - so a dead or paused supervisor fails the check while
+its container is still alive. Its `stop_grace_period` is 20s, above the 15-second worker timeout, so
+SIGTERM lets an in-flight projection finish rather than being SIGKILLed mid-transaction.
+
+`make projection-contract` proves the pair end to end in a disposable Compose project with its own
+PostgreSQL and Redis volumes, reusing the already-built development image and never touching the
+development stack.
+
+**Its 180-second deadline bounds the contract's WORK, not the whole wall clock.** Every external
+command - not merely each step - runs under a budget of whatever is left of that deadline, so no
+single hung `docker compose exec`, `psql`, or `artisan` can outlive it; the polling loops keep their
+own attempt limits on top. Guaranteed scoped cleanup takes precedence over a flat wall-clock cap, so
+once the work stops the obligatory teardown adds a **separately bounded tail**: at most four
+10-second diagnostics plus one 60-second `down --volumes`. Total wall clock on a terminated run is
+therefore the work deadline plus that bounded tail, never unbounded.
+
+`PROJECTION_CONTRACT_DEADLINE_SECONDS` may shorten the work deadline but never lengthen it past 180;
+a non-numeric or out-of-range value falls back to 180. `PROJECTION_CONTRACT_SELF_TEST=1` runs one
+deliberate hang before anything is created, which is how the enforcement itself is evidenced without
+waiting out the full budget.
+
+The contract prints expanded diagnostics only on failure, tears the project down on every exit
+including the deadline path, and runs as part of `make ci`. It proves paired startup, a backlog while the consumer is stopped that consumes no poison
+budget, restart convergence, duplicate delivery converging to one receipt and one read row, and that
+the paired stop reaches both processes.
+
+That consumer gets **one Horizon execution per published job**; outbox reconciliation, not Horizon,
+owns republication after grace. Accepted starting values: one process, a 15-second Horizon worker
+timeout, the existing 90-second queue reservation, and a new 2-second projection-local PostgreSQL
+statement timeout, with `statement_timeout < worker timeout < retry_after` asserted by config tests.
+Retained failed-job records are operational history; PostgreSQL outbox state remains delivery truth.
 
 PostgreSQL stores business and delivery truth. Redis supports cache, coordination, Pub/Sub, and
 internal queues; it is never the sole recovery source for financial state.
@@ -71,8 +117,8 @@ outbox relay -> Redis payments-projection -> Horizon consumer -> payment_details
 backoff is the single retry owner), queue connection and queue name `payments-projection`
 (`after_commit => false`, so `push()` — never `pushRaw()` — publishes inside the open transaction),
 and cache store `payments-relay` (pinned to the same bounded `payments` Redis connection, never the
-default cache store, for the scheduler heartbeat only). Horizon supervision of this queue is not yet
-configured; T8 adds it alongside the consumer.
+default cache store, for the scheduler heartbeat only). Horizon supervises this queue, and only this
+queue, on its own separate `horizon` Redis connection — see the projection profile above.
 
 SQS/DLQ is not a second copy of that queue. A later milestone selects a distinct durable workload,
 defines its message and idempotency contract, and runs ordinary Laravel SQS workers on ECS.

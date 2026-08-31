@@ -15,7 +15,11 @@ producers of `payment_idempotency_receipts` and `payment_outbox`, recorded in
 table. **T7 is complete**, opening M4: the scheduler-driven lock-through-push outbox relay, recorded
 in [ADR 0004](adr/0004-lock-through-push-outbox-relay.md) with its evidence in the
 [implementation evidence](specifications/payments/outbox-delivery.md#implementation-evidence) table.
-**T8 is next.**
+**T8 is complete**: the Horizon-supervised idempotent projection consumer, its failure accounting and
+generation fence, `payments:outbox:retry`, and the paired scheduler+Horizon activation, with evidence
+in the
+[implementation evidence](specifications/payments/projection-and-query.md#implementation-evidence)
+table. **T9 is next.**
 
 ## Outcome
 
@@ -115,18 +119,39 @@ Complete the asynchronous tracer bullet on Redis/Horizon.
   start-budget checked before each next row. `PaymentOutboxStatusCommand`
   (`payments:outbox:status`) is a read-only JSON health surface combining a five-state scheduler
   heartbeat with one snapshot-consistent PostgreSQL aggregate, exiting `0` only when both are healthy.
-  The scheduler runs locally as an opt-in Compose service behind profile `relay`, proven healthy
-  against a disposable project — `make install`/`make start` never bring it up. Eight production
+  The scheduler ran locally as an opt-in Compose service behind profile `relay`, proven healthy
+  against a disposable project — `make install`/`make start` never bring it up. (T8 moved it into
+  the paired `projection` profile; this entry records T7's state as shipped.) Eight production
   types, one forward migration, no new Composer dependency. Recorded in
   [ADR 0004](adr/0004-lock-through-push-outbox-relay.md), which also records HS-1: **no shared
   projection gate is acquired**, deliberately deferred to T11's reciprocal obligation in
   [verification and rebuild](specifications/payments/verification-and-rebuild.md#t7s-reciprocal-obligation-the-gate-does-not-exist-yet-in-the-relay).
-- T8 — Implement idempotent projection consumer and marker self-healing.
+- T8 — **Complete.** The Horizon-supervised `payments-projection` consumer with marker self-healing;
+  visible receipt-without-row, read-row-mismatch and contradictory-identity failures; the
+  `payment_projector_receipts`/`payment_details` schema and a monotonic
+  `payment_outbox.projection_failure_generation` fence; confirmed-failure accounting whose fifth
+  failure exhausts durably in the same statement that writes the count;
+  `payments:outbox:retry {eventId}` as the sole reactivation path; `laravel/horizon` v5.48.3
+  supervising only the `payments-projection` connection and queue at one process, `tries = 1` and a
+  15-second worker timeout, ordered strictly below the 90-second reservation and above the new
+  2-second projection-local `statement_timeout`; and paired scheduler+Horizon activation after
+  migrations through `make projection-start`/`make projection-stop`, proved end to end by
+  `make projection-contract`. Ten production types, one forward migration, one new Composer
+  dependency. Evidence in
+  [projection and query](specifications/payments/projection-and-query.md#implementation-evidence).
+  **No shared projection gate was added**: T11 keeps the reciprocal obligation recorded in
+  [verification and rebuild](specifications/payments/verification-and-rebuild.md#t8s-reciprocal-obligation-the-consumer-arrives-without-a-gate-either).
+  T8's crash evidence is a deterministic in-process commit-boundary failpoint plus a live Horizon
+  stop/backlog/restart smoke; literal SIGTERM/SIGKILL process suites stay
+  [T12's](testing/payments-resilience.md).
 - T9 — Implement owned projected/pending payment query.
 
-**What T7 did not prove.** No consumer, no Horizon configuration, and no `payments:outbox:retry`
-exist — the relay stays dormant in every normal deployment until T8 activates the scheduler and its
-Horizon-supervised consumer together. Pest never ran a live `schedule:work` process; the only
+**What T7 did not prove.** *(Frozen as written at T7. T8 has since supplied the consumer, the Horizon
+configuration and `payments:outbox:retry`; what T8 itself did not prove is recorded in
+[projection and query](specifications/payments/projection-and-query.md#implementation-evidence).)*
+No consumer, no Horizon configuration, and no `payments:outbox:retry`
+exist. The relay stays dormant until an operator starts the scheduler and its Horizon-supervised
+consumer together, which T8 makes possible. Pest never ran a live `schedule:work` process; the only
 evidence that it drives the relay on a real per-second cadence is a disposable-Compose-project
 measurement, not a Pest run, and that measurement's image came from an already-built tag rather than
 a fresh `Dockerfile` build because of a registry-access limitation in that session — see
@@ -225,7 +250,7 @@ worktrees must not modify the same Payments persistence contracts.
 | T5 | P1 | [Initiation/idempotency](specifications/payments/initiation-and-idempotency.md) | Domain, schema, and boundary tests |
 | T6 | P1 | [Initiation/idempotency](specifications/payments/initiation-and-idempotency.md) | PostgreSQL concurrency and HTTP contract tests |
 | T7 | P1 | [Outbox delivery](specifications/payments/outbox-delivery.md) | Redis/PostgreSQL relay and scheduler tests |
-| T8 | P1 | [Projection/query](specifications/payments/projection-and-query.md) | Duplicate, rollback, backlog, crash, and poison tests |
+| T8 | P1 | [Projection/query](specifications/payments/projection-and-query.md) | Duplicate, rollback, backlog, deterministic crash-boundary, Horizon restart, poison, and operator-retry tests |
 | T9 | P1 | [Projection/query](specifications/payments/projection-and-query.md) | Projected/pending/missing/rebuilding and ownership tests |
 | T10 | P2 | [Verification/rebuild](specifications/payments/verification-and-rebuild.md) | Read-only corruption matrix and targeted repair |
 | T11 | P1 | [Verification/rebuild](specifications/payments/verification-and-rebuild.md) | Lock race, batch, kill/restart, and replay tests |

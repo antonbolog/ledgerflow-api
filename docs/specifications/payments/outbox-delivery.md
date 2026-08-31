@@ -82,7 +82,8 @@ envelope exists and is immediately eligible, and nothing yet publishes, consumes
   same connection inside the same transaction, which makes jsonb-equality with the stored event true
   by construction instead of by test. It supplies none of the three counters, so all of them take
   their zero defaults, and `available_at` is set to the insert time — immediately eligible. Every
-  later mutation of that column belongs to T7.
+  later mutation of that column belongs to T7, apart from the one narrow operator-retry exception
+  recorded below.
 
   It refuses **loudly** when `Projectionist::isReplaying()` is true, writing nothing: a replayed event
   is fully derivable, so a standard rebuild would otherwise re-create envelopes or die on the
@@ -94,6 +95,12 @@ envelope exists and is immediately eligible, and nothing yet publishes, consumes
   a confirmed handler failure `projection_failure_count`, `last_projection_error` **and the
   threshold-driven `exhausted_at`, in one transaction**.
 
+  One further column joins that T8-owned set: `projection_failure_generation`, a monotonic
+  non-negative fence defaulting to `0` that only a successful operator retry increments, so a delayed
+  failure recorder cannot charge its increment to a new retry cycle. **Implemented by T8**, whose
+  forward migration adds the column with a named non-negative CHECK alongside one for
+  `projection_failure_count`.
+
   Exhaustion belongs with the counter that triggers it. The rules above already require it: an
   arbitrarily long transport outage never sets `exhausted_at`, only a confirmed consumer-handler
   exception increments the poison count, and exhaustion is reached when that count crosses its
@@ -103,6 +110,14 @@ envelope exists and is immediately eligible, and nothing yet publishes, consumes
 
   `payments:outbox:retry {eventId}` **clears** `exhausted_at` after operator correction. That is a
   third surface, neither relay nor consumer, and it is the only path that unsets the column.
+  **Implemented by T8.**
+
+  **Implemented by T8**, one narrow exception to T7's ownership of every post-insert
+  `available_at` mutation: a successful retry atomically sets `available_at = now()` in the same
+  locked statement, so a corrected exhausted row becomes immediately relay-eligible instead of waiting
+  for a transport schedule it never earns. Ordinary transport scheduling - backoff, grace, and
+  acceptance - stays T7's alone. The full reset list, including the `projection_failure_generation`
+  increment, belongs to [projection and query](projection-and-query.md) and is not repeated here.
 
 ## Initial relay algorithm
 
@@ -158,8 +173,9 @@ eligible
 - Only a confirmed consumer-handler exception increments the poison count.
 - Five confirmed handler failures are the initial exhaustion threshold. Worker termination,
   backlog, and missing receipt are not poison evidence.
-- `payments:outbox:retry {eventId}` clears exhaustion after operator correction while retaining
-  historical evidence in logs.
+- `payments:outbox:retry {eventId}` clears exhaustion after operator correction and sets
+  `available_at` to `now()`, while retaining historical evidence in logs. T8 owns it, and it is
+  implemented.
 
 Initial timings are operational defaults, not domain rules: start with a 30-second reconciliation
 grace, capped exponential backoff, and one application-level consumer attempt per published job.
@@ -184,13 +200,13 @@ UTC — not PostgreSQL `now()` — only after a fully handled pass, because it r
 made progress, which a database outage must not be able to fake as a scheduler outage.
 
 Local development runs the scheduler as an **opt-in** Compose service, `scheduler`, behind profile
-`relay`: the same `dev`-target image as `app`, `command: php artisan schedule:work`, healthchecked by
-`payments:outbox:status` itself — not mere process existence, so a wedged loop or a lost database both
-fail the check. A clean `make install`/`make start` never brings this profile up; `make relay-start`
-and `make relay-stop` toggle it without touching the four default services, and `make stop`/`make
-destroy` are profile-aware so they reach a scheduler an operator started by hand. **The relay stays
-dormant in every normal deployment until T8 activates the scheduler and its Horizon-supervised
-consumer together** — a long-lived producer without its consumer would otherwise republish every
+`projection`: the same `dev`-target image as `app`, `command: php artisan schedule:work`, healthchecked
+by `payments:outbox:status` itself — not mere process existence, so a wedged loop or a lost database
+both fail the check. A clean `make install`/`make start` never brings this profile up;
+`make projection-start` and `make projection-stop` toggle it **together with the `horizon` consumer
+that shares its profile**, and `make stop`/`make destroy` are profile-aware so they reach both.
+**The relay stays dormant until an operator starts the scheduler and its Horizon-supervised consumer
+together** - a long-lived producer without its consumer would otherwise republish every
 accepted row on an unbounded 30-second cycle. Production deployment must supervise a scheduler process
 the same way and interrupt the previous release after new code is live.
 
@@ -343,7 +359,10 @@ image content itself was already proved current by the same `make check` this ev
 its Pest rows from. See
 [development environment](../foundation/development-environment.md#what-t7-added-and-what-it-deliberately-did-not).
 
-**Not proved, and not claimed.**
+**Not proved, and not claimed.** *(Frozen as written at T7, and describing the state at that time.
+T8 has since delivered the consumer, `payments:outbox:retry` and Horizon supervision; what T8 itself
+did not prove is recorded in
+[projection and query](projection-and-query.md#implementation-evidence).)*
 
 - No consumer, no `payments:outbox:retry`, and no Horizon exist. Nothing reads `payment_outbox` for
   projection purposes; T8 owns that.

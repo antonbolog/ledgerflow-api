@@ -575,8 +575,8 @@ dependency**: `composer.json` and `composer.lock` are byte-identical to what T6 
   longer than the pass it describes.
 - **Schedule registration** in root `routes/console.php` —
   `Schedule::command('payments:outbox:relay')->everySecond()` — and an **opt-in** `scheduler` Compose
-  service behind profile `relay`, plus `relay-start`/`relay-stop` Make targets and profile-aware
-  `stop`/`destroy`.
+  service. T7 shipped it behind profile `relay` with `relay-start`/`relay-stop`; T8 moved it into the
+  paired `projection` profile described below.
 
 **Findings that shaped those artifacts:**
 
@@ -618,7 +618,11 @@ for an environment reason unrelated to `compose.yaml` or the `Dockerfile`.
 
 - **No consumer, no Horizon configuration, no `payments:outbox:retry`.** T8 owns all three; nothing
   in T7 reads `payment_outbox` for projection purposes or writes `projection_completed_at`,
-  `projection_failure_count`, `last_projection_error`, or `exhausted_at`.
+  `projection_failure_count`, `last_projection_error`, or `exhausted_at`. T8 has since replaced the
+  scheduler-only `relay` profile above with one opt-in `projection` profile carrying both
+  `scheduler` and `horizon`, driven by paired `make projection-start`/`make projection-stop` targets
+  that start them only after migrations, while `make install`/`make start` stay worker-free. There is
+  no target that starts either alone.
 - **No shared projection gate.** `OutboxRelay::relayOne()` acquires no advisory lock and reads no
   `payment_projection_controls` row — recorded as HS-1 in
   [outbox delivery](../payments/outbox-delivery.md#hs-1-no-shared-projection-gate-is-acquired) and as

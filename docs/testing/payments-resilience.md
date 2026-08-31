@@ -62,6 +62,13 @@ commands before the scaffold exists.
 - Rebuild gate defers without consuming outbox delivery budget.
 - Confirmed handler failure metadata remains separate from projection rollback.
 
+**Evidence ownership, delivered by T8.** T8 owns the duplicate-delivery,
+marker-repair, poison-exhaustion, and operator-retry evidence in this section and in the
+confirmed-handler-failure bullets under **Outbox relay**, and proves rollback and redelivery through
+a deterministic integration failpoint plus a real Horizon stop / backlog / restart smoke. Transport
+failure never consumes projection failure budget: only confirmed handler failures count toward
+exhaustion. The full barrier-coordinated SIGTERM/SIGKILL multi-process suite stays with T12.
+
 ## Query payment
 
 - Owned projection returns `200` and projected business fields.
@@ -100,7 +107,9 @@ commands before the scaffold exists.
 - Integration tests inject failures at named persistence and delivery checkpoints.
 - A real transport push followed by an injected exception proves the publish-before-commit path.
 - Process tests use synchronization barriers, then SIGTERM/SIGKILL real relay, consumer, and
-  rebuild processes. Arbitrary sleeps are not accepted as coordination.
+  rebuild processes. Arbitrary sleeps are not accepted as coordination. That process suite is T12's;
+  T8's crash evidence is the deterministic failpoint and live Horizon restart smoke named under
+  **Projection consumer**.
 - Production logic contains no environment-conditioned fault flags.
 
 ## Architecture rules

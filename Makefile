@@ -4,7 +4,8 @@
 #
 #   environment lifecycle   install  start  stop  destroy
 #   database lifecycle      db-migrate  db-seed  db-reset
-#   validation              agent-check  quality  test  check  ci
+#   projection runtime      projection-start  projection-stop
+#   validation              agent-check  quality  test  check  projection-contract  ci
 #
 # CI derives all validation from these targets. Ad-hoc `artisan`, `tinker` and
 # `psql` access is ordinary developer work and is not a violation of that rule.
@@ -153,13 +154,13 @@ start: ## Start the local services
 
 # `stop`, never `down`: containers halt, volumes and their data survive.
 #
-# --profile relay, even here where the profile is never STARTED by this file's
-# own targets: `stop` selects containers by currently active profile, not by
-# what happens to be running, so a scheduler an operator started by hand with
-# `relay-start` would otherwise survive a plain `stop` untouched.
+# --profile projection, even here where the profile is never STARTED by this
+# file's own targets: `stop` selects containers by currently active profile, not
+# by what happens to be running, so the scheduler and Horizon an operator started
+# with `projection-start` would otherwise survive a plain `stop` untouched.
 .PHONY: stop
-stop: ## Stop the local services, keeping all data (also reaches the opt-in scheduler, if running)
-	$(DC) --profile relay stop
+stop: ## Stop the local services, keeping all data (also reaches the opt-in scheduler and Horizon)
+	$(DC) --profile projection stop
 
 .PHONY: destroy
 destroy: ## Remove containers, networks and volumes (CONFIRM=destroy)
@@ -170,26 +171,35 @@ destroy: ## Remove containers, networks and volumes (CONFIRM=destroy)
 	  echo "  Re-run with: make destroy CONFIRM=destroy"; \
 	  exit 1; \
 	fi
-	$(DC) --profile relay down --volumes --remove-orphans
+	$(DC) --profile projection down --volumes --remove-orphans
 
 # ---------------------------------------------------------------------------
-# Opt-in local scheduler
+# Opt-in projection pair: scheduler AND Horizon, together or not at all
 #
-# Disposable evidence only. Neither `install` nor `start` ever passes
-# --profile relay, so a clean install's four default services never change;
-# these two targets exist so an operator — or T7's own disposable Compose
-# measurement — can add and remove the scheduler without touching the rest of
-# the stack. T8 owns the production-like activation that starts this
-# alongside its Horizon-supervised consumer.
+# Neither `install` nor `start` ever passes --profile projection, so a clean
+# install's four default services never change.
+#
+# THERE IS DELIBERATELY NO TARGET THAT STARTS ONE WITHOUT THE OTHER. The relay
+# publishes into `payments-projection` and Horizon is the only thing that drains
+# it, so a scheduler running alone produces a growing backlog that reads as a
+# consumer fault rather than as a missing process. Both names appear on one
+# command line so the pair is what an operator can ask for.
+#
+# STARTED ONLY AFTER MIGRATIONS. `projection-start` depends on db-migrate: the
+# consumer's first act is to lock a `payment_outbox` row and write
+# `payment_projector_receipts`, and starting workers against a schema that lacks
+# those tables produces a burst of failures that look like a projection defect.
 # ---------------------------------------------------------------------------
 
-.PHONY: relay-start
-relay-start: ## Start the opt-in scheduler service (disposable evidence only)
-	$(DC) --profile relay up -d --wait scheduler
+.PHONY: projection-start
+projection-start: db-migrate ## Start the opt-in scheduler and Horizon consumer together
+	@echo "==> starting the projection pair (scheduler + horizon)"
+	$(DC) --profile projection up -d --wait scheduler horizon
 
-.PHONY: relay-stop
-relay-stop: ## Stop the opt-in scheduler service, leaving the rest of the stack running
-	$(DC) --profile relay stop scheduler
+.PHONY: projection-stop
+projection-stop: ## Stop the scheduler and Horizon consumer together
+	@echo "==> stopping the projection pair"
+	$(DC) --profile projection stop scheduler horizon
 
 # ---------------------------------------------------------------------------
 # Database lifecycle
@@ -319,5 +329,9 @@ image-contract: ## Build the production and web image targets
 	docker build --target production -t ledgerflow-api:ci .
 	docker build --target web -t ledgerflow-web:ci .
 
+.PHONY: projection-contract
+projection-contract: ## Prove the scheduler+Horizon pair end to end in a disposable Compose project
+	@./scripts/ci/projection-contract.sh
+
 .PHONY: ci
-ci: ci-contract image-contract ## Run the full CI-equivalent contract after install
+ci: ci-contract projection-contract image-contract ## Run the full CI-equivalent contract after install

@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Modules\Payments\Infrastructure\Relay;
 
-use LogicException;
+use Modules\Payments\Infrastructure\Projection\PaymentProjectionConsumer;
 
 /**
  * The message the relay publishes: one outbox event id, and nothing else.
@@ -13,6 +13,11 @@ use LogicException;
  * load the canonical envelope from `payment_outbox` by this id, so the transport
  * carries an identifier rather than business data. Redis is never authoritative
  * and never holds a payment payload.
+ *
+ * T8 REPLACED THE REFUSING BODY WITH THE REAL CONSUMER. Everything else about
+ * this class is unchanged on purpose: the fully-qualified name, the constructor
+ * and the single serialized property are the wire contract for messages already
+ * sitting on the queue.
  *
  * IT MUST NOT IMPLEMENT ShouldQueueAfterCommit, MUST NOT DECLARE $afterCommit,
  * AND MUST NEVER BE DISPATCHED WITH ->afterCommit(). Queue::shouldDispatchAfterCommit()
@@ -32,23 +37,31 @@ final readonly class ProjectPaymentEvent
     public function __construct(public string $eventId) {}
 
     /**
-     * T8 replaces this body with the real projection consumer.
+     * Hand the event id to the consumer, and nothing else.
      *
-     * REFUSING LOUDLY IS THE POINT. An empty handle() would let a stray
-     * `queue:work --queue=payments-projection` drain the queue, marking every
-     * envelope delivered while nothing was ever projected — a false green with no
-     * error anywhere. A plain LogicException, because this is a programming
-     * condition and the outbox failure vocabulary belongs to the columns, not to an
-     * exception hierarchy nothing else would use.
+     * THE CONSUMER ARRIVES AS A METHOD PARAMETER, NOT AS A CONSTRUCTOR ARGUMENT,
+     * and that is a serialization constraint rather than a style preference. This
+     * object is serialized onto Redis by the relay: a constructor dependency would
+     * be serialized with it — a Connection, a logger and a PDO handle inside a
+     * queue payload — and would then be UNSERIALIZED into a worker process where
+     * none of it is valid. Laravel resolves a type-hinted handle() parameter
+     * through the container at call time (CallQueuedHandler::call() dispatches
+     * through Container::call()), so the dependency is built fresh in the worker
+     * and never crosses the transport.
+     *
+     * THE PROPERTY LIST IS THEREFORE STILL EXACTLY `eventId`, which is what keeps
+     * messages the relay published BEFORE this method existed deserializable now.
+     * A queue that survived a deploy holds envelopes serialized against the old
+     * shape, and adding a property would make every one of them fail to restore.
+     *
+     * NO try/catch, NO acknowledgement of failure. Every exception the consumer
+     * raises must reach the queue worker, which is what produces the retained
+     * failed-job record. Swallowing one here would mark an envelope delivered while
+     * nothing was projected — the same false green the refusing body used to guard
+     * against, arrived at by a different route.
      */
-    public function handle(): never
+    public function handle(PaymentProjectionConsumer $consumer): void
     {
-        throw new LogicException(sprintf(
-            'No projection consumer exists yet, so outbox event %s must not be consumed. '
-            .'Publishing is T7; consuming, projector receipts and Horizon supervision are T8, '
-            .'which replaces this method. Until then the relay is deliberately not run outside '
-            .'its isolated evidence flow.',
-            $this->eventId,
-        ));
+        $consumer->project($this->eventId);
     }
 }

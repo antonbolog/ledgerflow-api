@@ -527,6 +527,25 @@ it('carries no frontend, module config or example routing', function (string $mo
 const LEDGERFLOW_RELAY_SOURCE = __DIR__.'/../../Modules/Payments/app/Infrastructure/Relay';
 
 /**
+ * The consumer side, added with T8's dispatch-adjacent code.
+ *
+ * SCANNED FOR THE SAME THREE SPELLINGS, because the ban is about the DISPATCH of
+ * ProjectPaymentEvent and dispatch sites are not confined to the publisher. A
+ * future repair command, a rebuild path or a retry that re-published an envelope
+ * would most naturally be written here, and ->afterCommit() at such a site leaves
+ * no runtime trace for a reflection test to find.
+ *
+ * The Console directory joins them for the same reason: `payments:outbox:retry`
+ * makes a row eligible again, and the obvious next step someone adds to it is a
+ * dispatch.
+ */
+const LEDGERFLOW_DISPATCH_ADJACENT_SOURCE = [
+    __DIR__.'/../../Modules/Payments/app/Infrastructure/Relay',
+    __DIR__.'/../../Modules/Payments/app/Infrastructure/Projection',
+    __DIR__.'/../../Modules/Payments/app/Infrastructure/Console',
+];
+
+/**
  * The three spellings, found in a token stream.
  *
  * A pure function over tokens rather than a scan of the real file, so the failure
@@ -581,30 +600,39 @@ function ledgerflowAfterCommitOptIns(array $tokens): array
     return array_values(array_unique($found));
 }
 
-it('keeps every Payments relay source file clear of after-commit opt-ins', function (): void {
-    expect(is_dir(LEDGERFLOW_RELAY_SOURCE))->toBeTrue(
-        'The Payments relay directory has moved; this rule now scans nothing and passes vacuously.'
-    );
-
+it('keeps every Payments dispatch-adjacent source file clear of after-commit opt-ins', function (): void {
     $scanned = [];
     $violations = [];
 
-    foreach (Finder::create()->files()->in(LEDGERFLOW_RELAY_SOURCE)->name('*.php') as $file) {
-        $scanned[] = $file->getFilename();
+    foreach (LEDGERFLOW_DISPATCH_ADJACENT_SOURCE as $directory) {
+        expect(is_dir($directory))->toBeTrue(
+            "The scanned directory {$directory} has moved; this rule now scans less than it claims."
+        );
 
-        foreach (ledgerflowAfterCommitOptIns(token_get_all((string) $file->getContents())) as $violation) {
-            $violations[] = $file->getRelativePathname().': '.$violation;
+        foreach (Finder::create()->files()->in($directory)->name('*.php') as $file) {
+            $scanned[] = $file->getFilename();
+
+            foreach (ledgerflowAfterCommitOptIns(token_get_all((string) $file->getContents())) as $violation) {
+                $violations[] = $file->getRelativePathname().': '.$violation;
+            }
         }
     }
 
     expect($violations)->toBeEmpty(implode(PHP_EOL, $violations));
 
     // A DIRECTORY SCAN CAN GO EMPTY WITHOUT THE PATH BEING WRONG — a rename inside
-    // it, a move to another layer — and an empty scan reports success. The message
-    // class is named because it is the one file guaranteed to be here; the count
-    // catches the rest disappearing.
-    expect($scanned)->toContain('ProjectPaymentEvent.php');
-    expect(count($scanned))->toBeGreaterThanOrEqual(count(glob(LEDGERFLOW_RELAY_SOURCE.'/*.php') ?: []));
+    // it, a move to another layer — and an empty scan reports success. The two
+    // files guaranteed to be here are named; the count catches the rest
+    // disappearing.
+    expect($scanned)->toContain('ProjectPaymentEvent.php')
+        ->toContain('PaymentProjectionConsumer.php');
+
+    $expected = array_sum(array_map(
+        fn (string $directory): int => count(glob($directory.'/*.php') ?: []),
+        LEDGERFLOW_DISPATCH_ADJACENT_SOURCE,
+    ));
+
+    expect(count($scanned))->toBeGreaterThanOrEqual($expected);
 });
 
 it('detects each after-commit spelling in fabricated source', function (string $source, string $expected): void {
