@@ -17,9 +17,11 @@ The consumer applies one deterministic projection transaction. A durable project
 idempotency boundary. The query API reads only `PaymentDetails` and the merchant-owned idempotency
 receipt.
 
-**Nothing in this specification is implemented yet.** The consumer, its two tables, the projection
-failure fence, and the operator retry command are accepted T8 decisions pending implementation; the
-query contract is T9's and the gate is T11's. [The roadmap](../../roadmap.md) owns task state.
+**T8 is implemented; T9 and T11 are not.** The consumer, its two tables, the projection failure
+fence, the failure recorder, and `payments:outbox:retry` all exist and carry the evidence recorded
+below. The query contract remains T9's and **the shared projection gate remains T11's** - the
+consumer deliberately opens on the envelope row lock and acquires no gate. [The
+roadmap](../../roadmap.md) owns task state.
 
 ## Consumer transaction
 
@@ -67,7 +69,7 @@ idempotency receipt; here redelivery and outbox reconciliation own recovery.
 
 ## Durable projection schema
 
-Accepted for T8, pending implementation, and pinned here so T9-T11 do not reverse-engineer the
+Implemented by T8, and pinned here so T9-T11 do not reverse-engineer the
 migration. Exact key and constraint names are asserted in the Payments schema test.
 
 `payment_projector_receipts`:
@@ -137,7 +139,7 @@ See the [resilience test plan](../../testing/payments-resilience.md).
 
 ## Failure classification
 
-Accepted for T8, pending implementation. Only a **confirmed deterministic handler failure** consumes
+Implemented by T8. Only a **confirmed deterministic handler failure** consumes
 the projection failure budget.
 
 Countable:
@@ -179,7 +181,7 @@ count to five. Exhaustion belongs with the counter that triggers it; see
 
 ## Operator retry
 
-Accepted for T8, pending implementation. `payments:outbox:retry {eventId}` is the sole reactivation
+Implemented by T8. `payments:outbox:retry {eventId}` is the sole reactivation
 path for an exhausted envelope, and it works under a lock on the outbox row.
 
 It refuses without mutation when the event is unknown, already completed, or not exhausted. On an
@@ -214,6 +216,68 @@ T11:
 
 - The rebuilding HTTP state has a stable contract, and gate lock and protected work use the same
   PostgreSQL backend connection.
+
+## Implementation evidence
+
+**Satisfied by T8**, which shipped ten production types - eight under
+`Modules/Payments/app/Infrastructure/Projection/`, plus
+`Modules\Payments\Infrastructure\Console\PaymentOutboxRetryCommand` and the root
+`App\Providers\HorizonServiceProvider` - one forward migration
+(`2026_08_31_000000_create_payment_projection_schema`), `config/horizon.php`, the
+`payments.projection` configuration block, the `laravel/horizon` dependency, and the paired
+`projection` Compose profile. Every row below was observed through `make check` against
+PostgreSQL 18.4 and Redis 8.10.0, except the last four, which come from `make projection-contract`
+against live `scheduler` and `horizon` processes.
+
+**Each row was also confirmed by mutation**: the named behaviour was removed or inverted in the
+production source and the cited test was re-run to prove it fails. Ten defects were found that way
+during implementation, including four in tests that passed for the wrong reason.
+
+| # | Invariant | Proving test | Observed mechanism | Status |
+|---|---|---|---|---|
+| P-1 | First delivery commits receipt, read row and completion marker in one transaction | `PaymentProjectionConsumerTest::it commits receipt, read row and completion marker together on a first delivery` | `xmin` read from a second backend is identical across `payment_projector_receipts`, `payment_details` and `payment_outbox` - PostgreSQL's own statement that one transaction wrote all three | **PASS** |
+| P-2 | An exact duplicate changes nothing at all | `…it leaves an exact duplicate delivery entirely alone` | Whole rows on both tables compared byte for byte before and after; one receipt, one read row | **PASS** |
+| P-3 | A duplicate repairs only a missing completion marker | `…it repairs only a missing completion marker on a duplicate delivery`, `…it does not move a completion marker that is already set` | The marker `UPDATE` carries `and projection_completed_at is null`; its affected-row count *is* the outcome, so `MarkerRepaired` and `AlreadyProjected` cannot be confused | **PASS** |
+| P-4 | A receipt without its read row fails visibly rather than being recreated | `…it refuses a duplicate whose read row is missing rather than recreating it` | `projection_read_row_missing`; the marker stays null so the envelope keeps surfacing, and the receipt is not deleted | **PASS** |
+| P-5 | A read row that describes a different payment fails visibly | `…it refuses a duplicate whose read row describes a different payment` | `projection_read_row_mismatch`; without the value check the delivery would have stamped the marker over another payment's row | **PASS** |
+| P-6 | Contradictory identity is refused, never upserted | `…it refuses to overwrite a read row another writer already claimed`, `…it cannot be handed two envelopes for one payment in the first place` | `payment_details_pkey` raises 23505 and the whole transaction rolls back; the positive control proves two envelopes for one payment are structurally unreachable through the consumer | **PASS** |
+| P-7 | An exhausted envelope is an observability-only no-op that releases its lock | `…it treats an exhausted envelope as an observability-only no-op` | No receipt, no read row, envelope row unchanged byte for byte; `transactionLevel()` and the PDO both clean, and a second backend can take the row lock immediately afterwards | **PASS** |
+| P-8 | A missing envelope is a typed, non-countable, visible failure | `…it fails visibly when the delivered event id addresses no envelope` | `ProjectionEnvelopeMissing` escapes to the worker; all three tables stay empty, so no orphan metadata is created | **PASS** |
+| P-9 | Every malformed or unsupported envelope is refused before any write | `…it refuses a malformed or unsupported envelope and writes nothing` (14 datasets) | Alias, schema version, aggregate version, payload shape, types, positivity, currency form, occurrence time and both identity agreements; no receipt is ever left behind, because the decode precedes the claim | **PASS** |
+| P-10 | Business time survives to microsecond precision | `…it commits receipt, read row and completion marker together on a first delivery` | `initiated_at = '2026-08-21T10:11:12.123456+00:00'::timestamptz` compared in the database. Measured defect: binding a `CarbonImmutable` made Laravel format it `Y-m-d H:i:s`, silently truncating to whole seconds | **PASS** |
+| P-11 | Only confirmed handler failures count, and the fifth exhausts | `ProjectionFailureRecorderTest::it exhausts the envelope on exactly the fifth confirmed failure`, `…it charges five confirmed deliveries and then stops delivering` | Counts 1-4 leave `exhausted_at` null; the fifth sets it in the SAME tuple as the count, so no window exists between them; the sixth delivery is a `skipped_exhausted` no-op | **PASS** |
+| P-12 | Backlog, lock timeouts and duplicates consume no poison budget | `…it does not charge a lock timeout, however many times it happens`, `…it does not charge a non-countable failure raised after the envelope was locked`, `…it does not charge a delivery that lost a race to a successful duplicate` | Five real `55P03`s leave the count at 0; a timeout on the read row's FK check - past the point the generation was captured - is likewise not charged | **PASS** |
+| P-13 | The countable/non-countable set is closed and pinned | `ProjectionFailureClassificationTest` (27 table-driven cases) | Eight refusal categories plus `projection_handler_failed`; `40P01`/`40001`/`55P03` referenced from `RetryingAtomicTransaction::RETRYABLE` rather than copied, `57014` and the whole `08` class non-countable, unrecognised SQLSTATEs not charged | **PASS** |
+| P-14 | An unknown COMMIT outcome writes no failure metadata | `PaymentProjectionConsumerTest::it classifies a failure after a landed commit as an unknown commit outcome`, `…it classifies a COMMIT that itself throws as an unknown outcome, not as a rollback` | A deferred constraint trigger makes PostgreSQL fail the COMMIT itself; the PDO is asked *before* the rollback, because `Connection::commit()` decrements `$this->transactions` only after `getPdo()->commit()` returns. The recorder is proved never to have been called, by its absence from the log | **PASS** |
+| P-15 | A late recorder cannot charge a completed, exhausted or re-generated row | `ProjectionFailureRecorderTest::it declines to poison a row a concurrent duplicate has already completed` (3 datasets), `…it cannot charge a reset cycle with a failure from the cycle before it` | Four guards in one `UPDATE … RETURNING` `WHERE`, so there is no check-then-write window; the ABA case walks exhaust → operator reset → late recorder refused → positive control on the new generation charges normally | **PASS** |
+| P-16 | A failed metadata write leaves the envelope retryable | `…it leaves the envelope retryable when it cannot persist the failure` | A real row-lock conflict; the row stays incomplete and non-exhausted, the original failure is what propagates, and both Laravel and PDO transaction state are clean afterwards | **PASS** |
+| P-17 | Neither consumer nor recorder writes a relay-owned column | `PaymentProjectionConsumerTest::it never writes a column the relay or the failure recorder owns`, `ProjectionFailureRecorderTest::it never writes a column the relay owns` | Transport columns compared as a whole group across first delivery, marker repair and failure recording | **PASS** |
+| P-18 | The generation fence is captured under the lock, not re-read afterwards | `…it captures the failure generation the row carried under the lock` | `payment_outbox` is read exactly once, by the locking `SELECT`, proved through `DB::listen`; an implementation re-reading it inside `abort()` fails the test | **PASS** |
+| P-19 | Concurrent duplicates serialise on the envelope row lock | `…it serialises a concurrent duplicate on the envelope row lock`, `…it converges to one receipt, one read row and one marker when a duplicate arrives after the winner` | A real `FOR UPDATE` from a second backend; the consumer blocks on the *SELECT* - proved by the absence of any successful write in `DB::listen` - and converges to one receipt and one read row afterwards | **PASS** |
+| P-20 | The projection statement timeout is applied inside the transaction and dies with it | `…it applies its statement timeout inside the transaction and lets it die with it`, `…it cancels a statement that outlives the bound rather than waiting for the worker` | `SHOW statement_timeout` reads `2s` from inside a `TransactionCommitting` listener and `0` afterwards; a bound deliberately lowered to 150 ms produces a real `57014` against a held lock | **PASS** |
+| P-21 | `statement_timeout < worker timeout < retry_after`, strictly | `ProjectionConfigurationTest` (18 cases), `HorizonSupervisionTest::it keeps the three timeouts strictly ordered in the real configuration` | 2 s < 15 s < 90 s, each read from the file that owns it; equality is refused as firmly as inversion | **PASS** |
+| P-22 | Horizon supervises only `payments-projection`, one process, one attempt | `HorizonSupervisionTest::it supervises exactly one queue…`, `…it gives Horizon no queue the relay does not publish to`, `…it runs one process with one attempt and the accepted worker timeout` | Read through Horizon's own `ProvisioningPlan`, not from the config array. Measured defect: `config()` is unusable during config loading and `horizon.php` loads before `payments.php`, which silently yielded 0 processes, 0 tries and a 0-second timeout | **PASS** |
+| P-23 | Horizon's metadata never shares the relay's bounded transport | `…it stores its own bookkeeping away from the Payments transport`, `…it leaves the relay transport bounds untouched` | `horizon.use = 'horizon'` on its own logical database; the relay's `max_retries => 0` and 0.25 s timeouts are unchanged | **PASS** |
+| P-24 | The dashboard is closed unless an operator opens it, in local only | `…it registers the dashboard route but refuses it by default`, `…it opens only when the flag and the environment both agree` (5 datasets) | The package has no `enabled` switch, so `Horizon::auth()` is written explicitly and requires both the flag and the environment | **PASS** |
+| P-25 | Operator retry resets poison state under a row lock and preserves transport history | `PaymentOutboxRetryTest::it clears the poison state, advances the fence and preserves publication history`, `…it waits for a delivery in flight rather than reading state about to change` | `exhausted_at` cleared, count zeroed, category cleared, generation incremented, `available_at = now()`; publication and transport columns compared as a group; a held row lock makes the retry block on its own `SELECT` | **PASS** |
+| P-26 | Retry refuses unknown, completed and non-exhausted envelopes without mutation | `…it refuses an unknown event without mutating anything`, `…it refuses a completed or non-exhausted envelope without mutating anything` (4 datasets) | Whole-row byte comparison after each refusal; exit code 1 and a fixed reason in both the JSON output and the log | **PASS** |
+| P-27 | Queued messages published before T8 still deserialise | `…it still deserialises a message published before the body changed` | A hand-built legacy payload with the fully-qualified name written as a literal; the consumer arrives as a `handle()` parameter so the serialised property list is still exactly `eventId` | **PASS** |
+| P-28 | The job acknowledges nothing it did not project | `…it lets a consumer failure escape the job rather than acknowledging it` | The exception reaches the caller and the failure is still charged, so the job cannot mark an envelope delivered while nothing was projected | **PASS** |
+| — | Paired startup: scheduler and Horizon both healthy from one command | `make projection-contract` | `horizon:status` exits 0 and `payments:outbox:status` reports a fresh heartbeat, against live processes in a disposable Compose project | **PASS** |
+| — | A stopped consumer builds a backlog that consumes no poison budget | `make projection-contract` | The relay publishes (`publish_count = 1`) while Horizon is stopped; count 0, no `exhausted_at`, no `last_projection_error` | **PASS** |
+| — | Restart convergence | `make projection-contract` | After `start horizon`, exactly one receipt and one read row, with the read row's fields matching the envelope | **PASS** |
+| — | Duplicate delivery through the live pipeline converges | `make projection-contract` | The completion marker is cleared, the relay republishes (`publish_count = 2`), and the second delivery repairs only the marker: still one receipt, one read row, count 0 | **PASS** |
+
+**What T8 did not prove.** No literal SIGTERM/SIGKILL process matrix - T8's crash evidence is a
+deterministic in-process commit-boundary failpoint plus a live Horizon stop/backlog/restart smoke,
+and the barrier-coordinated process suite stays [T12's](../../testing/payments-resilience.md). No
+multi-process consumer race: concurrency is proved with two PostgreSQL backends inside one PHP
+process, not with two workers. No load, throughput or query-plan claim, and therefore no secondary
+index. No rebuild-safety claim, because **the shared projection gate does not exist** - see the
+reciprocal obligation in
+[verification and rebuild](verification-and-rebuild.md#t8s-reciprocal-obligation-the-consumer-arrives-without-a-gate-either).
+`GET /api/payments/{paymentId}` remains unimplemented, so the read model is not yet observable
+through HTTP.
 
 ## Related
 

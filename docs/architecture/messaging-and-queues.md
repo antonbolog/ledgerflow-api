@@ -39,10 +39,16 @@ and failure evidence expected from any application worker.
 (bounded timeouts, zero client-side retries — the relay's own PostgreSQL-backed backoff is the single
 retry owner), the queue connection and queue name both literally `payments-projection`, and
 `after_commit => false` so a message is only ever visible after the publishing transaction commits or
-not at all. Horizon supervision of this queue does not exist yet; the consumer half of the pipeline —
-and the Horizon configuration that names `payments-projection` as a supervised queue — is T8's. See
-[outbox delivery](../specifications/payments/outbox-delivery.md#scheduler-contract) and
-[ADR 0004](../adr/0004-lock-through-push-outbox-relay.md).
+not at all.
+
+**Completed by T8.** Horizon supervises this queue, and only this queue: one supervisor named
+`payments-projection` on the connection and queue of the same name, one process, `tries = 1`, and a
+15-second worker timeout ordered strictly below the 90-second reservation and above the consumer's
+2-second projection-local `statement_timeout`. Horizon keeps its own bookkeeping on a separate
+`horizon` Redis connection so it never shares the relay's bounded transport. See
+[outbox delivery](../specifications/payments/outbox-delivery.md#scheduler-contract),
+[projection and query](../specifications/payments/projection-and-query.md#implementation-evidence),
+and [ADR 0004](../adr/0004-lock-through-push-outbox-relay.md).
 
 ## SQS adoption boundary
 

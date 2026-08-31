@@ -62,7 +62,7 @@ commands before the scaffold exists.
 - Rebuild gate defers without consuming outbox delivery budget.
 - Confirmed handler failure metadata remains separate from projection rollback.
 
-**Evidence ownership, accepted for T8 and not yet implemented.** T8 owns the duplicate-delivery,
+**Evidence ownership, delivered by T8.** T8 owns the duplicate-delivery,
 marker-repair, poison-exhaustion, and operator-retry evidence in this section and in the
 confirmed-handler-failure bullets under **Outbox relay**, and proves rollback and redelivery through
 a deterministic integration failpoint plus a real Horizon stop / backlog / restart smoke. Transport

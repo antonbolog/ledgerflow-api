@@ -79,13 +79,14 @@ to stop it, which is exactly the gap this section exists to close.
 
 ### T8's reciprocal obligation: the consumer arrives without a gate either
 
-**Accepted and pending implementation; no consumer exists yet.** T8 ships its projection consumer
-transaction with **no** gate - it opens by locking and loading the `payment_outbox` envelope by
-`event_id`, as [projection and query](projection-and-query.md) records - for the same reason T7 took
-none: the control row, its advisory-key derivation, and the deferral semantics are this task's design.
+**Implemented, and the gate is still absent by design.** T8's consumer exists and ships with **no**
+gate: `PaymentProjectionConsumer::project()` opens its transaction by locking and loading the
+`payment_outbox` envelope by `event_id`, as [projection and query](projection-and-query.md) records -
+for the same reason T7 took none: the control row, its advisory-key derivation, and the deferral
+semantics are this task's design. The consumer's own docblock names the insertion point.
 
 **T11 owns adding it here too**, and the obligation runs both ways: T11 prepends connection-affine
-gate acquisition to that **existing** consumer transaction, before the envelope lock, on the same
+gate acquisition to that now-existing consumer transaction, before the envelope lock, on the same
 injected `Connection` the consumer already holds - not a second connection and not a wrapper around
 the transaction - and adds the consumer deferral semantics beside it. Deferred work consumes no
 projection failure budget and no transport budget, per the clause above: a deferral is neither a

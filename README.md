@@ -17,8 +17,13 @@ architecture anchor for the three-repository Ledgerflow system.
 - A scheduler-driven outbox relay publishes eligible event IDs to the logical
   `payments-projection` Redis queue with PostgreSQL-backed transport retry state and a read-only JSON
   health surface.
-- The relay is deliberately dormant in normal deployments until its Horizon-supervised projection
-  consumer lands. The read model and `GET /api/payments/{id}` do not exist yet.
+- A Horizon-supervised consumer drains that queue in one deterministic PostgreSQL transaction,
+  writing a projector receipt, the `payment_details` read row, and the completion marker together.
+  Duplicates converge without rewriting business fields; confirmed deterministic failures are counted
+  behind a monotonic generation fence and the fifth exhausts the envelope, with
+  `payments:outbox:retry` as the sole reactivation path.
+- The scheduler and Horizon are activated together and never one alone. The relay stays dormant until
+  an operator starts the pair. `GET /api/payments/{id}` does not exist yet.
 
 The [roadmap](docs/roadmap.md) is the canonical source for delivery status and sequencing.
 
@@ -79,10 +84,10 @@ Current application stack:
 - Spatie Laravel Event Sourcing for `Payments`
 - Docker, GNU Make, Pest, PHPStan, Pint, Rector, and GitHub Actions
 
-Planned runtime capabilities arrive only with an owning use case and contract: Horizon for Redis
-queue supervision, Reverb for authenticated realtime updates, SQS/DLQ for a distinct durable
-workload, and ECS Fargate/RDS/ElastiCache/CloudWatch through `ledgerflow-infra`. OpenSearch remains
-behind an explicit use-case and cost gate.
+Horizon supervises the `payments-projection` queue. Remaining runtime capabilities arrive only with
+an owning use case and contract: Reverb for authenticated realtime updates, SQS/DLQ for a distinct
+durable workload, and ECS Fargate/RDS/ElastiCache/CloudWatch through `ledgerflow-infra`. OpenSearch
+remains behind an explicit use-case and cost gate.
 
 ## User-facing surfaces
 

@@ -97,8 +97,9 @@ envelope exists and is immediately eligible, and nothing yet publishes, consumes
 
   One further column joins that T8-owned set: `projection_failure_generation`, a monotonic
   non-negative fence defaulting to `0` that only a successful operator retry increments, so a delayed
-  failure recorder cannot charge its increment to a new retry cycle. **Accepted and pending
-  implementation** - T8's forward migration adds it, and it does not exist yet.
+  failure recorder cannot charge its increment to a new retry cycle. **Implemented by T8**, whose
+  forward migration adds the column with a named non-negative CHECK alongside one for
+  `projection_failure_count`.
 
   Exhaustion belongs with the counter that triggers it. The rules above already require it: an
   arbitrarily long transport outage never sets `exhausted_at`, only a confirmed consumer-handler
@@ -108,10 +109,10 @@ envelope exists and is immediately eligible, and nothing yet publishes, consumes
   row early or never. One writer, one transaction, no race.
 
   `payments:outbox:retry {eventId}` **clears** `exhausted_at` after operator correction. That is a
-  third surface, neither relay nor consumer, and it is the only path that unsets the column. The
-  command is **T8-owned and does not exist yet**.
+  third surface, neither relay nor consumer, and it is the only path that unsets the column.
+  **Implemented by T8.**
 
-  **Accepted and pending implementation**, one narrow exception to T7's ownership of every post-insert
+  **Implemented by T8**, one narrow exception to T7's ownership of every post-insert
   `available_at` mutation: a successful retry atomically sets `available_at = now()` in the same
   locked statement, so a corrected exhausted row becomes immediately relay-eligible instead of waiting
   for a transport schedule it never earns. Ordinary transport scheduling - backoff, grace, and
@@ -173,8 +174,8 @@ eligible
 - Five confirmed handler failures are the initial exhaustion threshold. Worker termination,
   backlog, and missing receipt are not poison evidence.
 - `payments:outbox:retry {eventId}` clears exhaustion after operator correction and sets
-  `available_at` to `now()`, while retaining historical evidence in logs. T8 owns it; it does not
-  exist yet.
+  `available_at` to `now()`, while retaining historical evidence in logs. T8 owns it, and it is
+  implemented.
 
 Initial timings are operational defaults, not domain rules: start with a 30-second reconciliation
 grace, capped exponential backoff, and one application-level consumer attempt per published job.
@@ -358,7 +359,10 @@ image content itself was already proved current by the same `make check` this ev
 its Pest rows from. See
 [development environment](../foundation/development-environment.md#what-t7-added-and-what-it-deliberately-did-not).
 
-**Not proved, and not claimed.**
+**Not proved, and not claimed.** *(Frozen as written at T7, and describing the state at that time.
+T8 has since delivered the consumer, `payments:outbox:retry` and Horizon supervision; what T8 itself
+did not prove is recorded in
+[projection and query](projection-and-query.md#implementation-evidence).)*
 
 - No consumer, no `payments:outbox:retry`, and no Horizon exist. Nothing reads `payment_outbox` for
   projection purposes; T8 owns that.

@@ -117,8 +117,8 @@ outbox relay -> Redis payments-projection -> Horizon consumer -> payment_details
 backoff is the single retry owner), queue connection and queue name `payments-projection`
 (`after_commit => false`, so `push()` — never `pushRaw()` — publishes inside the open transaction),
 and cache store `payments-relay` (pinned to the same bounded `payments` Redis connection, never the
-default cache store, for the scheduler heartbeat only). Horizon supervision of this queue is not yet
-configured; T8 adds it alongside the consumer.
+default cache store, for the scheduler heartbeat only). Horizon supervises this queue, and only this
+queue, on its own separate `horizon` Redis connection — see the projection profile above.
 
 SQS/DLQ is not a second copy of that queue. A later milestone selects a distinct durable workload,
 defines its message and idempotency contract, and runs ordinary Laravel SQS workers on ECS.

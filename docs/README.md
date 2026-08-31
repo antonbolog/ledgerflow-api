@@ -35,6 +35,8 @@ unrelated implementation details.
 
 ## Delivery status
 
-The write path and scheduler-driven outbox relay are implemented. The projection consumer, Horizon
-supervision, read model, and payment query endpoint are not. The [roadmap](roadmap.md) is the only
-canonical source for task history, current sequencing, and completion status.
+The write path, the scheduler-driven outbox relay, and the Horizon-supervised projection consumer
+with its failure accounting and operator retry are implemented. The read model query endpoint
+(`GET /api/payments/{id}`) and the shared projection gate are not: T9 owns the query and T11 owns the
+gate. The [roadmap](roadmap.md) is the only canonical source for task history, current sequencing,
+and completion status.
