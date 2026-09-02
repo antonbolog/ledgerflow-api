@@ -89,13 +89,51 @@ against.
 
 ## Verify and rebuild
 
-- Consistent projection passes verification.
-- Events inside delivery grace are reported as in-flight.
+Verification (T10):
+
+- Consistent projection passes verification, reporting its high watermark and audit timestamp.
+- Events inside delivery grace are reported as in-flight; the same delivery at or beyond grace is
+  reported as overdue, and an exhausted envelope is reported separately from both.
 - Missing receipt, receipt without row, orphan row, wrong source event, and field mismatch each fail
   without mutation.
 - Missing, orphaned, and canonically mismatched outbox envelopes fail verification.
-- Targeted repair reconstructs one envelope, derives completion from receipt, and cannot fabricate
-  an idempotency receipt.
+- Reverse scans over projector receipts, read rows, and envelopes find derived records that have no
+  canonical source, without depending on the canonical pass reaching them.
+- Each reverse pass keysets its own primary key, and a report is complete only when all four passes
+  finished.
+- Canonical events sharing one durable event id are found across batch boundaries without holding
+  history in memory.
+- Multiple batches with ID gaps prove strict keyset cursor progress and capped diagnostic retention.
+- A late lower-ID commit does not retroactively enter a finished run's snapshot, proved by
+  coordinated writes rather than sleeps.
+- A real `statement_timeout` and a terminated backend both end the run as incomplete, and neither
+  resumes on a fresh connection.
+- Every reverse pass has a measured plan that reaches `stored_events` through an existing index and
+  never reads the JSON payload.
+- A real-service run proves non-mutation and read-only enforcement, not only a mocked no-write
+  expectation.
+- Invalid configuration and invalid invocation fail before scanning, and timeout or error paths never
+  report a complete clean audit.
+
+Targeted outbox repair (T10):
+
+- Targeted repair reconstructs one envelope, derives completion from the named projector receipt, and
+  cannot fabricate an idempotency receipt.
+- Two repairs of the same missing envelope contend on the canonical stored-event row, and the second
+  observes what the first committed instead of overwriting it.
+- Intent and outcome are audited under one operation id; a failure of either record is reported with
+  the mutation state rather than as a clean success or a clean rollback.
+- Absent, ambiguous, or contradictory canonical identity refuses without mutation, and so does a
+  missing delivery-quiescence acknowledgement.
+- Repair preserves transport history, failure counts, `projection_failure_generation`, and
+  `exhausted_at`, and creates or modifies no projector receipt and no read row.
+- Canonical identity locking serializes two repairs of the same missing envelope, and a unique
+  conflict refuses instead of removing the conflicting row.
+- Every other envelope, canonical event, idempotency receipt, projector receipt, and read row is
+  unchanged.
+
+Rebuild (T11):
+
 - Rebuild waits for a consumer transaction that started before the rebuild flag.
 - Lock timeout clears no projection data.
 - Pinned-session reconnect aborts rather than assuming the advisory lock survived.
@@ -103,6 +141,19 @@ against.
 - Stale queued jobs after replay are ignored through recreated receipts.
 - Kill after a committed batch leaves `rebuilding`; the next authorized run clears and restarts.
 - Guarded recovery returns to `ready` without replay only when no projection mutation began.
+
+**Evidence ownership.** T10 owns the two groups named above, and **both are delivered**, proved by
+real-transaction integration suites that commit without `RefreshDatabase`, coordinate through
+injected clocks and second-connection locks rather than sleeps, and replay the statements each
+command issued through `EXPLAIN`. Plan evidence is a claim about plan shape and index availability
+at fixture volume, not about speed or production scale; the repair lookup's cost is additionally
+measured at 22k and 200k canonical rows and recorded in
+[verification and rebuild](../specifications/payments/verification-and-rebuild.md). The rebuild group stays T11's, and the
+barrier-coordinated SIGTERM/SIGKILL process suite stays T12's, per **Failure injection** below.
+Query-plan behavior for JSON event-ID lookups and reverse joins is measured evidence T10 owes; a
+green suite on small fixtures is not an index or scale claim, and an index that turns out to be
+necessary is a separate forward-migration decision. Contracts in
+[verification and rebuild](../specifications/payments/verification-and-rebuild.md).
 
 ## Critical end-to-end paths
 

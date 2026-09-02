@@ -154,6 +154,82 @@ final readonly class PaymentInitiatedEnvelope
     }
 
     /**
+     * Decode one canonical `stored_events` row, or refuse it.
+     *
+     * THE SECOND ENTRY POINT, ADDED SO THERE IS STILL ONE OWNER OF "WHAT A VALID
+     * PaymentInitiated PAYLOAD IS". The verification audit reads canonical history
+     * rather than envelopes, and a second decoder written beside this one would be
+     * a second definition of the payload contract - the exact drift this class's
+     * docblock exists to prevent. Everything below the entry point is shared.
+     *
+     * WHAT DIFFERS FROM AN ENVELOPE, AND WHY. `stored_events` has no `occurred_at`
+     * column and no event-id column: business time and the durable event id live
+     * inside `event_properties`, which is the SOURCE the outbox row was derived
+     * from. So there is no column to cross-check them against here, and the two
+     * comparisons fromOutboxRow() makes for those fields have no canonical
+     * counterpart. Every other check is identical, including the one that matters
+     * most on this path - the payload's `paymentId` must equal the row's own
+     * `aggregate_uuid`, which is a real disagreement the canonical row can exhibit.
+     *
+     * THE REFUSAL MESSAGES SAY "outbox event". They are shared with the path above
+     * and are not surfaced by the audit, which reports only
+     * ProjectionEnvelopeRejected::$category; the identifier they carry is the row's
+     * aggregate uuid, which is a real durable identifier either way.
+     *
+     * @param  array<string, mixed>  $row
+     */
+    public static function fromStoredEventRow(array $row): self
+    {
+        // THE AGGREGATE UUID IS THE IDENTIFIER FOR REFUSALS, because the durable
+        // event id is inside the payload being validated and is not trustworthy
+        // until that validation has passed.
+        $paymentId = self::string($row, 'aggregate_uuid');
+
+        $alias = self::string($row, 'event_class');
+
+        if ($alias !== PaymentInitiated::ALIAS) {
+            throw ProjectionEnvelopeRejected::unsupportedAlias($paymentId, $alias);
+        }
+
+        // event_version is the vendor column that carries what the envelope calls
+        // schema_version; T6 writes one from the other, so the same constant bounds
+        // both.
+        $schemaVersion = self::integer($row, 'event_version');
+
+        if ($schemaVersion !== self::SCHEMA_VERSION) {
+            throw ProjectionEnvelopeRejected::unsupportedSchemaVersion($paymentId, $schemaVersion);
+        }
+
+        $aggregateVersion = self::integer($row, 'aggregate_version');
+
+        if ($aggregateVersion !== self::FIRST_AGGREGATE_VERSION) {
+            throw ProjectionEnvelopeRejected::unsupportedAggregateVersion($paymentId, $aggregateVersion);
+        }
+
+        $payload = self::payload($paymentId, ['payload' => $row['event_properties'] ?? null]);
+
+        if ($payload['paymentId'] !== $paymentId) {
+            throw ProjectionEnvelopeRejected::contradictoryIdentity($paymentId, 'paymentId');
+        }
+
+        // PARSED IN THE DURABLE FORMAT AND RE-FORMATTED, the same two rejections
+        // occurredAt() makes; only its third comparison - against a column - has no
+        // counterpart here. Passing the payload value as both arguments would make
+        // that comparison trivially true and read as though a check were happening.
+        $occurredAt = self::canonicalOccurredAt($paymentId, $payload['occurredAt']);
+
+        return new self(
+            eventId: $payload['eventId'],
+            paymentId: $payload['paymentId'],
+            merchantId: $payload['merchantId'],
+            amountMinor: $payload['amountMinor'],
+            currency: $payload['currency'],
+            occurredAt: $occurredAt,
+            aggregateVersion: $aggregateVersion,
+        );
+    }
+
+    /**
      * The decoded payload, with every key present and every type checked.
      *
      * @param  array<string, mixed>  $row
@@ -280,6 +356,28 @@ final readonly class PaymentInitiatedEnvelope
 
         if (! $parsed->equalTo($column)) {
             throw ProjectionEnvelopeRejected::malformedPayload($eventId, 'occurredAt disagrees with occurred_at');
+        }
+
+        return $parsed;
+    }
+
+    /**
+     * Business time from a canonical payload, with no column to cross-check.
+     *
+     * Both Carbon failure shapes and the re-format comparison behave exactly as
+     * occurredAt() records; see that method for why `=== false` cannot be used and
+     * why the re-format is a separate rejection rather than belt and braces.
+     */
+    private static function canonicalOccurredAt(string $identifier, string $payloadValue): CarbonImmutable
+    {
+        try {
+            $parsed = CarbonImmutable::createFromFormat(PaymentInitiated::OCCURRED_AT_FORMAT, $payloadValue);
+        } catch (Throwable) {
+            $parsed = null;
+        }
+
+        if ($parsed === null || $parsed->format(PaymentInitiated::OCCURRED_AT_FORMAT) !== $payloadValue) {
+            throw ProjectionEnvelopeRejected::malformedPayload($identifier, 'occurredAt is not in the durable format');
         }
 
         return $parsed;

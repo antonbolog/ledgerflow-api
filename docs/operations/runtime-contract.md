@@ -103,6 +103,22 @@ message, and correlation identifiers. At minimum expose:
 The verifier reports corruption; it does not repair or rebuild automatically. Repair and rebuild
 remain explicit developer/operator procedures with audit evidence.
 
+**T10's two commands are planned, not implemented, and neither adds a process.**
+`payments:projections:verify` is a manual read-only command that stays **unscheduled**: no recurring
+schedule entry, queue, Horizon supervisor, or deployment automation is introduced with it, and a
+scheduled run waits for a monitoring and alert destination to exist. `payments:outbox:repair
+{eventId}` is an **offline delivery operation**: the operator stops the scheduler and Horizon together
+through `make projection-stop`, confirms that every delivery and failure-recorder process has drained
+(including standalone consumers, manual commands, and processes on other hosts, none of which the
+command can discover), passes the explicit `--delivery-quiesced` acknowledgement, then verifies again
+and resumes through `make projection-start`. The acknowledgement is the operator's assertion recorded in
+the audit, not machine-verified proof.
+
+That audit is **structured application logs correlated by one operation identifier, not a new table**.
+Commit and log persistence are not one transaction, so an uncertain outcome is resolved by inspecting
+state or re-running verification, never by repeating the mutation. Contracts in
+[verification and rebuild](../specifications/payments/verification-and-rebuild.md).
+
 ## Messaging ownership
 
 The initial logical queue is `payments-projection` on Redis, supervised by Horizon:

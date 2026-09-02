@@ -13,9 +13,13 @@ use Illuminate\Support\ServiceProvider;
 use Modules\Payments\Application\Initiation\AtomicTransaction;
 use Modules\Payments\Application\Initiation\IdempotencyReceipts;
 use Modules\Payments\Application\Query\PaymentQuery;
+use Modules\Payments\Application\Repair\OutboxRepair;
+use Modules\Payments\Application\Verification\ProjectionVerifier;
 use Modules\Payments\Infrastructure\Console\PaymentOutboxRetryCommand;
 use Modules\Payments\Infrastructure\Console\PaymentOutboxStatusCommand;
 use Modules\Payments\Infrastructure\Console\RelayPaymentOutboxCommand;
+use Modules\Payments\Infrastructure\Console\RepairPaymentOutboxCommand;
+use Modules\Payments\Infrastructure\Console\VerifyPaymentProjectionsCommand;
 use Modules\Payments\Infrastructure\Persistence\DatabaseIdempotencyReceipts;
 use Modules\Payments\Infrastructure\Persistence\DatabasePaymentQuery;
 use Modules\Payments\Infrastructure\Persistence\RetryingAtomicTransaction;
@@ -26,6 +30,9 @@ use Modules\Payments\Infrastructure\Projectors\PaymentOutboxWriter;
 use Modules\Payments\Infrastructure\Relay\OutboxRelay;
 use Modules\Payments\Infrastructure\Relay\RelayConfiguration;
 use Modules\Payments\Infrastructure\Relay\RelayHeartbeat;
+use Modules\Payments\Infrastructure\Repair\DatabaseOutboxRepair;
+use Modules\Payments\Infrastructure\Verification\DatabaseProjectionVerifier;
+use Modules\Payments\Infrastructure\Verification\VerificationConfiguration;
 use Override;
 use Psr\Log\LoggerInterface;
 use Spatie\EventSourcing\Projectionist;
@@ -210,6 +217,69 @@ class PaymentsServiceProvider extends ServiceProvider
                 $app->make(RelayConfiguration::class),
             ),
         );
+
+        // VALIDATED AT RESOLUTION, WHICH IS BEFORE THE SNAPSHOT OPENS. Every audit
+        // bound is a limit on work already in progress by the time the first batch
+        // runs, so an invalid one has to fail here rather than inside an open
+        // REPEATABLE READ transaction.
+        $this->app->scoped(
+            VerificationConfiguration::class,
+            fn (): VerificationConfiguration => VerificationConfiguration::fromArray(
+                (array) config('payments.verification'),
+            ),
+        );
+
+        // THE CONCRETE Connection, for the same reason the relay and the consumer
+        // take it: the audit owns its transaction lifecycle explicitly - BEGIN, the
+        // isolation and read-only declaration, COMMIT - and inspects
+        // transactionLevel(), none of which ConnectionInterface promises in the
+        // shape needed here.
+        //
+        // THE SAME DEFAULT CONNECTION OBJECT as every other Payments adapter. One
+        // snapshot means one backend: a second connection would be a second view of
+        // history, and the whole report would describe a database that never existed
+        // at any single instant.
+        $this->app->scoped(
+            ProjectionVerifier::class,
+            fn (Application $app): DatabaseProjectionVerifier => new DatabaseProjectionVerifier(
+                $app->make(DatabaseManager::class)->connection(),
+                $app->make(VerificationConfiguration::class),
+                static fn (): int => (int) hrtime(true),
+            ),
+        );
+
+        // BOUND EXPLICITLY BECAUSE OF THE CLOSURE, exactly as the relay command is:
+        // a monotonic clock is the one constructor parameter the container cannot
+        // autowire, and it is what lets the reported duration be asserted without a
+        // run that genuinely takes that long.
+        $this->app->scoped(
+            VerifyPaymentProjectionsCommand::class,
+            fn (Application $app): VerifyPaymentProjectionsCommand => new VerifyPaymentProjectionsCommand(
+                $app->make(ProjectionVerifier::class),
+                static fn (): int => (int) hrtime(true),
+            ),
+        );
+
+        // THE CONCRETE Connection, for the reason the retry command takes it: repair
+        // owns its transaction lifecycle explicitly and holds a lock on canonical
+        // history across several statements, and it must be the SAME connection
+        // object the rest of Payments writes through, or the lock would protect
+        // nothing the later statements then change.
+        $this->app->scoped(
+            OutboxRepair::class,
+            fn (Application $app): DatabaseOutboxRepair => new DatabaseOutboxRepair(
+                $app->make(DatabaseManager::class)->connection(),
+                $app->make(LoggerInterface::class),
+            ),
+        );
+
+        $this->app->scoped(
+            RepairPaymentOutboxCommand::class,
+            fn (Application $app): RepairPaymentOutboxCommand => new RepairPaymentOutboxCommand(
+                $app->make(OutboxRepair::class),
+                static fn (): int => (int) hrtime(true),
+            ),
+        );
     }
 
     public function boot(): void
@@ -234,6 +304,8 @@ class PaymentsServiceProvider extends ServiceProvider
                 RelayPaymentOutboxCommand::class,
                 PaymentOutboxStatusCommand::class,
                 PaymentOutboxRetryCommand::class,
+                VerifyPaymentProjectionsCommand::class,
+                RepairPaymentOutboxCommand::class,
             ]);
         }
     }

@@ -64,8 +64,11 @@ here rather than left implicit:
   was measured against the 63-byte limit; the longest is **58** characters
   (`payment_idempotency_receipts_idempotency_key_hash_not_null`), so nothing truncates.
 
-Writer ownership is split across three tasks. **The first has landed; the other two have not**, so an
-envelope exists and is immediately eligible, and nothing yet publishes, consumes or completes it:
+Writer ownership is split across three tasks. **All three have landed**: T6 inserts the envelope, T7
+publishes it and owns transport state, and T8 records consumer outcome and owns exhaustion. *(This
+paragraph read "the first has landed; the other two have not" while it was written at T6; the
+per-writer notes below already carried the T7 and T8 completions, and the
+[roadmap](../../roadmap.md) owns task state.)*
 
 - **T6 inserts** the initial envelope, in the same transaction as the idempotency receipt and the
   stored event. It is the first writer, and it is
@@ -118,6 +121,19 @@ envelope exists and is immediately eligible, and nothing yet publishes, consumes
   for a transport schedule it never earns. Ordinary transport scheduling - backoff, grace, and
   acceptance - stays T7's alone. The full reset list, including the `projection_failure_generation`
   increment, belongs to [projection and query](projection-and-query.md) and is not repeated here.
+
+  **A fourth surface is planned by T10 and does not exist yet**: `payments:outbox:repair {eventId}`
+  restores the immutable canonical fields of exactly one envelope from its stored event, and derives
+  the completion marker from the named projector receipt. It **preserves** every column in the two
+  bullets above - transport history, `projection_failure_count`, `last_projection_error`,
+  `projection_failure_generation` and `exhausted_at` - so it neither reactivates an exhausted row nor
+  moves the generation fence, and `payments:outbox:retry` stays the only reactivation path. Its one
+  `available_at` mutation is narrow: a non-exhausted, non-completed row whose canonical fields or
+  marker actually changed becomes eligible in the same transaction. A missing envelope is reinserted
+  with zero-default counters, which is reported as reinitialized delivery history rather than as a
+  reconstruction of it. See
+  [verification and rebuild](verification-and-rebuild.md#targeted-outbox-repair) for the full
+  mutation matrix and the delivery-quiescence prerequisite.
 
 ## Initial relay algorithm
 

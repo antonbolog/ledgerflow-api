@@ -151,4 +151,63 @@ return [
         'processes' => 1,
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Payments projection verification
+    |--------------------------------------------------------------------------
+    |
+    | Bounds for the read-only `payments:projections:verify` audit.
+    | Modules\Payments\Infrastructure\Verification\VerificationConfiguration
+    | converts and validates this array once, at container resolution, which is
+    | before the audit's REPEATABLE READ snapshot opens. A bound discovered after
+    | the transaction is already open is not a bound.
+    |
+    | THE SPLIT FOLLOWS THE RELAY'S RULE. The three values an operator legitimately
+    | tunes for their history size are env-driven; the three that are the audit's
+    | own safety limits are literals, because a .env that widened them would remove
+    | the guarantee that one invocation does bounded work and nothing would report it.
+    |
+    | These are initial operational limits, not measured throughput guarantees.
+    | docs/specifications/payments/verification-and-rebuild.md owns the contract.
+    |
+    */
+
+    'verification' => [
+
+        // Canonical rows per keyset batch. Never zero: RelayConfiguration's
+        // sibling rule applies here too, and a zero batch reads nothing while
+        // reporting a clean snapshot of it.
+        'batch_size' => (int) env('PAYMENTS_VERIFICATION_BATCH_SIZE', 100),
+
+        // Retained diagnostic examples for the WHOLE invocation, not per batch.
+        // Zero is legitimate: counts without detail is a coherent thing to ask for.
+        'example_limit' => (int) env('PAYMENTS_VERIFICATION_EXAMPLE_LIMIT', 50),
+
+        // Event age below which an incomplete, non-contradictory delivery is
+        // in-flight rather than overdue. SEPARATE FROM the relay's
+        // reconciliation_grace_seconds, and deliberately so: that one schedules
+        // redelivery, this one decides what an operator is told. Age is measured
+        // from canonical occurredAt to the audit timestamp, never from
+        // last_published_at, or republication would rejuvenate an old event forever.
+        'grace_seconds' => (int) env('PAYMENTS_VERIFICATION_GRACE_SECONDS', 30),
+
+        /*
+        | LITERALS. Each is a safety limit rather than an operational dial.
+        */
+
+        // One statement's bound, strictly below the transaction bound so a single
+        // pathological query is distinguishable from an audit out of time.
+        'statement_timeout_ms' => 2_000,
+
+        // The whole snapshot's bound. PostgreSQL TERMINATES the session when this
+        // fires, so the audit aborts rather than reconnecting into a lost snapshot.
+        'transaction_timeout_ms' => 120_000,
+
+        // The largest canonical payload this audit will transfer into PHP.
+        // Enforced in SQL, before the value is transferred: a payload above it
+        // makes the audit INCOMPLETE, because uninspected bytes may be declared
+        // neither consistent nor corrupt.
+        'max_payload_bytes' => 65_536,
+    ],
+
 ];
