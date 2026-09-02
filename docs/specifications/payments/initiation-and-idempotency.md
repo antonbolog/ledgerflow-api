@@ -43,10 +43,10 @@ can escape in another shape. `type` is the relative URI reference `/problems/{co
 which RFC 9457 permits and which resolves against the request URI; `code` is the stable identifier
 and everything else derives from it.
 
-`payment_not_found` belongs to **T9's query endpoint**; `projection_rebuilding` belongs to **T11's
-projection gate**, which owns the only code path able to produce it. Neither exists yet - an enum
-case with no producer is a promise nothing keeps, so T9 adds only the code it can actually raise and
-leaves `projection_rebuilding` to T11.
+`payment_not_found` **arrived with T9's query endpoint**, which raises it for a malformed, unknown or
+foreign payment id alike. `projection_rebuilding` belongs to **T11's projection gate**, which owns
+the only code path able to produce it, and deliberately does not exist yet - an enum case with no
+producer is a promise nothing keeps.
 
 Mapping is by **exception type first**, status code only as a fallback. This is required rather than
 stylistic: Laravel's `prepareJsonResponse()` gives any non-`HttpException` a 500 before the hook

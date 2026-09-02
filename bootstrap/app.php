@@ -7,6 +7,7 @@ use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 use Illuminate\Http\Request;
+use Modules\Payments\Application\Query\PaymentNotFound;
 use Symfony\Component\HttpFoundation\Response;
 
 // NOTE: this file has no namespace, so `use Throwable;` would be a no-op that PHP
@@ -26,6 +27,18 @@ return Application::configure(basePath: dirname(__DIR__))
         $exceptions->shouldRenderJsonWhen(
             fn (Request $request) => $request->is('api/*'),
         );
+
+        // A 404 IS NOT AN INCIDENT. Laravel already declines to report the
+        // framework's own NotFoundHttpException, and PaymentNotFound is the same
+        // answer for a payment rather than a route - so leaving it reportable
+        // would make T9's endpoint the one 404 in the API that writes an
+        // error-level line with a stack trace, once per request, at whatever rate
+        // a client chooses to ask for identifiers it does not own.
+        //
+        // Scoped to this one type. IdempotencyPayloadMismatch and
+        // IdempotencyContention stay reportable on purpose: they are rare and
+        // each one is worth a look.
+        $exceptions->dontReport(PaymentNotFound::class);
 
         // ONE hook. respond() is the only callback Laravel runs on EVERY render
         // path, including exceptions that carry their own render() method, so it

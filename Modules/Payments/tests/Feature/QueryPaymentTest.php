@@ -2,12 +2,14 @@
 
 declare(strict_types=1);
 
+use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
 use Modules\Merchant\Application\Identity\MerchantContext;
 use Modules\Merchant\Infrastructure\Persistence\Eloquent\Merchant;
+use Modules\Payments\Application\Query\PaymentNotFound;
 use Modules\Payments\Tests\Support\CountingMerchantContext;
 use Modules\Payments\Tests\Support\Initiation;
 
@@ -137,15 +139,30 @@ it('returns the pending contract with Retry-After when only the receipt exists',
 });
 
 it('answers payment_not_found for a payment neither table knows', function (): void {
-    $response = showPayment((string) Str::uuid7());
+    $paymentId = (string) Str::uuid7();
+
+    $response = showPayment($paymentId);
 
     $response->assertStatus(404);
 
-    expect($response->headers->get('Content-Type'))->toStartWith('application/problem+json')
-        ->and($response->json('code'))->toBe('payment_not_found')
-        ->and($response->json('type'))->toBe('/problems/payment-not-found')
-        ->and($response->json('title'))->toBe('Payment not found')
-        ->and($response->json('status'))->toBe(404);
+    // The WHOLE problem document, order-sensitively. `detail` is ProblemType's own
+    // safe sentence rather than the exception message, and `errors` is absent
+    // because there is nothing field-shaped to report - an extra member here would
+    // be an extra member on the wire.
+    expect($response->json())->toBe([
+        'type' => '/problems/payment-not-found',
+        'title' => 'Payment not found',
+        'status' => 404,
+        'detail' => 'No payment matching this identifier is available.',
+        'instance' => '/api/payments/'.$paymentId,
+        'code' => 'payment_not_found',
+    ]);
+
+    expect($response->headers->get('Content-Type'))->toStartWith('application/problem+json');
+
+    // Nothing about an unknown payment is transient, so nothing invites a retry.
+    // Retry-After belongs to the pending contract and to idempotency contention.
+    $response->assertHeaderMissing('Retry-After');
 });
 
 it('answers payment_not_found for another merchant projection and serves its owner', function (): void {
@@ -173,14 +190,18 @@ it('answers payment_not_found for another merchant pending receipt and serves it
     showPayment($paymentId, $owner)->assertStatus(202);
 });
 
-it('cannot be told apart from a missing payment when the payment is someone else', function (): void {
+it('cannot be told apart from a missing payment when the payment is someone else', function (callable $giveItToAStranger): void {
     $stranger = Merchant::factory()->create();
     $paymentId = (string) Str::uuid7();
 
     // Same id, same caller, one difference: whether another merchant's row exists.
     $missing = showPayment($paymentId, $stranger);
 
-    showPaymentProjection(Merchant::factory()->create()->getKey(), $paymentId);
+    // BOTH FOREIGN SHAPES, because they are two different rows on two different
+    // tables reached by two different lookups. Only the projected one was compared
+    // at the byte level before; a pending receipt owned by someone else has to be
+    // just as silent.
+    $giveItToAStranger(Merchant::factory()->create()->getKey(), $paymentId);
 
     $foreign = showPayment($paymentId, $stranger);
 
@@ -189,7 +210,10 @@ it('cannot be told apart from a missing payment when the payment is someone else
     expect($foreign->getContent())->toBe($missing->getContent())
         ->and($foreign->getStatusCode())->toBe($missing->getStatusCode())
         ->and($foreign->headers->get('Content-Type'))->toBe($missing->headers->get('Content-Type'));
-});
+})->with([
+    'foreign projection' => [fn (): callable => showPaymentProjection(...)],
+    'foreign pending receipt' => [fn (): callable => showPaymentReceipt(...)],
+]);
 
 it('gives a malformed payment id the payment contract, never the generic one', function (string $malformed): void {
     $response = showPayment($malformed);
@@ -219,6 +243,20 @@ it('resolves the merchant through MerchantContext exactly once', function (): vo
     expect($context->calls)->toBe(1);
 });
 
+it('does not report a not-found payment to the log', function (): void {
+    $handler = resolve(ExceptionHandler::class);
+
+    // Laravel declines to report the framework's own NotFoundHttpException. This
+    // is the same answer for a payment rather than a route, and a merchant asking
+    // for identifiers it does not own must not be able to write an error-level
+    // line with a stack trace once per request.
+    expect($handler->shouldReport(PaymentNotFound::forRequestedPayment()))->toBeFalse();
+
+    // The positive control: the exemption is this one type, not a handler that
+    // stopped reporting things.
+    expect($handler->shouldReport(new RuntimeException('unrelated')))->toBeTrue();
+});
+
 it('leaves an unknown api path on the generic not_found contract', function (): void {
     // payment_not_found is reachable only through the query endpoint's own
     // exception type. A status-driven mapping would hand it to every unmatched path.
@@ -226,6 +264,5 @@ it('leaves an unknown api path on the generic not_found contract', function (): 
 
     $response->assertStatus(404);
 
-    expect($response->json('code'))->toBe('not_found')
-        ->and($response->json('code'))->not->toBe('payment_not_found');
+    expect($response->json('code'))->toBe('not_found');
 });

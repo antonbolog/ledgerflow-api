@@ -75,14 +75,17 @@ exhaustion. The full barrier-coordinated SIGTERM/SIGKILL multi-process suite sta
 - Owned receipt without projection returns `202 projection_pending` and `Retry-After`.
 - Missing, malformed, and differently owned payment IDs return the same `404 payment_not_found`
   shape.
-- Active rebuild returns `503 projection_rebuilding`.
-- Shared advisory lock and protected query use the same PostgreSQL backend connection.
+- Active rebuild returns `503 projection_rebuilding`. *(Unreachable until T11.)*
+- Shared advisory lock and protected query use the same PostgreSQL backend connection. *(T11.)*
 
 **Evidence ownership.** T9 owns the projected, pending, missing, malformed, and foreign-ownership
 bullets, plus evidence that the `payment_details` lookup and its `payment_idempotency_receipts`
 fallback run in one adapter-owned transaction and that the query adapter reads no other table.
-The last two bullets stay T11's: the `503` branch has no producer until the shared projection gate
-exists, and backend identity cannot be proved before there is a gate lock to prove it against.
+**All five are delivered**; see
+[implementation evidence](../specifications/payments/projection-and-query.md#implementation-evidence),
+rows Q-1 to Q-14. The last two bullets stay T11's: the `503` branch has no producer until the shared
+projection gate exists, and backend identity cannot be proved before there is a gate lock to prove it
+against.
 
 ## Verify and rebuild
 

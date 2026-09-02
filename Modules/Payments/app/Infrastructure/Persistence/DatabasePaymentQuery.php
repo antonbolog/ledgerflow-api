@@ -46,6 +46,13 @@ final readonly class DatabasePaymentQuery implements PaymentQuery
      * against a uuid column raises 22P02, which would surface as a 500 and would
      * make a syntactically invalid unknown id a DISTINGUISHABLE error class from a
      * valid unknown one. Both are simply unknown.
+     *
+     * STRICTER THAN PostgreSQL, DELIBERATELY. Str::isUuid accepts only the
+     * canonical hyphenated form, while PostgreSQL's uuid input also takes braced
+     * and unhyphenated spellings, so an owned payment addressed as `{0199...}`
+     * answers 404 rather than 200. That is the intended trade: the canonical form
+     * is the only one this API ever emits, and one accepted spelling per
+     * identifier keeps the not-found answer indivisible.
      */
     #[Override]
     public function findOwned(int $merchantId, string $paymentId): ProjectedPayment|PendingPayment
@@ -120,8 +127,12 @@ final readonly class DatabasePaymentQuery implements PaymentQuery
      * merchant owns a committed payment with this id. Fetching the row would put
      * stored response bytes in reach of a serializer that must never see them.
      *
-     * Served by payment_receipts_merchant_payment_index on (merchant_id,
-     * payment_id), which already exists; no index is added for this path.
+     * Both predicates are already covered by existing keys - payment_id by
+     * payment_receipts_payment_id_unique, the pair by
+     * payment_receipts_merchant_payment_index - so no index is added for this
+     * path. WHICH ONE THE PLANNER PICKS IS NOT CLAIMED HERE: no EXPLAIN was run,
+     * and the projection and query specification disclaims query-plan claims
+     * outright.
      */
     private function hasOwnedReceipt(int $merchantId, string $paymentId): bool
     {

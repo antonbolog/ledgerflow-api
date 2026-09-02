@@ -17,7 +17,8 @@ The first accepted request returns `202 Accepted`, a UUIDv7 payment ID, `status:
 
 ### Query a payment
 
-`GET /api/payments/{paymentId}` returns:
+`GET /api/payments/{paymentId}` requires Sanctum authentication and resolves the merchant the same
+way, through `MerchantContext`. It returns:
 
 - `200` when the owned `PaymentDetails` projection exists;
 - `202 projection_pending` with `Retry-After: 1` when the owned receipt exists but projection lags;
@@ -25,7 +26,14 @@ The first accepted request returns `202 Accepted`, a UUIDv7 payment ID, `status:
 - `503 projection_rebuilding` while the Payments projection gate is closed. That gate, and therefore
   this branch, is T11's; it is unreachable until T11 ships.
 
-Queries never rehydrate the aggregate.
+A malformed payment ID, an unknown one, and another merchant's all produce that same `404` document.
+For one requested ID, the unknown and foreign cases are byte-identical, so the endpoint never reveals
+that a payment exists but belongs to someone else. A malformed ID shares the problem type and code
+and differs only in the `instance` path it echoes, which is the requested ID itself; it is never
+downgraded to the generic `not_found`.
+
+Queries never rehydrate the aggregate: the read is `payment_details` and, only when that misses, the
+`payment_idempotency_receipts` fallback, both inside one short adapter-owned transaction.
 
 ## Write path
 

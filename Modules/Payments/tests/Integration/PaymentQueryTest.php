@@ -164,6 +164,30 @@ it('preserves the stored instant as UTC with six fractional digits', function (s
     ['2026-08-21T12:11:12.123456+02:00', '2026-08-21T10:11:12.123456+00:00'],
 ]);
 
+it('normalises to UTC itself rather than trusting how the session renders the instant', function (): void {
+    $merchantId = Merchant::factory()->create()->getKey();
+    $paymentId = (string) Str::uuid7();
+
+    paymentQueryProjection($merchantId, $paymentId);
+
+    // WITHOUT THIS STATEMENT THE ->utc() CALL IS UNTESTABLE, which is how it was
+    // found. The container sets no TZ and the pgsql connection config sets no
+    // `timezone`, so the session TimeZone is UTC and `timestamptz` renders `+00`
+    // whatever offset was inserted - the datasets above stay green with ->utc()
+    // deleted, because PostgreSQL had already done its work. A non-UTC session is
+    // the only condition under which the adapter's own normalisation is visible.
+    DB::statement("set time zone 'Europe/Kyiv'");
+
+    // The same instant PostgreSQL now renders as 13:11:12.123456+03.
+    expect(paymentQueryAdapter()->findOwned($merchantId, $paymentId))
+        ->initiatedAt->toBe('2026-08-21T10:11:12.123456+00:00');
+
+    // Not strictly required - afterEach purges the default connection, so the
+    // session dies with it - but a leaked session setting is the kind of thing
+    // that makes an unrelated test fail later for an unfindable reason.
+    DB::statement("set time zone 'UTC'");
+});
+
 it('short-circuits the receipt fallback when the projection exists', function (): void {
     $merchantId = Merchant::factory()->create()->getKey();
     $paymentId = (string) Str::uuid7();
@@ -197,11 +221,43 @@ it('falls back to the owned receipt when the projection has not caught up', func
         ->and((array) $found)->toBe(['paymentId' => $paymentId]);
 });
 
-it('refuses a payment id neither table knows', function (): void {
+it('stops answering pending the moment the receipt it answered from is deleted', function (): void {
+    $merchantId = Merchant::factory()->create()->getKey();
+    $paymentId = (string) Str::uuid7();
+
+    paymentQueryReceipt($merchantId, $paymentId);
+
+    // The pending answer FIRST, so the refusal below cannot be the accident of a
+    // fixture that never landed. This is the non-vacuity control for every
+    // "refuses an unknown payment" assertion in this file: same merchant, same id,
+    // one difference - the row.
+    expect(paymentQueryAdapter()->findOwned($merchantId, $paymentId))
+        ->toBeInstanceOf(PendingPayment::class);
+
+    $deleted = DB::table('payment_idempotency_receipts')
+        ->where('merchant_id', $merchantId)
+        ->where('payment_id', $paymentId)
+        ->delete();
+
+    // Exactly the row the pending answer came from, and only it.
+    expect($deleted)->toBe(1);
+
+    expect(fn () => paymentQueryAdapter()->findOwned($merchantId, $paymentId))
+        ->toThrow(PaymentNotFound::class);
+});
+
+it('refuses a payment id neither table knows and leaves no transaction open', function (): void {
     $merchantId = Merchant::factory()->create()->getKey();
 
     expect(fn () => paymentQueryAdapter()->findOwned($merchantId, (string) Str::uuid7()))
         ->toThrow(PaymentNotFound::class);
+
+    // THE MOST FREQUENTLY REACHED ERROR PATH, and the one that throws from inside
+    // the transaction callback. Laravel rolls back before rethrowing, so this
+    // holds - but an adapter that ever owned its BEGIN/COMMIT by hand would leak
+    // an `idle in transaction` backend here and nowhere else in this file.
+    expect(DB::connection()->transactionLevel())->toBe(0)
+        ->and(DB::connection()->getPdo()->inTransaction())->toBeFalse();
 });
 
 it('refuses another merchant projection and answers the owner normally', function (): void {
@@ -317,10 +373,19 @@ it('reads only the two allowed tables and writes nothing', function (): void {
         // writing a row would be caught here and nowhere else in this file.
         expect($statement)->toStartWith('select');
 
-        // The forbidden tables are named individually so a failure says which one
-        // the query path learned to touch.
-        foreach (['stored_events', 'payment_outbox', 'payment_projector_receipts', 'snapshots', 'merchants', 'users'] as $forbidden) {
-            expect($statement)->not->toContain($forbidden);
-        }
+        // AN ALLOWLIST, NOT A LIST OF TABLES WE HAPPENED TO THINK OF. Naming
+        // forbidden tables individually would pass any table nobody predicted -
+        // `payment_projection_controls` above all, which is exactly the read T11
+        // prepends to this adapter. So every table the statement names is
+        // collected and the set is required to be a subset of the two allowed
+        // ones; `join` is matched as well as `from`, or a join would smuggle a
+        // third table into a statement that still names an allowed one.
+        preg_match_all('/(?:from|join)\s+"([^"]+)"/i', $statement, $tables);
+
+        expect($tables[1])->not->toBeEmpty()
+            ->and(array_values(array_diff(
+                array_unique($tables[1]),
+                ['payment_details', 'payment_idempotency_receipts'],
+            )))->toBe([]);
     }
 });
