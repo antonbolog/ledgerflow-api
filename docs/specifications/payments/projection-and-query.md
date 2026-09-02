@@ -17,11 +17,11 @@ The consumer applies one deterministic projection transaction. A durable project
 idempotency boundary. The query API reads only `PaymentDetails` and the merchant-owned idempotency
 receipt.
 
-**T8 is implemented; T9 and T11 are not.** The consumer, its two tables, the projection failure
-fence, the failure recorder, and `payments:outbox:retry` all exist and carry the evidence recorded
-below. The query contract remains T9's and **the shared projection gate remains T11's** - the
-consumer deliberately opens on the envelope row lock and acquires no gate. [The
-roadmap](../../roadmap.md) owns task state.
+**T8 and T9 are implemented; T11 is not.** The consumer, its two tables, the projection failure
+fence, the failure recorder, and `payments:outbox:retry` all exist, and so does the merchant-scoped
+query endpoint; both carry the evidence recorded below. **The shared projection gate remains T11's** -
+the consumer deliberately opens on the envelope row lock, the query opens on nothing at all, and
+neither acquires a gate. [The roadmap](../../roadmap.md) owns task state.
 
 ## Consumer transaction
 
@@ -105,20 +105,36 @@ primary and unique keys above; a later index requires measured query-plan eviden
 
 ## Query contract
 
-**Owned by T9, and the gate check inside it by T11.** T8 delivers neither; the contract is recorded
-here because it constrains what the consumer must make durable.
+**Implemented by T9. The gate check inside it is still T11's.** Everything below is live except the
+`503` branch, which has no producer until the shared projection gate exists.
 
-`GET /api/payments/{paymentId}` is merchant-scoped and runs its gate check plus read on one short
-PostgreSQL transaction:
+`GET /api/payments/{paymentId}` is merchant-scoped and resolves the merchant only through
+`MerchantContext`. The `payment_details` lookup and, only when that lookup finds nothing, the
+`payment_idempotency_receipts` fallback run inside one short PostgreSQL transaction owned by a single
+query adapter on one injected default connection, so **T11 prepends its gate check to that same
+transaction** without relocating either read:
 
-- owned `PaymentDetails` -> `200 OK` with projected business fields;
-- owned idempotency receipt without projection -> `202 Accepted`, `projection_pending`, and
-  `Retry-After: 1`;
-- no owned projection or receipt -> `404 payment_not_found`;
-- active rebuild -> `503 projection_rebuilding` with retry guidance, reachable only once T11's
-  rebuild and gate exist.
+- owned `PaymentDetails` -> `200 OK` carrying exactly `payment_id`, `amount_minor`, `currency`,
+  `status` and `initiated_at`. `initiated_at` is UTC ISO-8601 with six fractional digits and a
+  `+00:00` offset, matching durable event-time precision. `merchant_id`, `source_event_id` and
+  `aggregate_version` are internal and are never serialized.
+- owned idempotency receipt without projection -> `202 Accepted` carrying exactly `payment_id` and
+  `status: projection_pending`, plus `Retry-After: 1`. That is read-model transport state, not a
+  domain payment status, and nothing durable records it. The body carries no completion estimate and
+  no queue or worker state.
+- no owned projection or receipt -> `404 payment_not_found`. A malformed payment ID shares this exact
+  contract and is refused inside the query boundary before PostgreSQL receives an invalid UUID, so a
+  syntactically invalid unknown identifier is not a distinguishable error class.
+- active rebuild -> `503 projection_rebuilding` with retry guidance. **T11 owns this branch
+  outright**: the control row, the advisory-key derivation, the shared gate lock, and the only code
+  path that can produce the response. It is unreachable until T11 ships, so T9 adds neither the
+  problem code nor a provisional key or control table.
 
-Another merchant's payment returns the same not-found shape. The endpoint never rehydrates
+A projected lookup short-circuits the receipt fallback, so an owned projection is never followed by
+a receipt read. Another merchant's payment returns the same not-found shape as a missing one. The
+query adapter, `DatabasePaymentQuery`, may read only `payment_details` and
+`payment_idempotency_receipts` and writes nothing; the surrounding authenticated request still
+performs its normal Sanctum and `MerchantContext` identity queries. The endpoint never rehydrates
 `PaymentAggregate` and never treats Redis/SQS state as proof that a payment exists.
 
 ## Failure handling
@@ -210,12 +226,19 @@ T8:
 
 T9:
 
-- Pending, projected, missing, and other-merchant HTTP states have stable contracts.
+- Projected, pending, missing, malformed, and other-merchant HTTP states have stable contracts.
+- Malformed, missing, and foreign requests use the same `payment_not_found` problem schema, and
+  missing and foreign requests for the same valid payment ID produce the same response body.
+- The `payment_details` lookup and, when it is needed, the `payment_idempotency_receipts` fallback
+  run inside one adapter-owned transaction on one injected connection object; the query adapter reads
+  no other table and issues no write.
 
 T11:
 
 - The rebuilding HTTP state has a stable contract, and gate lock and protected work use the same
   PostgreSQL backend connection.
+- That backend-affinity evidence is T11's alone: it cannot be produced before a gate lock exists to
+  prove it against.
 
 ## Implementation evidence
 
@@ -276,8 +299,42 @@ process, not with two workers. No load, throughput or query-plan claim, and ther
 index. No rebuild-safety claim, because **the shared projection gate does not exist** - see the
 reciprocal obligation in
 [verification and rebuild](verification-and-rebuild.md#t8s-reciprocal-obligation-the-consumer-arrives-without-a-gate-either).
-`GET /api/payments/{paymentId}` remains unimplemented, so the read model is not yet observable
-through HTTP.
+`GET /api/payments/{paymentId}` did not exist at T8, so the read model was not yet observable
+through HTTP; **T9 supplies it below**.
+
+**Satisfied by T9**, which shipped six production types - four under
+`Modules/Payments/app/Application/Query/` (`PaymentQuery`, `ProjectedPayment`, `PendingPayment`,
+`PaymentNotFound`), `Modules\Payments\Infrastructure\Persistence\DatabasePaymentQuery` and
+`Modules\Payments\Http\Controllers\QueryPaymentController` - plus one route, one scoped binding and
+one `ProblemType` case, plus one `dontReport` entry. **No migration, no index, no Composer
+dependency and no process.** Every row below was observed through `make check` against PostgreSQL 18.4.
+
+| # | Invariant | Proving test | Observed mechanism | Status |
+|---|---|---|---|---|
+| Q-1 | An owned projection returns exactly the five contract fields, in wire order | `QueryPaymentTest::it returns the owned projection as exactly five fields in wire order`, `PaymentQueryTest::it returns the owned projection with exactly the projected fields` | The whole decoded document compared order-sensitively, and the whole result object compared by value; `merchant_id`, `source_event_id` and `aggregate_version` are absent from both. `amount_minor` is asserted to be an int, because PDO's pgsql driver may hand a bigint back as a string | **PASS** |
+| Q-2 | `initiated_at` is UTC ISO-8601 with six fractional digits and a `+00:00` offset | `PaymentQueryTest::it preserves the stored instant as UTC with six fractional digits` (3 datasets), `…it normalises to UTC itself rather than trusting how the session renders the instant` | Microseconds survive and a whole second still renders `.000000`. The session TimeZone is UTC by default, so `timestamptz` renders `+00` whatever offset was inserted and the adapter's `->utc()` would be unfalsifiable; the second test sets the session to `Europe/Kyiv` first, so PostgreSQL hands back `+03` and only the adapter's own normalisation can produce the expected value | **PASS** |
+| Q-3 | An owned receipt without a projection returns the pending contract with `Retry-After: 1` | `QueryPaymentTest::it returns the pending contract with Retry-After when only the receipt exists`, `PaymentQueryTest::it falls back to the owned receipt when the projection has not caught up` | Exactly `payment_id` and `status: projection_pending`; `202`, `application/json`, `Retry-After: 1`. The pending result carries the id and nothing else, so no completion estimate or queue state can be serialized | **PASS** |
+| Q-4 | A projected lookup short-circuits the receipt fallback | `PaymentQueryTest::it short-circuits the receipt fallback when the projection exists` | Both rows exist - the normal steady state - and `DB::listen` records exactly one statement, naming `payment_details` and not `payment_idempotency_receipts`. An implementation that read the receipt anyway would answer identically and fail only here | **PASS** |
+| Q-5 | A payment neither table knows returns the complete `payment_not_found` document | `QueryPaymentTest::it answers payment_not_found for a payment neither table knows` | All six RFC 9457 members compared order-sensitively - `type`, `title`, `status`, `detail`, `instance`, `code` - plus `application/problem+json` and the **absence** of `Retry-After`; nothing about an unknown payment is transient | **PASS** |
+| Q-6 | Missing and foreign are indistinguishable at the wire, on both tables | `QueryPaymentTest::it cannot be told apart from a missing payment when the payment is someone else` (2 datasets) | Same id, same caller, one difference: whether another merchant's row exists. Response **bytes**, status and `Content-Type` compared, so a difference in key order or in `instance` would fail as surely as a different `code`. Run for a foreign projection **and** a foreign pending receipt, because those are two rows on two tables reached by two lookups | **PASS** |
+| Q-7 | Foreign ownership is refused on both tables, and the owner is still served | `QueryPaymentTest::it answers payment_not_found for another merchant projection and serves its owner`, `…for another merchant pending receipt and serves its owner`, `PaymentQueryTest::it refuses another merchant projection and answers the owner normally`, `…refuses another merchant pending receipt and answers the owner normally` | Each refusal is followed by the **owner's** successful `200`/`202` on the same row, so the refusal cannot pass because a fixture never landed | **PASS** |
+| Q-8 | The refusal is non-vacuous: deleting the row that produced it flips the answer | `PaymentQueryTest::it stops answering pending the moment the receipt it answered from is deleted` | Pending is observed first, exactly one receipt row is deleted (`$deleted === 1`), and the same merchant/payment lookup then raises `PaymentNotFound` | **PASS** |
+| Q-9 | A malformed id shares the payment contract and never reaches PostgreSQL | `QueryPaymentTest::it gives a malformed payment id the payment contract, never the generic one` (2 datasets), `PaymentQueryTest::it refuses a malformed payment id without letting PostgreSQL see it` (4 datasets) | `payment_not_found`, not the generic `not_found`, with `instance` echoing the requested path; below HTTP, `DB::listen` records **no statement at all**, which is stronger than "no 22P02 surfaced" - a route constraint or a caught `QueryException` would each leave one behind | **PASS** |
+| Q-10 | Both lookups run inside one adapter-owned transaction on the injected connection | `PaymentQueryTest::it runs both lookups in one transaction on the injected connection` | Exactly one `TransactionBeginning` and one `TransactionCommitted`; both statements captured at `transactionLevel() === 1` at execution time; the injected connection compared to `DB::connection()` **by identity**, which is what T11 relies on when it prepends a connection-affine gate to this same transaction. In the Integration suite, not Feature, because a `RefreshDatabase` wrapper would make the adapter's transaction a savepoint and fire neither event | **PASS** |
+| Q-10b | The refusal path leaves no transaction open | `PaymentQueryTest::it refuses a payment id neither table knows and leaves no transaction open` | `transactionLevel()` is 0 and the PDO reports no open transaction after the exception - the most frequently reached error path, and the one that throws from inside the transaction callback | **PASS** |
+| Q-11 | The query path reads two tables and writes nothing | `PaymentQueryTest::it reads only the two allowed tables and writes nothing` | Every statement across all three reachable states must start with `select`, and every table it names - matched on `from` **and** `join`, so a join cannot smuggle a third in - must be `payment_details` or `payment_idempotency_receipts`. A positive allowlist rather than a list of forbidden names, which would pass any table nobody predicted: `payment_projection_controls` above all, the read T11 prepends here | **PASS** |
+| Q-12 | `payment_not_found` is reachable only through the query endpoint's own exception type | `QueryPaymentTest::it leaves an unknown api path on the generic not_found contract` | An unmatched `/api/*` path still answers `not_found`; the mapper matches `PaymentNotFound` by type above the 404 status fallback, so a status-driven mapping would have been caught here | **PASS** |
+| Q-13 | The merchant is resolved once, through `MerchantContext` only | `QueryPaymentTest::it resolves the merchant through MerchantContext exactly once` | A counting `MerchantContext` double records exactly one call. `AuthenticatedMerchantContext` memoises nothing, so a controller asking twice would do the identity work twice and no response assertion would notice | **PASS** |
+| Q-14 | The unauthenticated contract is unchanged | `QueryPaymentTest::it refuses an unauthenticated read with the shared 401 contract` | `401`, `application/problem+json`, `code: unauthenticated`. Every authenticated test uses a **real Sanctum bearer token** and `Auth::forgetGuards()` between requests, never `Sanctum::actingAs`, so an isolation claim cannot pass by reusing the first token's merchant | **PASS** |
+| Q-15 | A not-found payment is not reported to the log | `QueryPaymentTest::it does not report a not-found payment to the log` | `shouldReport()` is false for `PaymentNotFound` and true for an unrelated `RuntimeException`. Laravel already declines to report the framework's `NotFoundHttpException`; without the `dontReport` in `bootstrap/app.php` this endpoint would be the one 404 in the API writing an error-level line with a stack trace once per request, at whatever rate a client asks for identifiers it does not own | **PASS** |
+
+**What T9 did not prove.** No load, throughput, latency or query-plan claim, and therefore no new
+index. No rebuild-safety claim and no backend-affinity claim across a gate lock and its protected
+read: **the shared projection gate does not exist**, so `503 projection_rebuilding` has no producer
+and both remain T11's. The absence of Redis from the query path is established by source inspection
+only - the SQL listener that pins the table allowlist cannot observe a Redis call.
+`make projection-contract` was not extended: T9 adds no process, and the live scheduler+Horizon
+evidence it depends on for a *projected* read is T8's, unchanged.
 
 ## Related
 

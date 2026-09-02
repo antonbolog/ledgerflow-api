@@ -19,7 +19,11 @@ in [ADR 0004](adr/0004-lock-through-push-outbox-relay.md) with its evidence in t
 generation fence, `payments:outbox:retry`, and the paired scheduler+Horizon activation, with evidence
 in the
 [implementation evidence](specifications/payments/projection-and-query.md#implementation-evidence)
-table. **T9 is next.**
+table. **T9 is complete**, closing the read path: authenticated `GET /api/payments/{paymentId}` with
+projected `200`, pending `202` and `payment_not_found` `404`, evidence in the same table. That
+completes every M4 task; M4's `POST -> outbox -> Redis -> consumer -> GET` exit is **composed from
+T6, T7, T8 and T9 evidence rather than one measured end-to-end run**, and the full-chain resilience
+matrix stays [T12's](testing/payments-resilience.md). **T10 is next.**
 
 ## Outcome
 
@@ -144,7 +148,23 @@ Complete the asynchronous tracer bullet on Redis/Horizon.
   T8's crash evidence is a deterministic in-process commit-boundary failpoint plus a live Horizon
   stop/backlog/restart smoke; literal SIGTERM/SIGKILL process suites stay
   [T12's](testing/payments-resilience.md).
-- T9 — Implement owned projected/pending payment query.
+- T9 — **Complete.** Authenticated `GET /api/payments/{paymentId}`, merchant-scoped through
+  `MerchantContext`: an owned `payment_details` row returns `200` with exactly `payment_id`,
+  `amount_minor`, `currency`, `status` and `initiated_at`; an owned idempotency receipt without a
+  projection returns `202 projection_pending` with `Retry-After: 1`; anything else returns
+  `404 payment_not_found`. **Malformed, unknown and foreign payment ids are one answer**: for one
+  requested id, unknown and foreign produce byte-identical documents, and a malformed id produces the
+  same problem type and code, differing only in the `instance` path it echoes. A malformed id is
+  refused inside the query boundary before PostgreSQL sees an invalid UUID. The `payment_details`
+  lookup and its conditional `payment_idempotency_receipts` fallback run
+  in one short adapter-owned transaction on one injected connection object, reading no other table
+  and writing nothing; **`PaymentAggregate` is never rehydrated and no stored event, outbox row,
+  projector receipt or Redis key is consulted.** Six production types, one route, one scoped binding,
+  one `ProblemType` case - no migration, index, dependency, configuration or process. Evidence in
+  [projection and query](specifications/payments/projection-and-query.md#implementation-evidence).
+  **No shared projection gate was added**: the `503 projection_rebuilding` branch and the shared-lock
+  backend-affinity evidence stay T11's, per
+  [projection and query](specifications/payments/projection-and-query.md#query-contract).
 
 **What T7 did not prove.** *(Frozen as written at T7. T8 has since supplied the consumer, the Horizon
 configuration and `payments:outbox:retry`; what T8 itself did not prove is recorded in
@@ -251,9 +271,9 @@ worktrees must not modify the same Payments persistence contracts.
 | T6 | P1 | [Initiation/idempotency](specifications/payments/initiation-and-idempotency.md) | PostgreSQL concurrency and HTTP contract tests |
 | T7 | P1 | [Outbox delivery](specifications/payments/outbox-delivery.md) | Redis/PostgreSQL relay and scheduler tests |
 | T8 | P1 | [Projection/query](specifications/payments/projection-and-query.md) | Duplicate, rollback, backlog, deterministic crash-boundary, Horizon restart, poison, and operator-retry tests |
-| T9 | P1 | [Projection/query](specifications/payments/projection-and-query.md) | Projected/pending/missing/rebuilding and ownership tests |
+| T9 | P1 | [Projection/query](specifications/payments/projection-and-query.md) | Projected/pending/missing/malformed and ownership tests |
 | T10 | P2 | [Verification/rebuild](specifications/payments/verification-and-rebuild.md) | Read-only corruption matrix and targeted repair |
-| T11 | P1 | [Verification/rebuild](specifications/payments/verification-and-rebuild.md) | Lock race, batch, kill/restart, and replay tests |
+| T11 | P1 | [Verification/rebuild](specifications/payments/verification-and-rebuild.md) | Rebuilding HTTP contract, shared-lock backend affinity, lock race, batch, kill/restart, and replay tests |
 | T12 | P1 | [Resilience test plan](testing/payments-resilience.md) | Full real-service resilience suite |
 | T13 | P2 | [Runtime contract](operations/runtime-contract.md) | Clean-checkout five-minute demo |
 

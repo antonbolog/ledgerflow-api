@@ -28,9 +28,11 @@ namespace App\Http\Problem;
  * behaviour, and keeping the vocabulary in one file means Slice 2 reopens nothing.
  * A green Slice 1 run does NOT exercise them.
  *
- * `projection_rebuilding` and `payment_not_found` are deliberately absent: they
- * belong to T9's query endpoint, and a case with no owner is a promise nothing
- * keeps.
+ * `payment_not_found` ARRIVES WITH T9's QUERY ENDPOINT, which is the only thing
+ * that can raise it. `projection_rebuilding` is still deliberately absent: its
+ * producer is T11's shared projection gate, and a case with no producer is a
+ * promise nothing keeps. T9 must not add it in advance - see
+ * docs/specifications/payments/projection-and-query.md, "Query contract".
  */
 enum ProblemType: string
 {
@@ -38,6 +40,7 @@ enum ProblemType: string
     case ValidationFailed = 'validation_failed';
     case IdempotencyPayloadMismatch = 'idempotency_payload_mismatch';
     case IdempotencyContention = 'idempotency_contention';
+    case PaymentNotFound = 'payment_not_found';
     case NotFound = 'not_found';
     case MethodNotAllowed = 'method_not_allowed';
     case InternalError = 'internal_error';
@@ -54,6 +57,7 @@ enum ProblemType: string
             self::ValidationFailed => 'Validation failed',
             self::IdempotencyPayloadMismatch => 'Idempotency key reused with a different payload',
             self::IdempotencyContention => 'Idempotency contention',
+            self::PaymentNotFound => 'Payment not found',
             self::NotFound => 'Not found',
             self::MethodNotAllowed => 'Method not allowed',
             self::InternalError => 'Internal error',
@@ -67,6 +71,7 @@ enum ProblemType: string
             self::ValidationFailed => 422,
             self::IdempotencyPayloadMismatch => 409,
             self::IdempotencyContention => 503,
+            self::PaymentNotFound => 404,
             self::NotFound => 404,
             self::MethodNotAllowed => 405,
             self::InternalError => 500,
@@ -80,6 +85,7 @@ enum ProblemType: string
             self::ValidationFailed => 'The request payload did not satisfy the initiation contract.',
             self::IdempotencyPayloadMismatch => 'This idempotency key was already used with a different payload.',
             self::IdempotencyContention => 'The request could not be arbitrated in time. Retry.',
+            self::PaymentNotFound => 'No payment matching this identifier is available.',
             self::NotFound => 'No API resource matches this path.',
             self::MethodNotAllowed => 'This method is not supported for this path.',
             self::InternalError => 'The request could not be completed.',

@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
 use Modules\Payments\Application\Initiation\IdempotencyContention;
 use Modules\Payments\Application\Initiation\IdempotencyPayloadMismatch;
+use Modules\Payments\Application\Query\PaymentNotFound;
 use Symfony\Component\HttpFoundation\Response;
 use Throwable;
 
@@ -123,6 +124,13 @@ final readonly class ProblemDetailsMapper
             // payload mismatch, and a generic 503 is not idempotency contention.
             $e instanceof IdempotencyPayloadMismatch => ProblemType::IdempotencyPayloadMismatch,
             $e instanceof IdempotencyContention => ProblemType::IdempotencyContention,
+
+            // ABOVE THE 404 FALLBACK ON PURPOSE. A generic framework 404 means "no
+            // such route"; this one means "no such payment for this merchant", and
+            // the query endpoint is the only thing that may say so. Matching by
+            // status instead would hand payment_not_found to every unmatched
+            // /api/* path.
+            $e instanceof PaymentNotFound => ProblemType::PaymentNotFound,
 
             // Only now the framework's own HttpExceptions, whose status IS their
             // meaning.

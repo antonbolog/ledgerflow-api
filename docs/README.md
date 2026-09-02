@@ -35,8 +35,9 @@ unrelated implementation details.
 
 ## Delivery status
 
-The write path, the scheduler-driven outbox relay, and the Horizon-supervised projection consumer
-with its failure accounting and operator retry are implemented. The read model query endpoint
-(`GET /api/payments/{id}`) and the shared projection gate are not: T9 owns the query and T11 owns the
-gate. The [roadmap](roadmap.md) is the only canonical source for task history, current sequencing,
-and completion status.
+The write path, the scheduler-driven outbox relay, the Horizon-supervised projection consumer with
+its failure accounting and operator retry, and the merchant-scoped read model query endpoint
+(`GET /api/payments/{paymentId}`, projected `200` / pending `202` / `payment_not_found` `404`) are
+implemented. The shared projection gate is not, so the `503 projection_rebuilding` state is
+unreachable: T11 owns both. The [roadmap](roadmap.md) is the only canonical source for task history,
+current sequencing, and completion status.

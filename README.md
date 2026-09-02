@@ -23,7 +23,15 @@ architecture anchor for the three-repository Ledgerflow system.
   behind a monotonic generation fence and the fifth exhausts the envelope, with
   `payments:outbox:retry` as the sole reactivation path.
 - The scheduler and Horizon are activated together and never one alone. The relay stays dormant until
-  an operator starts the pair. `GET /api/payments/{id}` does not exist yet.
+  an operator starts the pair.
+- `GET /api/payments/{paymentId}` returns an authenticated merchant's own payment: `200` with the
+  projected fields, `202 projection_pending` with `Retry-After: 1` while the projection lags, and
+  `404 payment_not_found` otherwise. A malformed, unknown, or another merchant's payment ID all get
+  that same answer: for one requested ID, unknown and foreign are byte-identical, so the endpoint
+  never reveals that a payment exists but belongs to someone else. The query reads only the read
+  model and its idempotency-receipt fallback, and
+  never rehydrates the aggregate. The `503 projection_rebuilding` state is unreachable until T11
+  adds the shared projection gate.
 
 The [roadmap](docs/roadmap.md) is the canonical source for delivery status and sequencing.
 
@@ -37,7 +45,8 @@ make check     # instruction parity + Composer + Pint + Rector + PHPStan + Pest
 ```
 
 The API is available at <http://127.0.0.1:8080> (loopback only). `GET /up` is the health endpoint;
-`POST /api/payments` requires a Sanctum bearer token and an `Idempotency-Key` header.
+`POST /api/payments` requires a Sanctum bearer token and an `Idempotency-Key` header, and
+`GET /api/payments/{paymentId}` requires the same bearer token.
 
 Run `make` to see the complete command surface. Destructive targets require target-specific typed
 confirmation, for example `make destroy CONFIRM=destroy` and

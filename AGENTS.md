@@ -38,8 +38,16 @@ compatibility evidence live in
 - The scheduler and Horizon are activated together through `make projection-start`/`projection-stop`
   and never one alone; `make projection-contract` proves the pair end to end in a disposable Compose
   project.
-- No read model query (`GET /api/payments/{id}`) and no shared projection gate exist yet. T9 owns the
-  query and T11 owns the gate; the [roadmap](docs/roadmap.md) owns delivery order and task status.
+- `GET /api/payments/{paymentId}` is merchant-scoped through `MerchantContext`: owned projection ->
+  `200` with exactly `payment_id`, `amount_minor`, `currency`, `status`, `initiated_at`; owned
+  receipt without projection -> `202 projection_pending` with `Retry-After: 1`; otherwise
+  `404 payment_not_found`, which malformed, unknown and foreign IDs all share. For one requested ID,
+  unknown and foreign are byte-identical; a malformed ID shares the same problem type and code and
+  differs only in the `instance` path it echoes. One adapter-owned transaction reads `payment_details`
+  and, only on a miss, `payment_idempotency_receipts`; it never rehydrates `PaymentAggregate` and
+  touches no other table.
+- No shared projection gate exists yet, so `503 projection_rebuilding` is unreachable. T11 owns both;
+  the [roadmap](docs/roadmap.md) owns delivery order and task status.
 
 ## Architecture and boundaries
 

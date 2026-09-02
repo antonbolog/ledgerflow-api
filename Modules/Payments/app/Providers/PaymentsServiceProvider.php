@@ -12,10 +12,12 @@ use Illuminate\Database\DatabaseManager;
 use Illuminate\Support\ServiceProvider;
 use Modules\Payments\Application\Initiation\AtomicTransaction;
 use Modules\Payments\Application\Initiation\IdempotencyReceipts;
+use Modules\Payments\Application\Query\PaymentQuery;
 use Modules\Payments\Infrastructure\Console\PaymentOutboxRetryCommand;
 use Modules\Payments\Infrastructure\Console\PaymentOutboxStatusCommand;
 use Modules\Payments\Infrastructure\Console\RelayPaymentOutboxCommand;
 use Modules\Payments\Infrastructure\Persistence\DatabaseIdempotencyReceipts;
+use Modules\Payments\Infrastructure\Persistence\DatabasePaymentQuery;
 use Modules\Payments\Infrastructure\Persistence\RetryingAtomicTransaction;
 use Modules\Payments\Infrastructure\Projection\PaymentProjectionConsumer;
 use Modules\Payments\Infrastructure\Projection\ProjectionConfiguration;
@@ -60,6 +62,20 @@ class PaymentsServiceProvider extends ServiceProvider
         $this->app->scoped(
             IdempotencyReceipts::class,
             fn (Application $app): DatabaseIdempotencyReceipts => new DatabaseIdempotencyReceipts(
+                $app->make(ConnectionInterface::class),
+            ),
+        );
+
+        // ConnectionInterface, NOT the concrete Connection the relay and consumer
+        // take. Those own their transaction lifecycle by hand and inspect
+        // transactionLevel(); the query adapter needs only transaction() and
+        // table(), both of which the interface promises. It still resolves the SAME
+        // default Connection object through the db.connection alias, which is what
+        // keeps its two reads on one backend - and what lets T11 prepend a
+        // connection-affine gate acquisition to that same transaction.
+        $this->app->scoped(
+            PaymentQuery::class,
+            fn (Application $app): DatabasePaymentQuery => new DatabasePaymentQuery(
                 $app->make(ConnectionInterface::class),
             ),
         );
