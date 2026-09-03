@@ -30,18 +30,23 @@ use Throwable;
  *     SET lock_timeout; SELECT pg_advisory_lock(...)         <- phase 1, session-level, blocking
  *     SET lock_timeout = default
  *     BEGIN; SET LOCAL statement_timeout
- *     SELECT cleared_at ... FOR UPDATE; UPDATE ... rebuilding <- phase 2, claims ownership
+ *     SELECT state, cleared_at ... FOR UPDATE; UPDATE ... rebuilding <- phase 2, claims ownership
  *     COMMIT
- *     BEGIN; SET LOCAL statement_timeout
- *     <fence checkpoint 1>; capture watermark; set cleared_at; DELETE payment_details / receipts
- *     COMMIT
- *     loop:
+ *     if takeover AND cleared_at was null:            <- D7 guarded recovery
  *       BEGIN; SET LOCAL statement_timeout
- *       <fence checkpoint 2>; SELECT canonical batch; INSERT receipt+row per event; reconcile marker
+ *       <fence checkpoint 3>; UPDATE ... ready
  *       COMMIT
- *     BEGIN; SET LOCAL statement_timeout
- *     <fence checkpoint 3>; UPDATE ... ready, cleared_at = null
- *     COMMIT
+ *     else:                                            <- fresh start, or a non-null inheritance
+ *       BEGIN; SET LOCAL statement_timeout
+ *       <fence checkpoint 1>; capture watermark; set cleared_at; DELETE payment_details / receipts
+ *       COMMIT
+ *       loop:
+ *         BEGIN; SET LOCAL statement_timeout
+ *         <fence checkpoint 2>; SELECT canonical batch; INSERT receipt+row per event; reconcile marker
+ *         COMMIT
+ *       BEGIN; SET LOCAL statement_timeout
+ *       <fence checkpoint 3>; UPDATE ... ready, cleared_at = null
+ *       COMMIT
  *     SELECT pg_advisory_unlock(...)
  *
  * ONE PINNED CONNECTION FOR THE WHOLE RUN, WITH RECONNECTION DISABLED (F3). A
@@ -72,7 +77,21 @@ use Throwable;
  * sets it, in the same transaction as the clear, only while still null;
  * transitionToReady() nulls it, in the same transaction as the `ready`
  * transition, after a complete successful replay. claimOwnership() never
- * touches it, so a takeover (Slice 4) inherits whatever a previous run left.
+ * touches it, so a takeover inherits whatever a previous run left - byte for
+ * byte, across any number of takeovers, aborts and re-invocations.
+ *
+ * GUARDED RECOVERY (D7) is the one shortcut this class takes, and it is
+ * narrow on purpose: only when a takeover finds the row already `rebuilding`
+ * with `cleared_at` still null - proof that no destructive clear has
+ * committed by anyone since the last completed rebuild - does the run skip
+ * straight to the `ready` transition, replaying nothing. A fresh start from
+ * `ready` also reads `cleared_at` as null (the CHECK constraint requires it),
+ * which is exactly why that fact alone is never the test: only
+ * claimOwnership()'s own previous-state read distinguishes "nothing to redo"
+ * from "this is the first attempt". Every other combination - a fresh start,
+ * or a takeover whose inherited `cleared_at` is already set - is a mandatory
+ * full clear and replay, even when the read model happens to look complete.
+ * See runClaimedRebuild().
  *
  * REPLAY READS ONLY `stored_events`, THROUGH THE CONSUMER'S OWN DECODER
  * (PaymentInitiatedEnvelope::fromStoredEventRow()). The outbox is derived
@@ -218,39 +237,65 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
         $highWatermark = null;
         $eventsReplayed = null;
         $batchesCommitted = null;
+        $guardedRecovery = false;
 
         try {
-            $this->runStep(function () use ($token, $pid): void {
-                $this->claimOwnership($token, $pid);
-            });
+            /** @var array{previousState: string, clearedAt: string|null} $claim */
+            $claim = $this->runStep(fn (): array => $this->claimOwnership($token, $pid));
 
-            $highWatermark = $this->runStep(fn (): int => $this->clearAndCaptureWatermark($token));
+            // GUARDED RECOVERY (D7). Only a TAKEOVER of an already-`rebuilding`
+            // row is eligible, never a fresh start from `ready` - the CHECK
+            // constraint guarantees `ready` also reads `cleared_at` as null, so
+            // that fact alone cannot be the test, or a fresh start would wrongly
+            // skip the very work it exists to do. Eligible only when BOTH hold:
+            // this run took over (previousState is REBUILDING) AND the durable
+            // row's cleared_at is still null - proof that no destructive clear
+            // has committed, by anyone, since the last completed rebuild. Every
+            // other combination - a fresh start, or a takeover whose inherited
+            // cleared_at is already set - is a mandatory full clear and replay,
+            // even when the read model happens to look complete.
+            if ($claim['previousState'] === ProjectionGate::REBUILDING && $claim['clearedAt'] === null) {
+                $guardedRecovery = true;
+                $eventsReplayed = 0;
+                $batchesCommitted = 0;
 
-            $eventsReplayed = 0;
-            $batchesCommitted = 0;
-            $cursor = 0;
+                // CHECKPOINT 3 STILL APPLIES, UNCHANGED: transitionToReady()
+                // re-verifies ownership before it may reopen the gate, exactly
+                // as it does on the full-replay path below. Checkpoints 1 and 2
+                // do not apply here because there is no clear and no batch to
+                // guard - not because they were skipped.
+                $this->runStep(function () use ($token): void {
+                    $this->transitionToReady($token);
+                });
+            } else {
+                $highWatermark = $this->runStep(fn (): int => $this->clearAndCaptureWatermark($token));
 
-            while (true) {
-                /** @var array{count: int, cursor: int} $batch */
-                $batch = $this->runStep(fn (): array => $this->replayBatch($token, $cursor, $highWatermark));
+                $eventsReplayed = 0;
+                $batchesCommitted = 0;
+                $cursor = 0;
 
-                $eventsReplayed += $batch['count'];
+                while (true) {
+                    /** @var array{count: int, cursor: int} $batch */
+                    $batch = $this->runStep(fn (): array => $this->replayBatch($token, $cursor, $highWatermark));
 
-                if ($batch['count'] === 0) {
-                    break;
+                    $eventsReplayed += $batch['count'];
+
+                    if ($batch['count'] === 0) {
+                        break;
+                    }
+
+                    $batchesCommitted++;
+                    $cursor = $batch['cursor'];
+
+                    if ($batch['count'] < $this->config->batchSize) {
+                        break;
+                    }
                 }
 
-                $batchesCommitted++;
-                $cursor = $batch['cursor'];
-
-                if ($batch['count'] < $this->config->batchSize) {
-                    break;
-                }
+                $this->runStep(function () use ($token): void {
+                    $this->transitionToReady($token);
+                });
             }
-
-            $this->runStep(function () use ($token): void {
-                $this->transitionToReady($token);
-            });
         } catch (RebuildStepFailed $failed) {
             $this->logSafely(function () use ($operationId, $token, $failed, $highWatermark, $eventsReplayed, $batchesCommitted): void {
                 $this->logger->error('Payments projection rebuild: aborted.', [
@@ -265,7 +310,7 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
                 ]);
             });
 
-            return RebuildOutcome::failed($failed->reason, $highWatermark, $eventsReplayed, $batchesCommitted);
+            return RebuildOutcome::failed($failed->reason, $highWatermark, $eventsReplayed, $batchesCommitted, $guardedRecovery);
         } catch (Throwable $failure) {
             // ANYTHING runStep() DID NOT ALREADY CLASSIFY - in practice only
             // reachable from a bug, since every database statement above runs
@@ -285,7 +330,7 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
                 ]);
             });
 
-            return RebuildOutcome::failed(RebuildReason::DatabaseError, $highWatermark, $eventsReplayed, $batchesCommitted);
+            return RebuildOutcome::failed(RebuildReason::DatabaseError, $highWatermark, $eventsReplayed, $batchesCommitted, $guardedRecovery);
         }
 
         // THE WORK LANDED: transitionToReady()'s own transaction already
@@ -300,12 +345,15 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
                 'high_watermark' => $highWatermark,
                 'events_replayed' => $eventsReplayed,
                 'batches_committed' => $batchesCommitted,
+                'guarded_recovery' => $guardedRecovery,
             ]);
         } catch (Throwable) {
-            return RebuildOutcome::failed(RebuildReason::AuditFailed, $highWatermark, $eventsReplayed, $batchesCommitted);
+            return RebuildOutcome::failed(RebuildReason::AuditFailed, $highWatermark, $eventsReplayed, $batchesCommitted, $guardedRecovery);
         }
 
-        return RebuildOutcome::completed($highWatermark, $eventsReplayed, $batchesCommitted);
+        return $guardedRecovery
+            ? RebuildOutcome::guardedRecovery()
+            : RebuildOutcome::completed($highWatermark, $eventsReplayed, $batchesCommitted);
     }
 
     /**
@@ -404,17 +452,34 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
     }
 
     /**
-     * Phase 2: claim ownership, preserving `cleared_at` exactly as D7 requires.
+     * Phase 2: claim ownership, preserving `cleared_at` exactly as D7 requires,
+     * and report what was found so the caller can decide guarded recovery.
      *
      * `cleared_at` IS NOT NAMED IN THIS STATEMENT, ON PURPOSE. Whatever a
      * previous run left - null after a clean start, non-null after a partial
      * clear - passes through untouched. Only clearAndCaptureWatermark() and
-     * transitionToReady() may ever write that column.
+     * transitionToReady() may ever write that column. This method claims
+     * UNCONDITIONALLY, whether the row was `ready` (a fresh start) or already
+     * `rebuilding` (a takeover of an abandoned run). The session-level exclusive
+     * gate serialises rebuild owners; FOR UPDATE protects this row transition.
+     * CHECK constraints enforce row shape, not preservation of historical clear
+     * evidence, which depends on these writers leaving the marker untouched.
+     *
+     * THE PREVIOUS STATE IS RETURNED, NOT ONLY `cleared_at`, because guarded
+     * recovery (D7) is conditioned on BOTH: a fresh start from `ready` also
+     * reads `cleared_at` as null - the CHECK constraint requires it - so that
+     * fact alone cannot be the test, or a fresh start would wrongly skip the
+     * very work it exists to do. Only a genuine takeover of an already
+     * `rebuilding` row, found with `cleared_at` still null, may take the
+     * shortcut.
+     *
+     * @return array{previousState: string, clearedAt: string|null}
      */
-    private function claimOwnership(string $token, int $pid): void
+    private function claimOwnership(string $token, int $pid): array
     {
+        /** @var object{state: string, cleared_at: string|null}|null $row */
         $row = $this->connection->selectOne(
-            'select cleared_at from payment_projection_controls where projection = ? for update',
+            'select state, cleared_at from payment_projection_controls where projection = ? for update',
             [ProjectionGate::PAYMENT_DETAILS],
         );
 
@@ -433,6 +498,8 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
             SQL,
             [ProjectionGate::REBUILDING, $token, $pid, ProjectionGate::PAYMENT_DETAILS],
         );
+
+        return ['previousState' => $row->state, 'clearedAt' => $row->cleared_at];
     }
 
     /**

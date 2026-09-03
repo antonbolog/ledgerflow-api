@@ -72,6 +72,7 @@ final class RebuildPaymentProjectionsCommand extends Command
             'high_watermark' => $outcome->highWatermark,
             'events_replayed' => $outcome->eventsReplayed,
             'batches_committed' => $outcome->batchesCommitted,
+            'guarded_recovery' => $outcome->guardedRecovery,
         ], JSON_UNESCAPED_SLASHES));
 
         return $outcome->exitCode();

@@ -28,8 +28,10 @@ smallest relevant document under `docs/specifications/payments/` and any linked 
   [ADR 0005](../../docs/adr/0005-payments-projection-gate-and-rebuild-ownership.md). A closed gate never
   raises an exception from the relay or the consumer and locks no row; POST and GET raise a typed
   ProjectionRebuilding application exception, rendered as 503 with Retry-After: 1. No traffic-path
-  deferral may consume projection failure budget, transport failure budget, or outbox eligibility. The
-  rebuild command itself (exclusive lock, clear, replay, recovery) is not yet built.
+  deferral may consume projection failure budget, transport failure budget, or outbox eligibility.
+- The rebuild owns one pinned connection and exclusive session lock across bounded replay batches.
+  Preserve inherited `cleared_at` across takeover and failure; guarded recovery requires a previously `rebuilding` row with a null marker.
+  Ownership is rechecked before clear, before each batch, and before ready, including guarded recovery.
 - Never log raw idempotency keys, credentials, exception text in health JSON, or sensitive payloads.
 
 ## Evidence

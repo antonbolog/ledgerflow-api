@@ -15,8 +15,10 @@ use Modules\Payments\Application\Rebuild\ProjectionRebuild;
 use Modules\Payments\Application\Rebuild\RebuildOutcome;
 use Modules\Payments\Application\Rebuild\RebuildReason;
 use Modules\Payments\Domain\Payment\Events\PaymentInitiated;
+use Modules\Payments\Infrastructure\Console\RebuildPaymentProjectionsCommand;
 use Modules\Payments\Infrastructure\Projection\PaymentProjectionConsumer;
 use Modules\Payments\Infrastructure\Projection\ProjectionGate;
+use Modules\Payments\Infrastructure\Projection\ProjectionGateState;
 use Modules\Payments\Infrastructure\Rebuild\DatabaseProjectionRebuild;
 use Modules\Payments\Infrastructure\Rebuild\RebuildConfiguration;
 use Modules\Payments\Tests\Integration\IntegrationDatabase;
@@ -124,6 +126,11 @@ function rebuildWithConfig(int $batchSize = 500, int $lockTimeoutMs = 5_000, int
         ]),
         resolve(LoggerInterface::class),
     ));
+
+    // Artisan caches command instances. A new operator attempt after DB::purge()
+    // needs the new adapter and connection, as a fresh CLI process would have.
+    app()->forgetInstance(RebuildPaymentProjectionsCommand::class);
+    Artisan::registerCommand(resolve(RebuildPaymentProjectionsCommand::class));
 }
 
 /** Rebind the port with a logger that throws on its $failOnCall'th record. */
@@ -839,4 +846,444 @@ it('restores the original reconnector after an aborted run', function (): void {
     // NOT DISABLED: an aborted run restores it exactly as a completed one
     // does - the SAME `finally` in rebuild() covers both.
     expect(fn () => DB::connection()->reconnect())->not->toThrow(RuntimeException::class);
+});
+
+/*
+|--------------------------------------------------------------------------
+| Recovery and takeover (D6 phase 2, D7) - Slice 4
+|--------------------------------------------------------------------------
+|
+| EVERY FENCE AND COMMIT-UNCERTAINTY GUARANTEE FROM SLICE 3 IS UNCHANGED
+| BELOW. Guarded recovery still calls transitionToReady(), which still
+| re-verifies ownership before it may reopen the gate (checkpoint 3);
+| checkpoints 1 and 2 do not apply to a guarded recovery because there is no
+| clear and no batch to guard, not because either was skipped. Every step
+| still runs through runStep(), so a lost COMMIT response is still classified
+| as `commit_outcome_unknown` rather than inferred as a rollback.
+*/
+
+/**
+ * Kill the pinned rebuild connection's own backend after its Nth commit,
+ * confirmed released through a `pg_locks` barrier rather than a sleep - the
+ * same discipline AdvisoryExclusiveWaiter uses, and the same technique
+ * Slice 3's own "checkpoint 2: a pinned session terminated between
+ * batches..." test already established. The caller must still
+ * `Event::forget(TransactionCommitted::class)` and `DB::purge()` afterwards.
+ */
+function killAfterCommit(int $targetCommit): void
+{
+    $commits = 0;
+    $connection = DB::connection();
+    $pid = (int) $connection->selectOne('select pg_backend_pid() as pid')->pid;
+
+    Event::listen(TransactionCommitted::class, function (TransactionCommitted $event) use (&$commits, $targetCommit, $connection, $pid): void {
+        if ($event->connection !== $connection) {
+            return;
+        }
+
+        $commits++;
+
+        if ($commits !== $targetCommit) {
+            return;
+        }
+
+        $observer = DB::connection(IntegrationDatabase::OBSERVER);
+        $lockQuery = <<<'SQL'
+            select pid from pg_locks
+             where locktype = 'advisory' and mode = 'ExclusiveLock' and granted
+               and database = (select oid from pg_database where datname = current_database())
+               and classid = ? and objid = ? and objsubid = 2 and pid = ?
+            SQL;
+        $lockArgs = [ProjectionGate::CLASS_ID, ProjectionGate::PAYMENT_DETAILS_OBJECT_ID, $pid];
+
+        if ($observer->selectOne($lockQuery, $lockArgs) === null) {
+            throw new RuntimeException('The target rebuild backend does not hold the exclusive gate lock.');
+        }
+
+        $observer->select('select pg_terminate_backend(?)', [(int) $pid]);
+
+        $deadline = microtime(true) + 5.0;
+
+        while ($observer->selectOne($lockQuery, $lockArgs) !== null) {
+            if (microtime(true) >= $deadline) {
+                throw new RuntimeException('The terminated rebuild backend never released its exclusive gate lock.');
+            }
+
+            Sleep::usleep(10_000);
+        }
+    });
+}
+
+/** Mark the projection rebuilding directly, as a dead run that already cleared would leave it. */
+function markDeadRebuildWithClearedAt(?string $clearedAt): string
+{
+    $token = (string) Str::uuid7();
+
+    DB::table('payment_projection_controls')->where('projection', 'payment_details')->update([
+        'state' => 'rebuilding',
+        'owner_token' => $token,
+        'owner_pid' => 999_999,
+        'started_at' => now(),
+        'cleared_at' => $clearedAt,
+        'updated_at' => now(),
+    ]);
+
+    return $token;
+}
+
+/** With no exclusive holder left, the durable row alone must still close traffic. */
+function expectAbandonedRebuildGateClosed(): void
+{
+    expect(rebuildLockHeld())->toBeFalse();
+    $observer = DB::connection(IntegrationDatabase::OBSERVER);
+    $state = $observer->transaction(fn (): ProjectionGateState => new ProjectionGate($observer)->inspectPaymentDetails());
+    expect($state)->toBe(ProjectionGateState::ClosedByControlState);
+}
+
+it('guarded recovery sets ready without replay when a takeover finds cleared_at still null', function (): void {
+    $seeded = rebuildSeed();
+    resolve(PaymentProjectionConsumer::class)->project($seeded['event_id']);
+    $projectedBefore = rebuildReadRow($seeded['payment_id']);
+    $receiptsBefore = DB::table('payment_projector_receipts')->get()->all();
+    $outboxBefore = DB::table('payment_outbox')->get()->all();
+    expect($projectedBefore)->not->toBeNull();
+
+    // RUN 1: killed right after CLAIMING ownership (commit #1), before its own
+    // clear ever runs - cleared_at stays null, exactly the state guarded
+    // recovery exists for.
+    killAfterCommit(1);
+    [$exit1] = rebuildRun();
+    Event::forget(TransactionCommitted::class);
+    DB::purge();
+
+    expect($exit1)->toBe(RebuildOutcome::EXIT_FAILED);
+
+    $afterRun1 = rebuildControlRow();
+    expect($afterRun1['state'])->toBe('rebuilding')
+        ->and($afterRun1['cleared_at'])->toBeNull();
+    expectAbandonedRebuildGateClosed();
+
+    // RUN 2 (a takeover): finds cleared_at still null - nothing was ever
+    // destroyed - so guarded recovery applies: straight to ready, with no
+    // clear and no replay at all.
+    rebuildWithConfig();
+    [$exit2, $result2] = rebuildRun();
+
+    expect($exit2)->toBe(RebuildOutcome::EXIT_DONE)
+        ->and($result2['outcome'])->toBe(RebuildOutcome::OUTCOME_COMPLETED)
+        ->and($result2['guarded_recovery'])->toBeTrue()
+        ->and($result2['events_replayed'])->toBe(0)
+        ->and($result2['batches_committed'])->toBe(0)
+        ->and($result2['high_watermark'])->toBeNull();
+
+    $afterRun2 = rebuildControlRow();
+    expect($afterRun2['state'])->toBe('ready')
+        ->and($afterRun2['cleared_at'])->toBeNull()
+        ->and($afterRun2['owner_token'])->toBeNull();
+
+    // THE PROJECTION WAS NEVER TOUCHED: guarded recovery skipped the clear
+    // entirely, so the row a real consumer wrote before any of this started
+    // survives byte for byte. If it had cleared without replaying, this row
+    // would be gone; the batches/events counts above already prove no replay
+    // ran either.
+    expect(rebuildReadRow($seeded['payment_id']))->toBe($projectedBefore);
+    expect(DB::table('payment_projector_receipts')->get()->all())->toEqual($receiptsBefore)
+        ->and(DB::table('payment_outbox')->get()->all())->toEqual($outboxBefore);
+});
+
+it('never takes the guarded-recovery shortcut when cleared_at is non-null, even if the read model looks complete', function (): void {
+    $seeded = rebuildSeed();
+    resolve(PaymentProjectionConsumer::class)->project($seeded['event_id']);
+    $projectedBefore = rebuildReadRow($seeded['payment_id']);
+
+    // A dead run that reached its clear, exactly as claimOwnership() is
+    // required to leave it - even though, in this fixture, payment_details
+    // still looks entirely correct and complete.
+    markDeadRebuildWithClearedAt(now()->toIso8601String());
+
+    rebuildWithConfig();
+    [$exitCode, $result] = rebuildRun();
+
+    expect($exitCode)->toBe(RebuildOutcome::EXIT_DONE)
+        ->and($result['guarded_recovery'])->toBeFalse()
+        // A REAL REPLAY RAN, not a shortcut: the read model looking complete
+        // never licenses skipping the work.
+        ->and($result['events_replayed'])->toBe(1)
+        ->and($result['batches_committed'])->toBe(1);
+
+    // Replay is deterministic, so the row ends up identical either way - the
+    // counts above are what prove genuine work happened rather than the row
+    // merely surviving untouched.
+    expect(rebuildReadRow($seeded['payment_id']))->toBe($projectedBefore);
+
+    $control = rebuildControlRow();
+    expect($control['state'])->toBe('ready')
+        ->and($control['cleared_at'])->toBeNull();
+});
+
+it('the non-vacuous control: resetting cleared_at on a takeover would wrongly permit guarded recovery', function (): void {
+    // Model lost clear evidence after a destructive run. This is a control
+    // fixture, not a claim that production claimOwnership() was mutated.
+    $seeded = rebuildSeed();
+
+    markDeadRebuildWithClearedAt(now()->toIso8601String());
+    expect(rebuildReadRow($seeded['payment_id']))->toBeNull();
+
+    // Simulate a claimOwnership() that wrongly reset cleared_at to null on
+    // takeover.
+    DB::table('payment_projection_controls')->where('projection', 'payment_details')
+        ->update(['cleared_at' => null]);
+
+    rebuildWithConfig();
+    [$exitCode, $result] = rebuildRun();
+
+    // WITH THE BUG SIMULATED, guarded recovery fires - proving the branch is
+    // reachable and meaningful, and that claimOwnership()'s real refusal to
+    // touch cleared_at (proven above) is what stands between this and
+    // silently skipping a rebuild the projection actually needed.
+    expect($exitCode)->toBe(RebuildOutcome::EXIT_DONE)
+        ->and($result['guarded_recovery'])->toBeTrue()
+        // The corrupted marker falsely licenses ready over a missing projection.
+        ->and(rebuildReadRow($seeded['payment_id']))->toBeNull();
+});
+
+it('a takeover that fails before its own clear leaves the inherited cleared_at intact, and a third run is still refused the shortcut', function (): void {
+    $seeded = rebuildSeed();
+
+    // RUN 1: reaches its own clear and is killed right after (commit #2:
+    // claim, then clear).
+    killAfterCommit(2);
+    [$exit1] = rebuildRun();
+    Event::forget(TransactionCommitted::class);
+    DB::purge();
+
+    expect($exit1)->toBe(RebuildOutcome::EXIT_FAILED);
+
+    $afterRun1 = rebuildControlRow();
+    $clearedAtAfterRun1 = $afterRun1['cleared_at'];
+    expect($clearedAtAfterRun1)->not->toBeNull();
+    expectAbandonedRebuildGateClosed();
+
+    // RUN 2 (a takeover): killed right after CLAIMING ownership (commit #1),
+    // before it ever reaches its own clear step.
+    rebuildWithConfig();
+    killAfterCommit(1);
+    [$exit2] = rebuildRun();
+    Event::forget(TransactionCommitted::class);
+    DB::purge();
+
+    expect($exit2)->toBe(RebuildOutcome::EXIT_FAILED);
+
+    $afterRun2 = rebuildControlRow();
+    expect($afterRun2['state'])->toBe('rebuilding')
+        // PROVEN NOTHING FROM RUN 2's OWN CLEAR RAN, because it never reached
+        // clearAndCaptureWatermark() at all: cleared_at is byte-identical to
+        // what run 1 alone left.
+        ->and($afterRun2['cleared_at'])->toBe($clearedAtAfterRun1)
+        // A genuinely new token: run 2 really did take over, it did not
+        // resume run 1's own attempt.
+        ->and($afterRun2['owner_token'])->not->toBeNull()
+        ->and($afterRun2['owner_token'])->not->toBe($afterRun1['owner_token'])
+        ->and($afterRun2['owner_pid'])->not->toBe($afterRun1['owner_pid'])
+        ->and($afterRun2['started_at'])->not->toBe($afterRun1['started_at']);
+    expectAbandonedRebuildGateClosed();
+
+    // RUN 3: still refused the guarded-recovery shortcut - cleared_at is
+    // still the ORIGINAL non-null value inherited across two takeovers now -
+    // so a mandatory full clear+replay runs, and this one completes.
+    rebuildWithConfig();
+    [$exit3, $result3] = rebuildRun();
+
+    expect($exit3)->toBe(RebuildOutcome::EXIT_DONE)
+        ->and($result3['guarded_recovery'])->toBeFalse()
+        ->and($result3['events_replayed'])->toBe(1);
+
+    expect(rebuildControlRow())->toMatchArray([
+        'state' => 'ready',
+        'cleared_at' => null,
+    ]);
+});
+
+it('preserves cleared_at across a chain of clear, kill, takeover, kill, takeover, until a replay completes', function (): void {
+    $seeded = rebuildSeed();
+    $second = rebuildSeed();
+    $third = rebuildSeed();
+
+    // Claim, clear, and one committed batch; two events remain unreplayed.
+    rebuildWithConfig(batchSize: 1);
+    killAfterCommit(3);
+    [$exit1, $result1] = rebuildRun();
+    Event::forget(TransactionCommitted::class);
+    DB::purge();
+
+    expect($exit1)->toBe(RebuildOutcome::EXIT_FAILED)
+        ->and($result1['reason'])->toBe(RebuildReason::DatabaseError->value)
+        ->and($result1['events_replayed'])->toBe(1)
+        ->and($result1['batches_committed'])->toBe(1)
+        ->and(rebuildReadRow($seeded['payment_id']))->not->toBeNull()
+        ->and(rebuildReadRow($second['payment_id']))->toBeNull();
+    expectAbandonedRebuildGateClosed();
+
+    $afterRun1 = rebuildControlRow();
+    expect($afterRun1['state'])->toBe('rebuilding')
+        ->and($afterRun1['cleared_at'])->not->toBeNull();
+
+    $clearedAtAfterRun1 = $afterRun1['cleared_at'];
+
+    // RUN 2 (a takeover of run 1's abandoned row): not eligible for guarded
+    // recovery either - cleared_at is already non-null - so a mandatory full
+    // clear+replay runs. Its own clear step's `coalesce(cleared_at, now())`
+    // must leave the INHERITED timestamp untouched. Killed right after its
+    // own clear commits too (commit #2 of this run).
+    rebuildWithConfig(batchSize: 1);
+    killAfterCommit(2);
+    [$exit2] = rebuildRun();
+    Event::forget(TransactionCommitted::class);
+    DB::purge();
+
+    expect($exit2)->toBe(RebuildOutcome::EXIT_FAILED);
+
+    $afterRun2 = rebuildControlRow();
+    expect($afterRun2['state'])->toBe('rebuilding')
+        ->and($afterRun2['cleared_at'])->not->toBeNull()
+        // BYTE-IDENTICAL TO RUN 1's OWN VALUE: coalesce() over an
+        // already-non-null column returns that value unchanged - it is not a
+        // new timestamp, even though run 2's clear statement genuinely ran.
+        ->and($afterRun2['cleared_at'])->toBe($clearedAtAfterRun1)
+        ->and($afterRun2['owner_token'])->not->toBe($afterRun1['owner_token'])
+        // Run 2 discarded the committed partial batch rather than resuming it.
+        ->and(rebuildReadRow($seeded['payment_id']))->toBeNull();
+    expectAbandonedRebuildGateClosed();
+
+    // RUN 3 (a second takeover): still not eligible - cleared_at is still the
+    // ORIGINAL value inherited across two takeovers now - so a third
+    // mandatory full clear+replay runs. This one completes.
+    rebuildWithConfig(batchSize: 1);
+    $commits = 0;
+    $markers = [];
+    Event::listen(TransactionCommitted::class, function (TransactionCommitted $event) use (&$commits, &$markers, $seeded, $second): void {
+        if ($event->connection !== DB::connection()) {
+            return;
+        }
+
+        $commits++;
+        $markers[] = rebuildControlRow()['cleared_at'];
+
+        if ($commits === 3) {
+            // The first new batch starts at the first canonical event again.
+            expect(rebuildReadRow($seeded['payment_id']))->not->toBeNull()
+                ->and(rebuildReadRow($second['payment_id']))->toBeNull();
+        }
+    });
+    [$exit3, $result3] = rebuildRun();
+    Event::forget(TransactionCommitted::class);
+
+    expect($exit3)->toBe(RebuildOutcome::EXIT_DONE)
+        ->and($result3['outcome'])->toBe(RebuildOutcome::OUTCOME_COMPLETED)
+        ->and($result3['guarded_recovery'])->toBeFalse()
+        ->and($result3['reason'])->toBe(RebuildReason::RebuildComplete->value)
+        ->and($result3['events_replayed'])->toBe(3)
+        ->and($result3['batches_committed'])->toBe(3)
+        // Claim, clear, three batches, empty terminal batch, then ready.
+        ->and($markers)->toBe([...array_fill(0, 6, $clearedAtAfterRun1), null]);
+
+    // ONLY NOW - after one replay actually completed - is cleared_at nulled,
+    // in the same transaction that sets `ready`.
+    $afterRun3 = rebuildControlRow();
+    expect($afterRun3['state'])->toBe('ready')
+        ->and($afterRun3['cleared_at'])->toBeNull()
+        ->and($afterRun3['owner_token'])->toBeNull();
+
+    // THE READ MODEL IS CORRECT DESPITE TWO ABORTED ATTEMPTS: replay always
+    // derives from canonical stored_events, never from whatever a killed run
+    // left behind.
+    foreach ([$seeded, $second, $third] as $event) {
+        expect(rebuildReadRow($event['payment_id']))->not->toBeNull();
+    }
+});
+
+it('refuses a second rebuild against a live owner, never reaching phase 2, and the live owners token survives', function (): void {
+    rebuildSeed();
+
+    // A LIVE rebuild-shaped owner: a genuine session-level EXCLUSIVE lock,
+    // held by a second connection - unlike the "waits for a traffic-shaped
+    // shared holder" test above, which holds only the shared half traffic
+    // takes.
+    $liveOwner = DB::connection(IntegrationDatabase::LOCK);
+    $liveOwner->select(
+        'select pg_advisory_lock(?, ?)',
+        [ProjectionGate::CLASS_ID, ProjectionGate::PAYMENT_DETAILS_OBJECT_ID],
+    );
+
+    $liveToken = (string) Str::uuid7();
+    DB::table('payment_projection_controls')->where('projection', 'payment_details')->update([
+        'state' => 'rebuilding',
+        'owner_token' => $liveToken,
+        'owner_pid' => ProjectionGateLocks::pid(IntegrationDatabase::LOCK),
+        'started_at' => now(),
+        'updated_at' => now(),
+    ]);
+    $before = rebuildControlRow();
+
+    rebuildWithConfig(lockTimeoutMs: 300);
+
+    $startedAt = hrtime(true);
+    [$exitCode, $result] = rebuildRun();
+    $elapsedMs = (int) ((hrtime(true) - $startedAt) / 1_000_000);
+
+    expect($elapsedMs)->toBeGreaterThanOrEqual(250);
+    expect($exitCode)->toBe(RebuildOutcome::EXIT_REFUSED)
+        ->and($result['reason'])->toBe(RebuildReason::LockTimeout->value);
+
+    // THE LIVE OWNER'S TOKEN SURVIVES UNTOUCHED: this run never reached phase
+    // 2 (claimOwnership()), so it could not have overwritten anything - per
+    // the D6 trace, "R2 never reaches phase 2, so T1 is never overwritten".
+    $control = rebuildControlRow();
+    expect($control['state'])->toBe('rebuilding')
+        ->and($control['owner_token'])->toBe($liveToken)
+        ->and($control)->toBe($before)
+        ->and(rebuildLockHeld())->toBeTrue();
+});
+
+it('guarded recovery keeps the ready fence and cannot reopen traffic after losing its lock', function (): void {
+    rebuildSeed();
+    markDeadRebuildWithClearedAt(null);
+
+    Event::listen(TransactionCommitted::class, function (TransactionCommitted $event): void {
+        if ($event->connection === DB::connection()) {
+            $event->connection->select('select pg_advisory_unlock(?, ?)', [
+                ProjectionGate::CLASS_ID, ProjectionGate::PAYMENT_DETAILS_OBJECT_ID,
+            ]);
+        }
+    });
+
+    [$exitCode, $result] = rebuildRun();
+    Event::forget(TransactionCommitted::class);
+
+    expect($exitCode)->toBe(RebuildOutcome::EXIT_FAILED)
+        ->and($result['reason'])->toBe(RebuildReason::OwnershipLost->value)
+        ->and($result['guarded_recovery'])->toBeTrue()
+        ->and(rebuildControlRow()['state'])->toBe('rebuilding')
+        ->and(rebuildControlRow()['cleared_at'])->toBeNull();
+    expectAbandonedRebuildGateClosed();
+});
+
+it('reports completed guarded recovery accurately when its completion audit fails', function (): void {
+    $seeded = rebuildSeed();
+    resolve(PaymentProjectionConsumer::class)->project($seeded['event_id']);
+    $before = rebuildReadRow($seeded['payment_id']);
+    markDeadRebuildWithClearedAt(null);
+    rebuildWithFailingLogger(2);
+
+    [$exitCode, $result] = rebuildRun();
+
+    expect($exitCode)->toBe(RebuildOutcome::EXIT_FAILED)
+        ->and($result['reason'])->toBe(RebuildReason::AuditFailed->value)
+        ->and($result['guarded_recovery'])->toBeTrue()
+        ->and($result['high_watermark'])->toBeNull()
+        ->and($result['events_replayed'])->toBe(0)
+        ->and($result['batches_committed'])->toBe(0)
+        ->and(rebuildControlRow()['state'])->toBe('ready')
+        ->and(rebuildReadRow($seeded['payment_id']))->toBe($before)
+        ->and(rebuildLockHeld())->toBeFalse();
 });

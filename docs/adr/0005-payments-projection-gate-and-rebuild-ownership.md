@@ -3,8 +3,8 @@
 - **Status** — Accepted.
 - **Date** — 2026-09-03.
 - **Decision owner** — AB.
-- **Implemented by** - T11, partially: Slice 1 implements the control-row migration and shared gate primitive.
-  Traffic integration, rebuild ownership, replay, and recovery remain pending.
+- **Implemented by** - T11 Slices 1-4: control row, traffic gate, rebuild ownership, replay, and recovery.
+  T10 command participation and the final operator handoff remain pending in Slice 5.
 
 ## Context
 
@@ -168,8 +168,7 @@ never invoked as a shortcut.
 
 ## Consequences
 
-- HS-1 in ADR 0004 gains a design to point at, and is discharged when T11's gate slice lands rather
-  than by this ADR. The relay and consumer still run with no gate today.
+- HS-1 in ADR 0004 is discharged by T11 Slice 2's traffic integration; the relay and consumer now acquire the shared gate.
 - `503 projection_rebuilding` becomes reachable, adding a second retryable `503` to the write
   vocabulary beside `idempotency_contention`.
 - Payments `POST` is gated even though a rebuild clears nothing `POST` writes. The alternative leaves a

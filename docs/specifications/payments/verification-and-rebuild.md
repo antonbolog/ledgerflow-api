@@ -27,10 +27,10 @@ T12's. See the [roadmap](../../roadmap.md) for task state.
 **T11's design is recorded below and in [ADR 0005](../../adr/0005-payments-projection-gate-and-rebuild-ownership.md).**
 The control row, the gate primitive, traffic acquisition on all four paths (`POST`, the transactional
 `GET`, the relay, and the consumer), and the bounded batch rebuild with its ownership fence are
-implemented, per the Slice 1 through Slice 3 evidence below. `503 projection_rebuilding` can now be
-observed from a real rebuild in progress, not only from a manually set control row. Recovery decisions
-(guarded recovery and takeover) are **not** implemented: that clause describes approved intent and
-still has no producer.
+implemented, per the Slice 1 through Slice 3 evidence below.
+Slice 4 adds guarded recovery and takeover with preserved clear evidence.
+`503 projection_rebuilding` can be observed during a real rebuild or after an abandoned run leaves the durable gate closed.
+T10 verify/repair gate participation and the final operator handoff remain Slice 5 work.
 
 ## Verification
 
@@ -441,9 +441,8 @@ That is one more test and nine more assertions than the checkpoint above records
 
 ## Projection gate
 
-**T11's. Slice 1 implements the control-row migration and shared gate primitive.**
-Traffic integration, rebuild, recovery, and T10 command participation remain pending.
-The traffic and rebuild behavior below is the approved contract for those later slices.
+**T11's. Slices 1-4 implement the control row, shared gate, traffic integration, rebuild, and recovery.**
+T10 command participation remains pending in Slice 5.
 [ADR 0005](../../adr/0005-payments-projection-gate-and-rebuild-ownership.md) is the decision record; [the roadmap](../../roadmap.md) owns task state.
 
 `payment_projection_controls` stores one row per projection with `ready` or `rebuilding`, owner
@@ -516,7 +515,7 @@ A separate local review of the Slice 2 diff found no correctness issue.
 Traffic paths defer correctly with the gate closed by the durable row; no exclusive holder, no bounded
 rebuild wait, and no lock-manager interaction was exercised beyond what Slice 1 already measured. The
 bounded batch rebuild, its ownership fence, recovery, and T10 verify/repair gate participation (D10)
-remain unimplemented.
+were outside the Slice 2 checkpoint.
 
 ### Traffic acquisition
 
@@ -820,6 +819,44 @@ reconnector's restoration is proven on all three exit families - refused, comple
 
 Guarded recovery, takeover's own ownership-claim branch, and the chained clear/kill/takeover invariant
 across multiple runs are Slice 4's. `make check` exited `0` on 2026-09-03: 671 tests, 3801 assertions.
+
+### T11 Slice 4 implementation evidence
+
+After exclusive acquisition, `claimOwnership()` reads the previous state and `cleared_at` under `FOR UPDATE`, writes fresh ownership fields, and returns the inherited state without changing the marker.
+Only a previously `rebuilding` row with a null marker selects guarded recovery.
+That path calls the existing fenced `transitionToReady()` without clearing, reading canonical history, or replaying events.
+A fresh start or an inherited non-null marker takes the full clear-and-replay path from cursor zero.
+No fence checkpoint, migration, dependency, or CLI recovery option was added.
+
+The command's JSON gains the additive boolean `guarded_recovery` field.
+It reports selection of the recovery path, not success: it remains true when that path loses ownership or its completion audit fails, and is false before any recovery decision.
+A completed guarded recovery reports `high_watermark: null`, `events_replayed: 0`, and `batches_committed: 0`.
+An `audit_failed` result after the ready commit remains exit `2`, carries those same progress fields, and does not imply that the projection stayed `rebuilding`.
+Existing outcome, reason, exit-code, and commit-uncertainty mappings are unchanged.
+
+Eight additional `ProjectionRebuildTest` cases prove these contracts against real PostgreSQL:
+
+- Killing the backend after the claim commit leaves a null marker; the next authorized attempt returns to ready without changing the existing read row, projector receipts, or outbox columns.
+- A non-null marker requires replay even when the existing projection looks complete.
+- A negative control erases a simulated abandoned run's marker and observes guarded recovery incorrectly leaving a missing projection under `ready`; this mutates fixture state, not production code.
+- A takeover killed before its own clear changes ownership fields but preserves the inherited timestamp exactly; a third attempt still performs full replay.
+- A chain killed after one committed batch, then after the next attempt's clear, preserves the timestamp across both takeovers, discards partial rows, and replays from the first canonical event.
+  Observer reads after every commit of the final attempt see the original marker until the ready commit clears it.
+- A live exclusive owner causes a bounded `lock_timeout` refusal before claim; its entire control row remains unchanged and its lock remains held.
+- Guarded recovery that loses its own exclusive lock is refused by the existing ready fence, with `ownership_lost` and the durable gate still closed.
+- Failure of the completion audit preserves the guarded-recovery result and its actual ready state while releasing the lock.
+
+Backend kills target only the captured test backend, with the current database OID, two-integer gate key, and lock namespace checked from the observer connection.
+The tests wait for observed lock release, then verify that the durable row alone still closes the shared gate.
+Repeated command attempts resolve a fresh adapter after `DB::purge()` so Artisan does not retain a command attached to the killed connection.
+This is in-process database-session failure evidence; the barrier-coordinated OS-process kill matrix remains T12 work.
+
+On 2026-09-03, `make check` exited `0`: **679 tests, 3907 assertions**, including Composer validation, Pint, Rector, PHPStan, and instruction parity.
+After recording this evidence, a separate `make agent-check` also exited `0`.
+A separate local, sequential review covered the actual runtime, test, and documentation diff.
+The initial test run reproduced three failures caused by the stale Artisan command instance; the final run passes those same scenarios.
+No `make ci`, `make projection-contract`, or `make image-contract` was run for this checkpoint.
+Slice 5's T10 command participation and operator handoff remain pending.
 
 ## Deferred evolution
 
