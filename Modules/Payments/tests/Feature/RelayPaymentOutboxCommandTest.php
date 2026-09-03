@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Str;
 use Modules\Payments\Infrastructure\Console\RelayPaymentOutboxCommand;
+use Modules\Payments\Infrastructure\Projection\ProjectionGate;
 use Modules\Payments\Infrastructure\Relay\OutboxRelay;
 use Modules\Payments\Infrastructure\Relay\RelayConfiguration;
 use Modules\Payments\Infrastructure\Relay\RelayHeartbeat;
@@ -218,6 +219,7 @@ it('continues after a transport rejection but never after any other failure', fu
         RejectingQueue::redis(),
         $app->make(RelayConfiguration::class),
         $app->make(LoggerInterface::class),
+        $app->make(ProjectionGate::class),
     ));
 
     $records = passLogs();
@@ -243,6 +245,7 @@ it('aborts the pass with a non-zero exit when a row fails for any other reason',
         RejectingQueue::programming(),
         $app->make(RelayConfiguration::class),
         $app->make(LoggerInterface::class),
+        $app->make(ProjectionGate::class),
     ));
 
     $records = passLogs();
@@ -291,6 +294,7 @@ it('writes no heartbeat when the pass aborts', function (): void {
         RejectingQueue::programming(),
         $app->make(RelayConfiguration::class),
         $app->make(LoggerInterface::class),
+        $app->make(ProjectionGate::class),
     ));
 
     passEnvelope();
@@ -346,6 +350,7 @@ it('keeps payloads and raw transport detail out of the pass log', function (): v
         RejectingQueue::redis("connection refused {$sentinel}"),
         $app->make(RelayConfiguration::class),
         $app->make(LoggerInterface::class),
+        $app->make(ProjectionGate::class),
     ));
 
     $records = passLogs();

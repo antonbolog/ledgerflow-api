@@ -40,4 +40,22 @@ enum ProjectionOutcome: string
      * the sole path back.
      */
     case SkippedExhausted = 'skipped_exhausted';
+
+    /**
+     * T11's shared projection gate was closed. No envelope was locked, nothing was
+     * written, and `projection_failure_count`, `projection_failure_generation`,
+     * `exhausted_at` and every transport column are untouched by construction.
+     *
+     * NOTHING WAS THROWN, DELIBERATELY. ProjectPaymentEvent has tries = 1 and no
+     * try/catch, so an exception here would land the message in `failed_jobs`
+     * rather than being redelivered - see PaymentProjectionConsumer's class
+     * docblock.
+     *
+     * THE MESSAGE IS ACKNOWLEDGED AND DISCARDED, NOT RE-QUEUED. The durable outbox
+     * row still has a null projection_completed_at, and once its available_at
+     * grace expires the relay's ordinary reconciliation republishes it - the same
+     * mechanism T7 already owns for any other missed delivery, so this deferral
+     * adds no second redelivery owner.
+     */
+    case GateDeferred = 'gate_deferred';
 }

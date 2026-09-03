@@ -21,18 +21,13 @@ namespace App\Http\Problem;
  * and identifiers; ProblemDetailsMapper decides whether debug may substitute it,
  * and the default is silence.
  *
- * TWO CASES HAVE NO PRODUCER IN SLICE 1. IdempotencyPayloadMismatch and
- * IdempotencyContention are named by
- * docs/specifications/payments/initiation-and-idempotency.md as part of this
- * slice's published error vocabulary, and Slice 2 raises them. They are data, not
- * behaviour, and keeping the vocabulary in one file means Slice 2 reopens nothing.
- * A green Slice 1 run does NOT exercise them.
- *
- * `payment_not_found` ARRIVES WITH T9's QUERY ENDPOINT, which is the only thing
- * that can raise it. `projection_rebuilding` is still deliberately absent: its
- * producer is T11's shared projection gate, and a case with no producer is a
- * promise nothing keeps. T9 must not add it in advance - see
- * docs/specifications/payments/projection-and-query.md, "Query contract".
+ * `payment_not_found` ARRIVED WITH T9's QUERY ENDPOINT. `projection_rebuilding`
+ * arrives with T11 Slice 2's shared projection gate: the write path
+ * (RetryingAtomicTransaction), the transactional read (DatabasePaymentQuery), the
+ * relay and the consumer each check the gate and, on POST and GET, raise a typed
+ * ProjectionRebuilding application exception that this case renders as 503 with
+ * Retry-After: 1 - see docs/specifications/payments/projection-and-query.md,
+ * "Query contract".
  */
 enum ProblemType: string
 {
@@ -41,6 +36,7 @@ enum ProblemType: string
     case IdempotencyPayloadMismatch = 'idempotency_payload_mismatch';
     case IdempotencyContention = 'idempotency_contention';
     case PaymentNotFound = 'payment_not_found';
+    case ProjectionRebuilding = 'projection_rebuilding';
     case NotFound = 'not_found';
     case MethodNotAllowed = 'method_not_allowed';
     case InternalError = 'internal_error';
@@ -58,6 +54,7 @@ enum ProblemType: string
             self::IdempotencyPayloadMismatch => 'Idempotency key reused with a different payload',
             self::IdempotencyContention => 'Idempotency contention',
             self::PaymentNotFound => 'Payment not found',
+            self::ProjectionRebuilding => 'Projection rebuilding',
             self::NotFound => 'Not found',
             self::MethodNotAllowed => 'Method not allowed',
             self::InternalError => 'Internal error',
@@ -72,6 +69,7 @@ enum ProblemType: string
             self::IdempotencyPayloadMismatch => 409,
             self::IdempotencyContention => 503,
             self::PaymentNotFound => 404,
+            self::ProjectionRebuilding => 503,
             self::NotFound => 404,
             self::MethodNotAllowed => 405,
             self::InternalError => 500,
@@ -86,6 +84,7 @@ enum ProblemType: string
             self::IdempotencyPayloadMismatch => 'This idempotency key was already used with a different payload.',
             self::IdempotencyContention => 'The request could not be arbitrated in time. Retry.',
             self::PaymentNotFound => 'No payment matching this identifier is available.',
+            self::ProjectionRebuilding => 'A projection rebuild is in progress. Retry.',
             self::NotFound => 'No API resource matches this path.',
             self::MethodNotAllowed => 'This method is not supported for this path.',
             self::InternalError => 'The request could not be completed.',

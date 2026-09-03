@@ -50,7 +50,9 @@ compatibility evidence live in
   `payments:outbox:repair {eventId} --delivery-quiesced` repairs one envelope, preserves existing
   exhaustion and failure history, and never rebuilds read rows. See the
   [operator procedure](docs/operations/runtime-contract.md#manual-verification-and-targeted-repair).
-- No shared projection gate exists yet, so `503 projection_rebuilding` is unreachable. T11 owns both;
+- T11's control-row migration and shared gate primitive are implemented, but Payments traffic does
+  not acquire the gate yet, so `503 projection_rebuilding` remains unreachable. Traffic integration,
+  rebuild, and recovery follow [ADR 0005](docs/adr/0005-payments-projection-gate-and-rebuild-ownership.md);
   the [roadmap](docs/roadmap.md) owns delivery order and task status.
 
 ## Architecture and boundaries
@@ -76,8 +78,10 @@ and replay/rebuild semantics require explicit review against the smallest releva
 
 - Preserve one-connection transaction ownership for receipt, stored event, and outbox writes.
 - Transport failure must not consume projection failure budget or exhaust an outbox row.
-- The relay intentionally has no shared projection gate until T11; do not add a provisional key or
-  control table. See [ADR 0004](docs/adr/0004-lock-through-push-outbox-relay.md).
+- The relay intentionally has no shared projection gate until T11's gate slice lands; do not add a
+  provisional key or control table. See [ADR 0004](docs/adr/0004-lock-through-push-outbox-relay.md)
+  for the deferral and [ADR 0005](docs/adr/0005-payments-projection-gate-and-rebuild-ownership.md) for
+  the approved design that replaces it. A recorded design is not permission to build it early.
 - Logs and errors must not expose raw idempotency keys, credentials, or sensitive payment payloads.
 
 Additional scoped rules apply under `Modules/Payments/`, `.github/`, `tests/`, and `docs/` through

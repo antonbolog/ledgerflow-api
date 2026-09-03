@@ -90,8 +90,17 @@ per-writer notes below already carried the T7 and T8 completions, and the
 
   It refuses **loudly** when `Projectionist::isReplaying()` is true, writing nothing: a replayed event
   is fully derivable, so a standard rebuild would otherwise re-create envelopes or die on the
-  aggregate-version unique reporting the wrong problem. Whether a rebuild re-creates envelopes is
-  T11's decision to make deliberately.
+  aggregate-version unique reporting the wrong problem.
+
+  **T11 has made that decision: a rebuild never creates or deletes an envelope.** It clears and
+  recreates only `payment_details` and the named projector's receipts, and reconciles
+  `projection_completed_at` for receipts it recreated; envelope reconstruction stays
+  `payments:outbox:repair`, one envelope at a time. The rebuild also never invokes Spatie replay or
+  this writer at all, deriving read rows directly from canonical `stored_events`, so the replay guard
+  above is a second line of defence rather than the mechanism relied on. Recorded in
+  [ADR 0005](../../adr/0005-payments-projection-gate-and-rebuild-ownership.md) and
+  [verification and rebuild](verification-and-rebuild.md#what-a-rebuild-clears-recreates-and-never-touches).
+  Not implemented.
 - **T7 mutates transport state only**: `available_at`, `last_published_at`, `publish_count`,
   `consecutive_transport_failures`, `last_transport_error`. It never writes `exhausted_at`.
 - **T8 records consumer outcome, and owns exhaustion**: `projection_completed_at` on success, and on
@@ -151,19 +160,26 @@ maximum wall-clock runtime prevent unbounded database occupancy. Overlapping rel
 safe because row locks, not scheduler uniqueness, provide correctness — `SKIP LOCKED` is what makes
 that true, and no `withoutOverlapping()`/`onOneServer()` is registered on the schedule entry.
 
-### HS-1 — no shared projection gate is acquired
+### HS-1 — discharged by T11 Slice 2
 
-An earlier draft of this algorithm opened with "acquire the Payments projection shared gate." **T7
-does not do this.** `payment_projection_controls`, its ready/rebuilding row, and the connection-affine
-advisory lock in front of it belong to T11, which has not run; a provisional gate built here would
-either become permanent scope creep or be discarded, coupling two milestones for no present benefit.
-No advisory key is derived by this relay, and no "zero advisory locks taken" claim is made anywhere —
-the absence is temporary scope, not a permanent contract. **T11 adds gate acquisition as the first
-statement inside `OutboxRelay::relayOne()`, before eligibility selection, on the same injected
-connection**, and adds the deferral semantics rebuild introduces. See
-[verification and rebuild](verification-and-rebuild.md#projection-gate) for the reciprocal side of
-this obligation, and [ADR 0004](../../adr/0004-lock-through-push-outbox-relay.md) for the full
-decision record.
+An earlier draft of this algorithm opened with "acquire the Payments projection shared gate." **T7 did
+not do this.** `payment_projection_controls`, its ready/rebuilding row, and the connection-affine
+advisory lock in front of it belonged to T11, which had not run at T7; a provisional gate built there
+would either have become permanent scope creep or been discarded, coupling two milestones for no
+present benefit. See [ADR 0004](../../adr/0004-lock-through-push-outbox-relay.md) for the full decision
+record and [ADR 0005](../../adr/0005-payments-projection-gate-and-rebuild-ownership.md) for the
+control row, the key derivation, and the deferral outcome it records.
+
+**T11 Slice 2 discharges HS-1.** Gate acquisition is the first statement inside
+`OutboxRelay::relayOne()`, before eligibility selection, on the same injected connection. A relay pass
+under a closed gate selects no row and therefore writes no `available_at`, no
+`consecutive_transport_failures`, and no `last_transport_error`: the transport budget is untouched by
+construction. That deferral is `RelayOutcome::GateClosed`, reported distinctly from `NothingEligible`
+(a drained backlog), so a closed gate is never read as an empty queue. See
+[verification and rebuild](verification-and-rebuild.md#t7s-reciprocal-obligation-discharged-by-t11-slice-2)
+for the reciprocal side and its
+[Slice 2 evidence](verification-and-rebuild.md#t11-slice-2-implementation-evidence). The bounded batch
+rebuild that would ever close this gate for real remains unimplemented.
 
 ## State transitions
 
@@ -390,9 +406,8 @@ did not prove is recorded in
   process, matching T4's own scope note; genuine multi-process racing remains T12's.
 - No load, throughput, or index-plan claim. The eligibility index is proven to exist, partial, on the
   documented columns; the planner remains free to choose whatever plan it likes on a handful of rows.
-- No rebuild-safety claim. Whether a rebuild re-creates envelopes, and how the relay behaves under
-  T11's rebuild gate, are T11's questions; HS-1 above records that no gate exists yet for this relay
-  to defer to.
+- No rebuild-safety claim at T7. Whether a rebuild re-creates envelopes was T11's question; how the
+  relay defers under a closed gate is answered by HS-1 above, discharged in T11 Slice 2.
 - No end-to-end projector-receipt reconciliation. The 30-second grace and its redelivery are proved
   from the relay's own transport state only; nothing here writes or reads a projector receipt, because
   none exists until T8.

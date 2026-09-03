@@ -26,6 +26,7 @@ use Modules\Payments\Infrastructure\Persistence\RetryingAtomicTransaction;
 use Modules\Payments\Infrastructure\Projection\PaymentProjectionConsumer;
 use Modules\Payments\Infrastructure\Projection\ProjectionConfiguration;
 use Modules\Payments\Infrastructure\Projection\ProjectionFailureRecorder;
+use Modules\Payments\Infrastructure\Projection\ProjectionGate;
 use Modules\Payments\Infrastructure\Projectors\PaymentOutboxWriter;
 use Modules\Payments\Infrastructure\Relay\OutboxRelay;
 use Modules\Payments\Infrastructure\Relay\RelayConfiguration;
@@ -58,11 +59,22 @@ class PaymentsServiceProvider extends ServiceProvider
         // singleton would outlive a connection swap.
         //
         // ConnectionInterface is a container alias of db.connection, so both resolve
-        // the SAME default Connection object that the transaction is opened on.
+        // the SAME default Connection object that the transaction is opened on. This
+        // is also the identity T11's gate depends on: every binding below that takes
+        // a ProjectionGate::class resolves it against that same default connection,
+        // whichever concrete or interface type the caller itself asks for.
+        $this->app->scoped(
+            ProjectionGate::class,
+            fn (Application $app): ProjectionGate => new ProjectionGate(
+                $app->make(ConnectionInterface::class),
+            ),
+        );
+
         $this->app->scoped(
             AtomicTransaction::class,
             fn (Application $app): RetryingAtomicTransaction => new RetryingAtomicTransaction(
                 $app->make(ConnectionInterface::class),
+                $app->make(ProjectionGate::class),
             ),
         );
 
@@ -84,6 +96,7 @@ class PaymentsServiceProvider extends ServiceProvider
             PaymentQuery::class,
             fn (Application $app): DatabasePaymentQuery => new DatabasePaymentQuery(
                 $app->make(ConnectionInterface::class),
+                $app->make(ProjectionGate::class),
             ),
         );
 
@@ -117,6 +130,7 @@ class PaymentsServiceProvider extends ServiceProvider
                 $app->make(QueueFactory::class),
                 $app->make(RelayConfiguration::class),
                 $app->make(LoggerInterface::class),
+                $app->make(ProjectionGate::class),
             ),
         );
 
@@ -163,6 +177,7 @@ class PaymentsServiceProvider extends ServiceProvider
                 $app->make(ProjectionConfiguration::class),
                 $app->make(ProjectionFailureRecorder::class),
                 $app->make(LoggerInterface::class),
+                $app->make(ProjectionGate::class),
             ),
         );
 
@@ -215,6 +230,7 @@ class PaymentsServiceProvider extends ServiceProvider
                 $app->make(RelayHeartbeat::class),
                 $app->make(DatabaseManager::class)->connection(),
                 $app->make(RelayConfiguration::class),
+                $app->make(ProjectionGate::class),
             ),
         );
 

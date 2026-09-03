@@ -6,6 +6,7 @@ namespace Modules\Payments\Infrastructure\Console;
 
 use Illuminate\Console\Command;
 use Illuminate\Database\Connection;
+use Modules\Payments\Infrastructure\Projection\ProjectionGate;
 use Modules\Payments\Infrastructure\Relay\RelayConfiguration;
 use Modules\Payments\Infrastructure\Relay\RelayHeartbeat;
 use RuntimeException;
@@ -36,6 +37,7 @@ final class PaymentOutboxStatusCommand extends Command
         private readonly RelayHeartbeat $heartbeat,
         private readonly Connection $connection,
         private readonly RelayConfiguration $config,
+        private readonly ProjectionGate $gate,
     ) {
         parent::__construct();
     }
@@ -68,7 +70,7 @@ final class PaymentOutboxStatusCommand extends Command
      * rows still waiting out grace or backoff. Both come from one statement so they
      * describe the same instant rather than two queries racing the wall clock.
      *
-     * @return array{state: string, eligible_count: int|null, oldest_eligible_age_seconds: int|null, active_count: int|null}
+     * @return array{state: string, eligible_count: int|null, oldest_eligible_age_seconds: int|null, active_count: int|null, gate: string|null}
      */
     private function databaseStatus(): array
     {
@@ -112,6 +114,13 @@ final class PaymentOutboxStatusCommand extends Command
                 );
             }
 
+            // T11'S GATE DISTINCTION. Read in the SAME transaction as the aggregate
+            // above, so the two answers describe one instant. An operator reading
+            // this command must never mistake a closed gate for a healthy empty
+            // backlog - the same reason RelayOutcome::GateClosed exists as its own
+            // case rather than folding into NothingEligible.
+            $gate = $this->gate->inspectPaymentDetails()->value;
+
             $this->connection->commit();
 
             return [
@@ -121,6 +130,7 @@ final class PaymentOutboxStatusCommand extends Command
                     ? null
                     : (int) $row->oldest_eligible_age_seconds,
                 'active_count' => (int) $row->active_count,
+                'gate' => $gate,
             ];
         } catch (Throwable) {
             // Nothing here ever wrote a row, so there is no ambiguous outcome to
@@ -140,6 +150,7 @@ final class PaymentOutboxStatusCommand extends Command
                 'eligible_count' => null,
                 'oldest_eligible_age_seconds' => null,
                 'active_count' => null,
+                'gate' => null,
             ];
         }
     }

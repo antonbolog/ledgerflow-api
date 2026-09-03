@@ -13,11 +13,13 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Modules\Payments\Infrastructure\Persistence\RetryingAtomicTransaction;
+use Modules\Payments\Infrastructure\Projection\ProjectionGate;
 use Modules\Payments\Infrastructure\Relay\OutboxRelay;
 use Modules\Payments\Infrastructure\Relay\ProjectPaymentEvent;
 use Modules\Payments\Infrastructure\Relay\RelayConfiguration;
 use Modules\Payments\Infrastructure\Relay\RelayOutcome;
 use Modules\Payments\Tests\Integration\IntegrationDatabase;
+use Modules\Payments\Tests\Integration\ProjectionGateLocks;
 use Modules\Payments\Tests\Integration\RejectingQueue;
 use Modules\Payments\Tests\Support\RelayTransport;
 use RedisException;
@@ -148,6 +150,7 @@ function relayWithRejectingTransport(RejectingQueue $queue): OutboxRelay
             (array) config('database.redis.payments'),
         ),
         Log::getFacadeRoot(),
+        new ProjectionGate(DB::connection()),
     );
 }
 
@@ -209,6 +212,14 @@ afterEach(function (): void {
 
     IntegrationDatabase::rollbackOpenTransactions();
     IntegrationDatabase::releaseLocks();
+
+    // UNCONDITIONAL, NOT ONLY AT A TEST'S HAPPY-PATH END. payment_projection_controls
+    // is deliberately absent from IntegrationDatabase::TABLES (its seeded row is
+    // schema, not fixture data), so a test that closes the gate and then fails an
+    // assertion before reopening it would otherwise leak `rebuilding` into every
+    // later test in this process - not only in this file.
+    relayReopenGate();
+
     IntegrationDatabase::truncate();
     IntegrationDatabase::disconnectAll();
 });
@@ -766,4 +777,132 @@ it('does not retry a failed row inside the same pass', function (): void {
     // The classifier the rest of Payments uses agrees this is not a concurrency
     // error, so nothing on the retry allowlist could have made the relay loop.
     expect(RetryingAtomicTransaction::sqlStateOf(new RuntimeException('failed once')))->toBeNull();
+});
+
+/*
+|--------------------------------------------------------------------------
+| T11's shared projection gate
+|--------------------------------------------------------------------------
+|
+| Only the CLOSED-gate behaviour belongs here. The OPEN-gate case is every test
+| above this section: they all ran with a `ready` control row and nothing
+| about them changed, which is the regression boundary Slice 2 promises.
+*/
+
+/** Close the gate as a rebuild-shaped holder of the durable row would. */
+function relayCloseGate(): void
+{
+    DB::table('payment_projection_controls')->where('projection', 'payment_details')->update([
+        'state' => 'rebuilding',
+        'owner_token' => (string) Str::uuid7(),
+        'owner_pid' => 999_999,
+        'started_at' => now(),
+        'updated_at' => now(),
+    ]);
+}
+
+/** Reopen it, exactly as a completed rebuild would. */
+function relayReopenGate(): void
+{
+    DB::table('payment_projection_controls')->where('projection', 'payment_details')->update([
+        'state' => 'ready',
+        'owner_token' => null,
+        'owner_pid' => null,
+        'started_at' => null,
+        'cleared_at' => null,
+        'updated_at' => now(),
+    ]);
+}
+
+it('reports a closed gate without selecting a row, publishing or writing anything', function (): void {
+    $eventId = relayEnvelope();
+    $before = relaySnapshot($eventId);
+
+    relayCloseGate();
+
+    expect(relay()->relayOne())->toBe(RelayOutcome::GateClosed);
+
+    // NO ROW SELECTED, so nothing T7 owns moved: available_at,
+    // consecutive_transport_failures and last_transport_error are untouched by
+    // construction, not by rule.
+    expect(relaySnapshot($eventId))->toBe($before)
+        ->and(RelayTransport::size())->toBe(0)
+        ->and(DB::transactionLevel())->toBe(0)
+        ->and(DB::connection()->getPdo()->inTransaction())->toBeFalse();
+
+    relayReopenGate();
+});
+
+it('is a distinct outcome from a drained backlog, and the pass log agrees', function (): void {
+    // THE NON-VACUOUS CONTROL for the whole point of GateClosed existing as its
+    // own case: an operator must never read a closed gate as an empty backlog.
+    relayCloseGate();
+
+    expect(relay()->relayOne())->toBe(RelayOutcome::GateClosed)
+        ->and(RelayOutcome::GateClosed)->not->toBe(RelayOutcome::NothingEligible);
+
+    relayReopenGate();
+
+    // The gate reopened is the mutation: with nothing eligible, the SAME call now
+    // answers the other case.
+    expect(relay()->relayOne())->toBe(RelayOutcome::NothingEligible);
+});
+
+it('holds the gate lock on its own connection while the pass is refused by the control row', function (): void {
+    // A row-shaped fixture exists, so a relay that skipped the gate check would
+    // proceed to select and publish it instead of refusing.
+    relayEnvelope();
+    relayCloseGate();
+
+    $lockDuringCommit = [];
+
+    Event::listen(TransactionCommitting::class, function () use (&$lockDuringCommit): void {
+        $lockDuringCommit = ProjectionGateLocks::onKey(
+            ProjectionGate::CLASS_ID,
+            ProjectionGate::PAYMENT_DETAILS_OBJECT_ID,
+        );
+    });
+
+    expect(relay()->relayOne())->toBe(RelayOutcome::GateClosed);
+
+    Event::forget(TransactionCommitting::class);
+
+    // GRANTED, ON ONE BACKEND. The control row is what refused the pass, not the
+    // lock: the shared try-lock genuinely succeeded, which is D3's point - both
+    // checks are load-bearing, for different failures.
+    expect($lockDuringCommit)->toHaveCount(1)
+        ->and($lockDuringCommit[0]['mode'])->toBe('ShareLock')
+        ->and($lockDuringCommit[0]['granted'])->toBeTrue();
+
+    // THE SAME BACKEND THE REST OF THE RELAY'S TRANSACTION RUNS ON, proved by
+    // object identity rather than a second live pid read from the holder - T4's
+    // rule treats a holder's self-report of lock possession as no observation at
+    // all. OutboxRelay resolves the IDENTICAL Connection object ProjectionGate
+    // does (see "resolves onto the same connection..." below and the shared
+    // binding in PaymentsServiceProvider), so two different backends is not
+    // reachable here.
+    $relayConnection = new ReflectionProperty(OutboxRelay::class, 'connection')->getValue(relay());
+    expect($relayConnection)->toBe(DB::connection());
+
+    // Gone once the (empty) transaction ended.
+    expect(ProjectionGateLocks::onKey(ProjectionGate::CLASS_ID, ProjectionGate::PAYMENT_DETAILS_OBJECT_ID))
+        ->toBe([]);
+
+    relayReopenGate();
+});
+
+it('republishes the deferred event once the gate reopens, on the ordinary reconciliation path', function (): void {
+    // NOT BY RE-QUEUEING. Nothing was published while the gate was closed, so the
+    // row is simply still eligible once it reopens - the same mechanism T7 already
+    // owns for any other missed delivery.
+    $eventId = relayEnvelope();
+
+    relayCloseGate();
+    expect(relay()->relayOne())->toBe(RelayOutcome::GateClosed);
+
+    relayReopenGate();
+    expect(relay()->relayOne())->toBe(RelayOutcome::Published);
+
+    expect((int) relaySnapshot($eventId)['publish_count'])->toBe(1)
+        ->and(RelayTransport::size())->toBe(1);
 });

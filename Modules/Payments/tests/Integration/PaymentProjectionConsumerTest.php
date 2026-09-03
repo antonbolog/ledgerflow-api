@@ -18,8 +18,10 @@ use Modules\Payments\Infrastructure\Projection\ProjectionConfiguration;
 use Modules\Payments\Infrastructure\Projection\ProjectionEnvelopeMissing;
 use Modules\Payments\Infrastructure\Projection\ProjectionEnvelopeRejected;
 use Modules\Payments\Infrastructure\Projection\ProjectionFailureRecorder;
+use Modules\Payments\Infrastructure\Projection\ProjectionGate;
 use Modules\Payments\Infrastructure\Projection\ProjectionOutcome;
 use Modules\Payments\Tests\Integration\IntegrationDatabase;
+use Modules\Payments\Tests\Integration\ProjectionGateLocks;
 
 /*
 |--------------------------------------------------------------------------
@@ -209,6 +211,12 @@ afterEach(function (): void {
 
     IntegrationDatabase::rollbackOpenTransactions();
     IntegrationDatabase::releaseLocks();
+
+    // UNCONDITIONAL, NOT ONLY AT A TEST'S HAPPY-PATH END. See OutboxRelayTest's
+    // afterEach for why: a failed assertion between closing and reopening the gate
+    // must not leak `rebuilding` into every later test in this process.
+    projectionReopenGate();
+
     IntegrationDatabase::truncate();
     IntegrationDatabase::disconnectAll();
 });
@@ -956,6 +964,7 @@ it('cancels a statement that outlives the bound rather than waiting for the work
         ),
         resolve(ProjectionFailureRecorder::class),
         Log::getFacadeRoot(),
+        new ProjectionGate(DB::connection()),
     ));
 
     $lock = DB::connection(IntegrationDatabase::LOCK);
@@ -1226,4 +1235,139 @@ it('keeps raw exception text and payload values out of the abort log', function 
 
     expect($rendered)->not->toContain('zzz')
         ->and($rendered)->not->toContain('malformed:');
+});
+
+/*
+|--------------------------------------------------------------------------
+| T11's shared projection gate
+|--------------------------------------------------------------------------
+|
+| Only the CLOSED-gate behaviour belongs here. Every test above ran with a
+| `ready` control row, and none of it changed - the regression boundary Slice 2
+| promises for T8.
+*/
+
+/** Close the gate as a rebuild-shaped holder of the durable row would. */
+function projectionCloseGate(): void
+{
+    DB::table('payment_projection_controls')->where('projection', 'payment_details')->update([
+        'state' => 'rebuilding',
+        'owner_token' => (string) Str::uuid7(),
+        'owner_pid' => 999_999,
+        'started_at' => now(),
+        'updated_at' => now(),
+    ]);
+}
+
+/** Reopen it, exactly as a completed rebuild would. */
+function projectionReopenGate(): void
+{
+    DB::table('payment_projection_controls')->where('projection', 'payment_details')->update([
+        'state' => 'ready',
+        'owner_token' => null,
+        'owner_pid' => null,
+        'started_at' => null,
+        'cleared_at' => null,
+        'updated_at' => now(),
+    ]);
+}
+
+it('defers a delivery without locking the envelope, throwing or writing anything', function (): void {
+    $eventId = projectionEnvelope();
+    $before = projectionEnvelopeRow($eventId);
+
+    projectionCloseGate();
+
+    // NOTHING THROWN, DELIBERATELY (F5): ProjectPaymentEvent has tries = 1 and no
+    // try/catch, so an exception here would land in failed_jobs instead of being
+    // redelivered.
+    expect(projectionConsumer()->project($eventId))->toBe(ProjectionOutcome::GateDeferred);
+
+    expect(projectionReceiptCount($eventId))->toBe(0)
+        ->and(projectionReadRow($eventId))->toBeNull()
+        ->and(projectionEnvelopeRow($eventId))->toBe($before)
+        ->and(DB::transactionLevel())->toBe(0)
+        ->and(DB::connection()->getPdo()->inTransaction())->toBeFalse();
+
+    // NO ENVELOPE LOCK TAKEN: a second backend can take FOR UPDATE on this exact
+    // row immediately, with no wait and no timeout needed. A consumer that
+    // reached its own lock before checking the gate would make this block.
+    $lock = DB::connection(IntegrationDatabase::LOCK);
+    $lock->statement("set lock_timeout = '250ms'");
+    $lock->beginTransaction();
+    $lock->select('select event_id from payment_outbox where event_id = ? for update', [$eventId]);
+    $lock->rollBack();
+
+    projectionReopenGate();
+});
+
+it('leaves every column the recorder and the relay own untouched by a deferral', function (): void {
+    $eventId = projectionEnvelope();
+    $before = projectionEnvelopeRow($eventId);
+
+    projectionCloseGate();
+    projectionConsumer()->project($eventId);
+    projectionReopenGate();
+
+    $after = projectionEnvelopeRow($eventId);
+
+    // projection_failure_count, projection_failure_generation, exhausted_at,
+    // last_projection_error - and every transport column - exactly as they were.
+    // A deferral must never consume the failure budget T8 owns nor the transport
+    // budget T7 owns.
+    expect(projectionRecorderColumns($after))->toBe(projectionRecorderColumns($before))
+        ->and(projectionTransportColumns($after))->toBe(projectionTransportColumns($before))
+        ->and($after['available_at'])->toBe($before['available_at']);
+});
+
+it('is a distinct outcome from every other case, so a deferral cannot be mistaken for progress', function (): void {
+    $eventId = projectionEnvelope();
+
+    projectionCloseGate();
+
+    expect(projectionConsumer()->project($eventId))->toBe(ProjectionOutcome::GateDeferred)
+        ->and(ProjectionOutcome::GateDeferred)->not->toBe(ProjectionOutcome::Projected)
+        ->and(ProjectionOutcome::GateDeferred)->not->toBe(ProjectionOutcome::SkippedExhausted);
+
+    projectionReopenGate();
+
+    // The gate reopened is the mutation: the SAME delivery now projects normally,
+    // proving the deferral above left the envelope exactly as eligible as it
+    // started.
+    expect(projectionConsumer()->project($eventId))->toBe(ProjectionOutcome::Projected);
+});
+
+it('holds the gate lock on its own connection while a delivery is deferred by the control row', function (): void {
+    $eventId = projectionEnvelope();
+    projectionCloseGate();
+
+    $lockDuringCommit = [];
+
+    Event::listen(TransactionCommitting::class, function () use (&$lockDuringCommit): void {
+        $lockDuringCommit = ProjectionGateLocks::onKey(
+            ProjectionGate::CLASS_ID,
+            ProjectionGate::PAYMENT_DETAILS_OBJECT_ID,
+        );
+    });
+
+    expect(projectionConsumer()->project($eventId))->toBe(ProjectionOutcome::GateDeferred);
+
+    Event::forget(TransactionCommitting::class);
+
+    // GRANTED, ON ONE BACKEND. The control row is what deferred the delivery, not
+    // the lock - both checks are load-bearing, for different failures (D3).
+    expect($lockDuringCommit)->toHaveCount(1)
+        ->and($lockDuringCommit[0]['mode'])->toBe('ShareLock')
+        ->and($lockDuringCommit[0]['granted'])->toBeTrue();
+
+    // THE SAME BACKEND THE CONSUMER'S TRANSACTION RUNS ON, proved by object
+    // identity - the stronger evidence T4's rule about self-reported lock
+    // possession leaves available. PaymentProjectionConsumer resolves the
+    // IDENTICAL Connection object ProjectionGate does, per the shared binding in
+    // PaymentsServiceProvider.
+    $consumerConnection = new ReflectionProperty(PaymentProjectionConsumer::class, 'connection')
+        ->getValue(projectionConsumer());
+    expect($consumerConnection)->toBe(DB::connection());
+
+    projectionReopenGate();
 });

@@ -23,8 +23,13 @@ smallest relevant document under `docs/specifications/payments/` and any linked 
   retry SQLSTATEs, and outbox ownership as compatibility contracts.
 - Preserve one-connection transaction ownership for idempotency receipt, stored event, and outbox.
 - Relay transport failures and confirmed projection failures have separate counters and owners.
-- Keep the T7 relay free of the projection advisory gate until T11 introduces the real control row,
-  key derivation, and deferral semantics.
+- The relay, consumer, transactional query adapter, and write path each check T11's shared projection
+  gate as the first statement inside the transaction they already open, per
+  [ADR 0005](../../docs/adr/0005-payments-projection-gate-and-rebuild-ownership.md). A closed gate never
+  raises an exception from the relay or the consumer and locks no row; POST and GET raise a typed
+  ProjectionRebuilding application exception, rendered as 503 with Retry-After: 1. No traffic-path
+  deferral may consume projection failure budget, transport failure budget, or outbox eligibility. The
+  rebuild command itself (exclusive lock, clear, replay, recovery) is not yet built.
 - Never log raw idempotency keys, credentials, exception text in health JSON, or sensitive payloads.
 
 ## Evidence

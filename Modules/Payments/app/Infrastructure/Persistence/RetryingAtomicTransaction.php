@@ -10,6 +10,8 @@ use Illuminate\Database\ConnectionInterface;
 use Illuminate\Database\DeadlockException;
 use Modules\Payments\Application\Initiation\AtomicTransaction;
 use Modules\Payments\Application\Initiation\IdempotencyContention;
+use Modules\Payments\Application\Initiation\ProjectionRebuilding;
+use Modules\Payments\Infrastructure\Projection\ProjectionGate;
 use Override;
 use PDOException;
 use Throwable;
@@ -51,7 +53,10 @@ final readonly class RetryingAtomicTransaction implements AtomicTransaction
      */
     public const array RETRYABLE = ['40P01', '40001', '55P03'];
 
-    public function __construct(private ConnectionInterface $connection) {}
+    public function __construct(
+        private ConnectionInterface $connection,
+        private ProjectionGate $gate,
+    ) {}
 
     /**
      * The loop has no exit condition ON PURPOSE: it can only end by returning a
@@ -67,7 +72,23 @@ final readonly class RetryingAtomicTransaction implements AtomicTransaction
             try {
                 // ONE inner attempt. The budget lives in this loop, and Laravel's own
                 // retry count would multiply with it — three times three is nine.
-                return $this->connection->transaction($work, 1);
+                //
+                // T11'S GATE, INSIDE $work RATHER THAN INSIDE InitiatePayment. The
+                // gate is an Infrastructure concern and InitiatePayment must not name
+                // it — the module boundary rule permits Application to reference only
+                // its own module's Domain/Application and other modules' Application
+                // contracts. Wrapping the caller's closure here is what makes the
+                // check the first statement inside the transaction on every attempt,
+                // re-acquired per attempt exactly as the specification requires. A
+                // closed gate throws ProjectionRebuilding, which carries no SQLSTATE
+                // and is therefore never retried below — see ProjectionRebuilding.
+                return $this->connection->transaction(function () use ($work): mixed {
+                    if (! $this->gate->inspectPaymentDetails()->isOpen()) {
+                        throw ProjectionRebuilding::duringInitiation();
+                    }
+
+                    return $work();
+                }, 1);
             } catch (Throwable $e) {
                 // BEFORE CLASSIFYING, BEFORE RETHROWING, BEFORE RETRYING.
                 $this->rollBackTransactionLaravelLeaked();

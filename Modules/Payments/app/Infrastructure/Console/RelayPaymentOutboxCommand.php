@@ -93,6 +93,16 @@ final class RelayPaymentOutboxCommand extends Command
                     break;
                 }
 
+                // A DISTINCT STOP REASON FROM 'drained', DELIBERATELY. T11's gate was
+                // closed before eligibility was even selected; an operator reading
+                // the pass log must be able to tell "backlog is empty" apart from
+                // "a rebuild is in progress" - see RelayOutcome::GateClosed.
+                if ($outcome === RelayOutcome::GateClosed) {
+                    $stopReason = 'gate_closed';
+
+                    break;
+                }
+
                 $attempted++;
 
                 match ($outcome) {

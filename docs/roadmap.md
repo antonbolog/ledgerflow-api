@@ -23,13 +23,18 @@ table. **T9 is complete**, closing the read path: authenticated `GET /api/paymen
 projected `200`, pending `202` and `payment_not_found` `404`, evidence in the same table. That
 completes every M4 task; M4's `POST -> outbox -> Redis -> consumer -> GET` exit is **composed from
 T6, T7, T8 and T9 evidence rather than one measured end-to-end run**, and the full-chain resilience
-matrix stays [T12's](testing/payments-resilience.md). **T10 implementation and local validation are complete; shipping is pending**: its contracts are
+matrix stays [T12's](testing/payments-resilience.md). **T10 is complete and shipped** in pull
+request #11, merged to `main` as `a41b1d6`: its contracts are
 reconciled in
 [verification and rebuild](specifications/payments/verification-and-rebuild.md),
 `payments:projections:verify` and `payments:outbox:repair` are implemented, with an
 [operator procedure](operations/runtime-contract.md#manual-verification-and-targeted-repair) and
 [executable evidence](specifications/payments/verification-and-rebuild.md#t10-implementation-evidence).
-The final validation checkpoint records the split CI execution and successful image-stage retry; T11 remains next.
+The final validation checkpoint records the split CI execution and successful image-stage retry.
+**T11 is in progress: the control-row migration, shared gate primitive, and traffic acquisition on
+all four paths (`POST`, `GET`, the relay, and the consumer) are implemented.**
+The bounded batch rebuild and recovery remain pending under
+[ADR 0005](adr/0005-payments-projection-gate-and-rebuild-ownership.md).
 
 ## Outcome
 
@@ -135,7 +140,7 @@ Complete the asynchronous tracer bullet on Redis/Horizon.
   types, one forward migration, no new Composer dependency. Recorded in
   [ADR 0004](adr/0004-lock-through-push-outbox-relay.md), which also records HS-1: **no shared
   projection gate is acquired**, deliberately deferred to T11's reciprocal obligation in
-  [verification and rebuild](specifications/payments/verification-and-rebuild.md#t7s-reciprocal-obligation-the-gate-does-not-exist-yet-in-the-relay).
+  [verification and rebuild](specifications/payments/verification-and-rebuild.md#t7s-reciprocal-obligation-discharged-by-t11-slice-2).
 - T8 — **Complete.** The Horizon-supervised `payments-projection` consumer with marker self-healing;
   visible receipt-without-row, read-row-mismatch and contradictory-identity failures; the
   `payment_projector_receipts`/`payment_details` schema and a monotonic
@@ -150,7 +155,7 @@ Complete the asynchronous tracer bullet on Redis/Horizon.
   dependency. Evidence in
   [projection and query](specifications/payments/projection-and-query.md#implementation-evidence).
   **No shared projection gate was added**: T11 keeps the reciprocal obligation recorded in
-  [verification and rebuild](specifications/payments/verification-and-rebuild.md#t8s-reciprocal-obligation-the-consumer-arrives-without-a-gate-either).
+  [verification and rebuild](specifications/payments/verification-and-rebuild.md#t8s-reciprocal-obligation-discharged-by-t11-slice-2).
   T8's crash evidence is a deterministic in-process commit-boundary failpoint plus a live Horizon
   stop/backlog/restart smoke; literal SIGTERM/SIGKILL process suites stay
   [T12's](testing/payments-resilience.md).
@@ -193,11 +198,19 @@ backlog, scheduler-stop, and poison-handler cases.
 
 Detect and repair derived-state corruption while keeping partial rebuilds invisible.
 
-- T10 - Bounded projection/outbox verification and targeted repair. **Implemented and locally validated; shipping pending.**
+- T10 - Bounded projection/outbox verification and targeted repair. **Complete**, shipped in pull request #11.
   Four read-only snapshot passes plus duplicate detection, and quiesced single-envelope repair preserving existing exhaustion and failure history.
   Contracts and measured limits live in [verification and rebuild](specifications/payments/verification-and-rebuild.md#t10-implementation-evidence); the [runtime contract](operations/runtime-contract.md#manual-verification-and-targeted-repair) owns the operator procedure.
   No new migration, index, dependency, recurring schedule, worker, projection gate, or read-model rebuild.
-- T11 — Implement connection-affine gated batch rebuild and recovery.
+- T11 - Implement connection-affine gated batch rebuild and recovery. **In progress: Slices 1-2 shipped
+  the control-row migration, gate primitive, and traffic acquisition on all four paths; the bounded
+  batch rebuild and recovery are not yet built.**
+  [ADR 0005](adr/0005-payments-projection-gate-and-rebuild-ownership.md) owns the gate key, the
+  fail-closed control row plus advisory lock, the non-blocking traffic acquisition, the budget-free
+  deferral, the lock-first acquisition order, and the ownership fence that rests on lock possession
+  rather than on a token, a stored pid, or a successful query. Contracts are reconciled in
+  [verification and rebuild](specifications/payments/verification-and-rebuild.md#projection-gate).
+  Payments traffic does not call the primitive yet; rebuild and recovery remain pending.
 - T12 — Prove end-to-end and process-level resilience failures.
 - T13 — Publish the five-minute resilience demo and operational guide.
 

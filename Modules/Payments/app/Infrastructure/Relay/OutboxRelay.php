@@ -6,6 +6,7 @@ namespace Modules\Payments\Infrastructure\Relay;
 
 use Illuminate\Contracts\Queue\Factory as QueueFactory;
 use Illuminate\Database\Connection;
+use Modules\Payments\Infrastructure\Projection\ProjectionGate;
 use PDOException;
 use Psr\Log\LoggerInterface;
 use RedisException;
@@ -17,7 +18,7 @@ use Throwable;
  *
  *     BEGIN
  *     set local statement_timeout
- *     [T11 acquires the shared projection gate HERE, before eligibility selection]
+ *     SELECT pg_try_advisory_xact_lock_shared(...); SELECT state FROM ...   <- T11's gate
  *     SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1
  *     push(ProjectPaymentEvent(event_id))        <- inside the open transaction
  *     UPDATE transport state
@@ -67,6 +68,7 @@ final readonly class OutboxRelay
         private QueueFactory $queue,
         private RelayConfiguration $config,
         private LoggerInterface $logger,
+        private ProjectionGate $gate,
     ) {}
 
     public function relayOne(): RelayOutcome
@@ -88,6 +90,19 @@ final readonly class OutboxRelay
             // stalls. SET LOCAL, so it dies with the transaction instead of leaking
             // into whatever the connection does next.
             $this->connection->statement('set local statement_timeout = '.$this->config->statementTimeoutMs);
+
+            // T11'S GATE, FIRST, BEFORE ELIGIBILITY SELECTION. A closed gate commits
+            // this (empty) transaction and returns immediately: no row is selected,
+            // so no available_at, no consecutive_transport_failures and no
+            // last_transport_error are ever written - the transport budget is
+            // untouched by construction, not by rule. See ProjectionGate and D5 in
+            // ADR 0005.
+            if (! $this->gate->inspectPaymentDetails()->isOpen()) {
+                $commitAttempted = true;
+                $this->connection->commit();
+
+                return RelayOutcome::GateClosed;
+            }
 
             $row = $this->connection->table('payment_outbox')
                 ->select('event_id', 'consecutive_transport_failures')

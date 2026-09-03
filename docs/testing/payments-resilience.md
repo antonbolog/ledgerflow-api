@@ -132,15 +132,29 @@ Targeted outbox repair (T10):
 - Every other envelope, canonical event, idempotency receipt, projector receipt, and read row is
   unchanged.
 
-Rebuild (T11):
+Rebuild (T11). **Designed, not implemented**; see
+[ADR 0005](../adr/0005-payments-projection-gate-and-rebuild-ownership.md). Two rows below are sharper
+than the original wording because the design made them so: a fenced run must be refused **before** any
+takeover has happened, when its own token still matches, and a lost `COMMIT` response is reported as
+an unknown outcome rather than as a rollback.
 
 - Rebuild waits for a consumer transaction that started before the rebuild flag.
-- Lock timeout clears no projection data.
-- Pinned-session reconnect aborts rather than assuming the advisory lock survived.
-- Replay uses bounded global-ID batches and recreates deterministic business state and receipts.
-- Stale queued jobs after replay are ignored through recreated receipts.
-- Kill after a committed batch leaves `rebuilding`; the next authorized run clears and restarts.
-- Guarded recovery returns to `ready` without replay only when no projection mutation began.
+- Lock timeout clears no projection data and writes no control-row column.
+- Pinned-session reconnect aborts rather than assuming the advisory lock survived, **including while
+  the run's own owner token still matches because no takeover has happened**. A token-only fence is the
+  non-vacuous control: it must be observed to let the same run proceed.
+- A rebuild whose `COMMIT` response is lost reports an unknown outcome, never a rollback, and recovery
+  reads the durable row instead of trusting that report.
+- Replay uses bounded global-ID batches over canonical `stored_events` and recreates deterministic
+  business state and receipts.
+- Stale queued jobs after replay are ignored through recreated receipts, without draining any queue.
+- Kill after a committed batch leaves `rebuilding` and a non-null `cleared_at`; the next authorized run
+  clears and restarts.
+- A takeover, and a run that fails before its own clear, both preserve an inherited `cleared_at`.
+- Guarded recovery returns to `ready` without replay only when the durable row proves no clear was
+  committed.
+- Traffic reaching a closed gate is deferred or refused without consuming poison or transport budget,
+  and a deferred delivery never reaches `failed_jobs`.
 
 **Evidence ownership.** T10 owns the two groups named above, and **both are delivered**, proved by
 real-transaction integration suites that commit without `RefreshDatabase`, coordinate through

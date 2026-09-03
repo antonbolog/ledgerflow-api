@@ -51,6 +51,9 @@ final class IntegrationDatabase
     /** `lock_not_available` — what PostgreSQL raises when lock_timeout expires. */
     public const string LOCK_TIMEOUT_SQLSTATE = '55P03';
 
+    /** Whether ensureSchema() has already applied pending migrations this process. */
+    private static bool $schemaEnsured = false;
+
     /**
      * Truncated in dependency order, before AND after every test.
      *
@@ -89,12 +92,39 @@ final class IntegrationDatabase
      *
      * Idempotent, and modelled on SpikeDatabase::ensureSchema(), which solved the
      * same problem for T3/T4.
+     *
+     * ONCE PER PROCESS, NOT GATED ON ONE TABLE NAME. An earlier version ran
+     * migrations only when `payment_idempotency_receipts` was missing, which is
+     * true exactly once in a test database's life. Every migration added after
+     * that point was therefore never applied to an existing ledgerflow_test, and
+     * this suite failed on the new relation while `make test` looked healthy on a
+     * machine that happened to have dropped its database recently. FOUND THAT WAY
+     * by T11's control-row migration.
+     *
+     * `migrate` is already idempotent — it applies what is pending and nothing
+     * else — so the static flag is about not paying for that check on every one
+     * of this suite's tests, not about correctness.
      */
     public static function ensureSchema(): void
     {
-        if (! Schema::hasTable('payment_idempotency_receipts')) {
-            Artisan::call('migrate', ['--force' => true]);
+        // THE TABLE CHECK IS THE SELF-HEAL, and it must stay. Another suite in
+        // this process can drop every table under us — RefreshDatabase's
+        // migrate:fresh does exactly that — and without this the rest of the run
+        // would fail on a missing relation rather than rebuild.
+        //
+        // THE STATIC FLAG IS THE PENDING-MIGRATION PATH, and it is the half that
+        // was missing. `payment_idempotency_receipts` exists exactly once in a
+        // database's life, so a version gated only on it never applied a
+        // migration added later: T11's control row was invisible to an existing
+        // ledgerflow_test while `make test` looked healthy on a machine that had
+        // dropped its database recently.
+        if (self::$schemaEnsured && Schema::hasTable('payment_idempotency_receipts')) {
+            return;
         }
+
+        Artisan::call('migrate', ['--force' => true]);
+
+        self::$schemaEnsured = true;
     }
 
     /**
