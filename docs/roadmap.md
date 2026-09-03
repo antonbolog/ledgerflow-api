@@ -23,7 +23,13 @@ table. **T9 is complete**, closing the read path: authenticated `GET /api/paymen
 projected `200`, pending `202` and `payment_not_found` `404`, evidence in the same table. That
 completes every M4 task; M4's `POST -> outbox -> Redis -> consumer -> GET` exit is **composed from
 T6, T7, T8 and T9 evidence rather than one measured end-to-end run**, and the full-chain resilience
-matrix stays [T12's](testing/payments-resilience.md). **T10 is next.**
+matrix stays [T12's](testing/payments-resilience.md). **T10 implementation and local validation are complete; shipping is pending**: its contracts are
+reconciled in
+[verification and rebuild](specifications/payments/verification-and-rebuild.md),
+`payments:projections:verify` and `payments:outbox:repair` are implemented, with an
+[operator procedure](operations/runtime-contract.md#manual-verification-and-targeted-repair) and
+[executable evidence](specifications/payments/verification-and-rebuild.md#t10-implementation-evidence).
+The final validation checkpoint records the split CI execution and successful image-stage retry; T11 remains next.
 
 ## Outcome
 
@@ -187,7 +193,10 @@ backlog, scheduler-stop, and poison-handler cases.
 
 Detect and repair derived-state corruption while keeping partial rebuilds invisible.
 
-- T10 — Implement bounded projection/outbox verification and targeted repair.
+- T10 - Bounded projection/outbox verification and targeted repair. **Implemented and locally validated; shipping pending.**
+  Four read-only snapshot passes plus duplicate detection, and quiesced single-envelope repair preserving existing exhaustion and failure history.
+  Contracts and measured limits live in [verification and rebuild](specifications/payments/verification-and-rebuild.md#t10-implementation-evidence); the [runtime contract](operations/runtime-contract.md#manual-verification-and-targeted-repair) owns the operator procedure.
+  No new migration, index, dependency, recurring schedule, worker, projection gate, or read-model rebuild.
 - T11 — Implement connection-affine gated batch rebuild and recovery.
 - T12 — Prove end-to-end and process-level resilience failures.
 - T13 — Publish the five-minute resilience demo and operational guide.

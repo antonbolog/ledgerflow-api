@@ -76,10 +76,19 @@ marker.
   exhaustion state.
 - `payment_projector_receipts` owns idempotent projector completion by `(projector_name, event_id)`.
 - `payment_details` owns queryable payment state.
-- `payment_projection_controls` owns durable `ready`/`rebuilding` operator-visible state; advisory
-  locks provide mutual exclusion.
+- `payment_projection_controls` is planned for T11, not present: it will own durable
+  `ready`/`rebuilding` state, with advisory locks providing mutual exclusion.
+
+## Verification and targeted repair
+
+The manual verifier compares canonical history and derived state in one read-only snapshot through four bounded passes.
+Targeted outbox repair restores only one envelope under an explicit delivery-quiescence acknowledgement, preserving existing failure history and exhaustion.
+It does not rebuild the read model, alter HTTP idempotency receipts, or enable any new runtime process.
+See the [operator procedure](../operations/runtime-contract.md#manual-verification-and-targeted-repair) and the [canonical contract](../specifications/payments/verification-and-rebuild.md).
 
 ## Rebuild path
+
+The following gate and rebuild path are planned for T11, not implemented by T10.
 
 A controlled rebuild closes only Payments traffic and workers, acquires an exclusive
 connection-affine PostgreSQL advisory lock, clears derived projection state, and replays stored

@@ -103,6 +103,63 @@ message, and correlation identifiers. At minimum expose:
 The verifier reports corruption; it does not repair or rebuild automatically. Repair and rebuild
 remain explicit developer/operator procedures with audit evidence.
 
+**T10's two commands are implemented, and neither adds a process.**
+`payments:projections:verify` is a manual read-only command that stays **unscheduled**: no recurring
+schedule entry, queue, Horizon supervisor, or deployment automation is introduced with it, and a
+scheduled run waits for a monitoring and alert destination to exist. `payments:outbox:repair
+{eventId}` is an **offline delivery operation**: the operator stops the scheduler and Horizon together
+through `make projection-stop`, confirms that every delivery and failure-recorder process has drained
+(including standalone consumers, manual commands, and processes on other hosts, none of which the
+command can discover), passes the explicit `--delivery-quiesced` acknowledgement, then verifies again
+and resumes through `make projection-start`. The acknowledgement is the operator's assertion recorded in
+the audit, not machine-verified proof.
+
+That audit is **structured application logs correlated by one operation identifier, not a new table**.
+Commit and log persistence are not one transaction, so an uncertain outcome is resolved by inspecting
+state or re-running verification, never by repeating the mutation. Contracts in
+[verification and rebuild](../specifications/payments/verification-and-rebuild.md).
+
+### Manual verification and targeted repair
+
+Use the existing running `app` container for these operator commands; do not run host PHP.
+The commands use that container's configured database, so confirm the intended environment before repair.
+They are operational actions, not substitutes for `make check` or `make ci`.
+
+1. Run `docker compose exec -T app php artisan payments:projections:verify` and retain its JSON and exit status.
+   Verification may run while delivery is active and does not stop workers or mutate data.
+2. Interpret the verification exit code before choosing an action:
+   `0` means consistent or ordinary in-flight delivery; `1` means confirmed inconsistency;
+   `2` means an incomplete audit or invalid configuration; `3` means operational attention for overdue delivery, exhaustion, or future event time.
+   An incomplete report never establishes that the remaining history is clean.
+3. If a finding requires correction of one outbox envelope, run `make projection-stop`.
+   Independently confirm every scheduler, consumer, manual delivery command and delayed failure recorder has finished, including other hosts.
+   Stopping the local pair alone is insufficient; the acknowledgement flag does not discover workers.
+4. Run `docker compose exec -T app php artisan payments:outbox:repair <event-id> --delivery-quiesced`, replacing `<event-id>` with the validated durable event UUID, not the payment ID.
+   Preserve the JSON, exit status and `operation_id` for audit correlation.
+5. Run a fresh verification and assess all remaining findings before resuming the pair with `make projection-start`.
+   A corrected but unprojected envelope can remain overdue while workers are stopped; that alone does not mean repair failed.
+   Repair does not clear exhaustion: only an explicitly chosen `payments:outbox:retry <event-id>` reactivates an exhausted envelope after its cause is corrected.
+   A receipt without its read row still requires T11 recovery, not repeated envelope repair or manual replay.
+6. When resumption is appropriate, verify again after delivery has had an opportunity to converge.
+   Keep unresolved read-model corruption visible; T10 provides no shared gate or rebuild command.
+
+Repair exit `0` means `created`, `repaired`, or `unchanged`, with the final log call succeeding.
+Exit `1` is an expected refusal; exit `2` is invalid input, runtime/timeout failure, audit failure, or commit uncertainty.
+Always inspect `mutation_state`: `committed` with `audit_failed` must not be described as rollback, and `unknown` must not be treated as no mutation.
+A failed final audit preserves an already known `rolled_back`, `unknown`, or `no_changes` state.
+Do not automatically repeat repair after a failed or missing result; inspect durable state and obtain a fresh verification first.
+Log success is not an atomic durable audit ledger, and a killed process or unavailable stdout may leave no final JSON.
+
+The verifier has no task-specific CLI options.
+`PAYMENTS_VERIFICATION_BATCH_SIZE` defaults to 100 (1-1000), `PAYMENTS_VERIFICATION_EXAMPLE_LIMIT` to 50 (0-200), and `PAYMENTS_VERIFICATION_GRACE_SECONDS` to 30 (1-86400), through `config/payments.php`.
+The shipped safety limits are a 2-second statement timeout, a 120-second audit transaction and a 64-KiB payload inspection cap; repair uses 2-second statements and a 10-second transaction.
+These limits are not throughput or whole-process wall-clock guarantees.
+All invocation output carries safe categories and field names, never raw payment payloads or exception text.
+Invalid task-specific arguments/options return exit `2` and `invalid_invocation` without scanning or mutation.
+
+Executable evidence and the limits of the concurrency and query-plan claims live in the
+[T10 evidence table](../specifications/payments/verification-and-rebuild.md#t10-implementation-evidence).
+
 ## Messaging ownership
 
 The initial logical queue is `payments-projection` on Redis, supervised by Horizon:

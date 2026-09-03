@@ -211,6 +211,14 @@ successful reset makes the corrected row immediately eligible again in the same 
 Ordinary transport scheduling stays the relay's, unchanged. See
 [outbox delivery](outbox-delivery.md) for that ownership split rather than a restatement here.
 
+**T10's `payments:outbox:repair {eventId} --delivery-quiesced` does not weaken this.** It repairs one derived
+outbox envelope and preserves `exhausted_at`, `projection_failure_count` and
+`projection_failure_generation`, so operator retry stays the sole reactivation path. It reads the
+named `payment_details` projector receipt to decide the completion marker but **never creates or
+modifies a projector receipt or a `payment_details` row**, so a receipt without its read row survives
+repair as a reported inconsistency; read-model recovery is T11's rebuild. Contract in
+[verification and rebuild](verification-and-rebuild.md#targeted-outbox-repair).
+
 ## Acceptance criteria
 
 T8:
