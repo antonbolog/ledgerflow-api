@@ -25,12 +25,12 @@ algorithm, and read-model recovery stay T11's, and the barrier-coordinated proce
 T12's. See the [roadmap](../../roadmap.md) for task state.
 
 **T11's design is recorded below and in [ADR 0005](../../adr/0005-payments-projection-gate-and-rebuild-ownership.md).**
-The control row, the gate primitive, and traffic acquisition on all four paths (`POST`, the
-transactional `GET`, the relay, and the consumer) are implemented, per the Slice 1 and Slice 2
-evidence below. The bounded batch rebuild, its ownership fence, and recovery are **not**: nothing in
-the repository clears or replays `payment_details` today, and `503 projection_rebuilding` can only be
-observed by manually setting the control row, never by a real rebuild in progress. Those clauses
-describe approved intent, and each states what still has no producer.
+The control row, the gate primitive, traffic acquisition on all four paths (`POST`, the transactional
+`GET`, the relay, and the consumer), and the bounded batch rebuild with its ownership fence are
+implemented, per the Slice 1 through Slice 3 evidence below. `503 projection_rebuilding` can now be
+observed from a real rebuild in progress, not only from a manually set control row. Recovery decisions
+(guarded recovery and takeover) are **not** implemented: that clause describes approved intent and
+still has no producer.
 
 ## Verification
 
@@ -624,8 +624,8 @@ inference is wrong.
 
 ## Rebuild algorithm
 
-**T11's, and not implemented.** Targeted repair reconstructs one outbox envelope and never touches
-the read model, so it is not a substitute for this rebuild.
+**Implemented in T11 Slice 3.** Targeted repair reconstructs one outbox envelope and never touches
+the read model, so it was never a substitute for this rebuild.
 
 1. Acquire the session-level exclusive advisory lock on one pinned connection, blocking within a
    bounded `lock_timeout`, which also waits for prior shared transactions to finish.
@@ -750,6 +750,76 @@ at durable precision, so a rebuild reproduces the rows the consumer produced.
 
 Stale queued duplicates delivered after a successful rebuild are harmless through recreated receipts
 and are not actively drained; no queue is flushed.
+
+### T11 Slice 3 implementation evidence
+
+`payments:projections:rebuild --confirm-rebuild` is implemented as `DatabaseProjectionRebuild`, one
+pinned `Connection` with its reconnector replaced for the run's duration (F3), behind the
+`ProjectionRebuild` port. Phase 1 acquires the session-level exclusive lock with a bounded, blocking
+`lock_timeout`, reset to `default` immediately after acquisition. Phase 2 claims ownership in a short
+`FOR UPDATE` transaction that never names `cleared_at`. The clear transaction captures the watermark,
+sets `cleared_at = coalesce(cleared_at, now())`, and deletes `payment_details` and the named projector's
+receipts, all three in one commit. Replay walks canonical `stored_events` in keyset batches through
+`PaymentInitiatedEnvelope::fromStoredEventRow()` - the same decoder T10's verifier and repair already
+share - inserting the receipt, the read row, and reconciling the completion marker per event. The ready
+transition nulls `cleared_at` and reopens the gate. The ownership fence (`assertOwnership()`) runs at
+all three checkpoints, asserting the control row's token under `FOR UPDATE` and this backend's own
+`pg_locks` possession of the exclusive lock; a failure at either check aborts the run without a further
+write and is never ambiguous, because it is raised from a plain read before any commit is attempted.
+Every transactional step classifies a lost `COMMIT` response as `commit_outcome_unknown` rather than
+inferring a rollback, matching the relay's, the consumer's, and targeted repair's own boundary.
+
+**Both fence halves are independently proven**, not only in combination. A dedicated test releases the
+pinned session's own exclusive lock directly (`pg_advisory_unlock`, on the same live, healthy
+connection - never a kill and never a reconnect) while state and token are left untouched, so the row
+half of the fence would pass on its own; the full fence still refuses, and a non-vacuous control asks
+the identical row-only question at the identical moment and confirms it would have answered "still
+owned". This isolates the lock-possession check from both a takeover and from F3's reconnector defence,
+which the test also asserts was never exercised.
+
+Everything from the intent log onward runs under one guaranteed release: `runUnderExclusiveLock()`
+wraps `runClaimedRebuild()` in a `finally` that releases the exclusive lock on every exit, including a
+broken logger on the intent record - the first write attempted after the lock is confirmed held, before
+`claimOwnership()` ever runs, and reported as `intent_audit_failed` (matching `RepairReason`'s own case
+exactly) rather than a database error. A broken logger on the *completion* record, staged after
+`transitionToReady()` has already committed, is reported as `audit_failed` carrying the real final
+`high_watermark`/`events_replayed`/`batches_committed` - a failure exit, deliberately, because a broken
+audit sink means the run cannot vouch for its own record, but never `database_error`, which would
+wrongly suggest the projection stayed `rebuilding`.
+
+Reconnection suppression is scoped to the run, not to the connection's remaining lifetime:
+`rebuild()`'s own outer `finally` restores the reconnector captured before installing the throwing one,
+on every exit - refused before the lock was ever acquired, completed, or aborted mid-replay alike -
+which is what "for the duration of this run" actually promises for a connection object every other
+Payments adapter in the same process may still need afterwards.
+
+Token minting and the backend-pid read that precede the intent log are caught the same way, and
+separately from it: a connection lost the instant after the exclusive lock is acquired - a realistic
+PostgreSQL event, not only a mid-transaction one - is reported as `database_error` rather than folded
+into `intent_audit_failed`, and neither classification touches `runStep()`'s own commit-uncertainty
+logic, because nothing here has opened a transaction yet.
+
+`ProjectionRebuildTest` proves, against real PostgreSQL and without `RefreshDatabase`: phase 1 genuinely
+blocks on a traffic-shaped shared holder on a second connection and refuses with `lock_timeout` writing
+no control-row column, then succeeds once the holder releases; replay walks more than one keyset batch
+across an ID gap left by a foreign canonical event and reproduces the exact columns
+`PaymentProjectionConsumer` would have written, including `initiated_at` at microsecond precision;
+receipts are recreated for exactly the named projector; the completion marker is reconciled with every
+other `payment_outbox` column and row, `stored_events`, and `payment_idempotency_receipts` left
+untouched; a stale duplicate delivered after a successful rebuild takes the consumer's own duplicate
+path harmlessly; the lock half of the fence is caught in isolation as described above; a takeover
+simulated between two replay batches is caught by the token check at checkpoint 2 and again immediately
+before the ready transition at checkpoint 3, in both cases with the run reporting its partial progress
+and the control row never reaching `ready`; a real `pg_terminate_backend` against the pinned
+connection's own backend between two batches, confirmed released through a `pg_locks` barrier rather
+than a sleep, aborts the run with no further write; a connection lost immediately after acquiring the
+exclusive lock, injected deterministically on the `pg_backend_pid()` read itself, reports
+`database_error` with the control row proven untouched; a failed intent log and a failed completion log
+are each reproduced, with the lock's release witnessed directly from `pg_locks` on all three; and the
+reconnector's restoration is proven on all three exit families - refused, completed, and aborted.
+
+Guarded recovery, takeover's own ownership-claim branch, and the chained clear/kill/takeover invariant
+across multiple runs are Slice 4's. `make check` exited `0` on 2026-09-03: 671 tests, 3801 assertions.
 
 ## Deferred evolution
 

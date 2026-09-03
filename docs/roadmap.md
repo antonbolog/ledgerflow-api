@@ -31,9 +31,10 @@ reconciled in
 [operator procedure](operations/runtime-contract.md#manual-verification-and-targeted-repair) and
 [executable evidence](specifications/payments/verification-and-rebuild.md#t10-implementation-evidence).
 The final validation checkpoint records the split CI execution and successful image-stage retry.
-**T11 is in progress: the control-row migration, shared gate primitive, and traffic acquisition on
-all four paths (`POST`, `GET`, the relay, and the consumer) are implemented.**
-The bounded batch rebuild and recovery remain pending under
+**T11 is in progress: the control-row migration, shared gate primitive, traffic acquisition on all
+four paths (`POST`, `GET`, the relay, and the consumer), and the bounded batch rebuild with its
+ownership fence are implemented.**
+Recovery (guarded recovery and takeover) remains pending under
 [ADR 0005](adr/0005-payments-projection-gate-and-rebuild-ownership.md).
 
 ## Outcome
@@ -202,15 +203,15 @@ Detect and repair derived-state corruption while keeping partial rebuilds invisi
   Four read-only snapshot passes plus duplicate detection, and quiesced single-envelope repair preserving existing exhaustion and failure history.
   Contracts and measured limits live in [verification and rebuild](specifications/payments/verification-and-rebuild.md#t10-implementation-evidence); the [runtime contract](operations/runtime-contract.md#manual-verification-and-targeted-repair) owns the operator procedure.
   No new migration, index, dependency, recurring schedule, worker, projection gate, or read-model rebuild.
-- T11 - Implement connection-affine gated batch rebuild and recovery. **In progress: Slices 1-2 shipped
-  the control-row migration, gate primitive, and traffic acquisition on all four paths; the bounded
-  batch rebuild and recovery are not yet built.**
+- T11 - Implement connection-affine gated batch rebuild and recovery. **In progress: Slices 1-3 shipped
+  the control-row migration, gate primitive, traffic acquisition on all four paths, and the bounded
+  batch rebuild with its ownership fence; recovery (guarded recovery and takeover) is not yet built.**
   [ADR 0005](adr/0005-payments-projection-gate-and-rebuild-ownership.md) owns the gate key, the
   fail-closed control row plus advisory lock, the non-blocking traffic acquisition, the budget-free
   deferral, the lock-first acquisition order, and the ownership fence that rests on lock possession
   rather than on a token, a stored pid, or a successful query. Contracts are reconciled in
-  [verification and rebuild](specifications/payments/verification-and-rebuild.md#projection-gate).
-  Payments traffic does not call the primitive yet; rebuild and recovery remain pending.
+  [verification and rebuild](specifications/payments/verification-and-rebuild.md#projection-gate) and
+  its [rebuild algorithm](specifications/payments/verification-and-rebuild.md#rebuild-algorithm).
 - T12 — Prove end-to-end and process-level resilience failures.
 - T13 — Publish the five-minute resilience demo and operational guide.
 

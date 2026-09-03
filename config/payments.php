@@ -210,4 +210,39 @@ return [
         'max_payload_bytes' => 65_536,
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Payments projection rebuild
+    |--------------------------------------------------------------------------
+    |
+    | Bounds for `payments:projections:rebuild --confirm-rebuild`.
+    | Modules\Payments\Infrastructure\Rebuild\RebuildConfiguration converts and
+    | validates this array once, before the exclusive gate lock is even
+    | requested.
+    |
+    | batch_size is an operational dial, same as the relay's and the audit's:
+    | an operator tunes it for their history size. lock_timeout_ms and
+    | statement_timeout_ms bound how long a destructive, gate-closing command
+    | may wait or hold one statement; both are env-tunable for the same reason
+    | the audit's own bounds are, but a widened value changes only how long the
+    | rebuild waits or runs, never what it is permitted to do.
+    |
+    */
+
+    'rebuild' => [
+
+        // Canonical rows per replay batch, committed together with their
+        // derived payment_details rows and projector receipts.
+        'batch_size' => (int) env('PAYMENTS_REBUILD_BATCH_SIZE', 500),
+
+        // Phase 1's bound: how long the exclusive lock acquisition waits for a
+        // live rebuild - or every shared-holding traffic transaction already
+        // in flight - to finish. A refusal here writes nothing at all.
+        'lock_timeout_ms' => (int) env('PAYMENTS_REBUILD_LOCK_TIMEOUT_MS', 5_000),
+
+        // Every later transaction's own SET LOCAL bound: the ownership claim,
+        // the clear, each replay batch, and the ready transition.
+        'statement_timeout_ms' => (int) env('PAYMENTS_REBUILD_STATEMENT_TIMEOUT_MS', 5_000),
+    ],
+
 ];
