@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 use Carbon\CarbonImmutable;
 use Illuminate\Database\DatabaseManager;
+use Illuminate\Database\Events\TransactionBeginning;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Str;
 use Modules\Merchant\Infrastructure\Persistence\Eloquent\Merchant;
 use Modules\Payments\Application\Verification\IncompleteVerificationScope;
@@ -24,7 +26,7 @@ use RuntimeException;
 
 /*
 |--------------------------------------------------------------------------
-| The canonical forward pass — `payments:projections:verify`
+| Canonical and reverse verification - `payments:projections:verify`
 |--------------------------------------------------------------------------
 |
 | IN THE INTEGRATION SUITE BECAUSE THE SUBJECT IS A REAL SNAPSHOT. The audit opens
@@ -38,10 +40,8 @@ use RuntimeException;
 | that new-ed it would pass with the command unregistered, which is exactly the
 | failure an operator would meet.
 |
-| WHAT THIS FILE DOES NOT COVER, DELIBERATELY: a projector receipt, read row or
-| envelope that no canonical event points at. A forward walk cannot reach one, and
-| the reverse passes that can are separate work. The `scanned` assertions below
-| pin that scope rather than leaving it implied.
+| The independent reverse passes cover records the canonical walk cannot reach.
+| The `scanned` assertions pin their scope rather than leaving it implied.
 |
 */
 
@@ -313,7 +313,7 @@ it('reports a future event time as an operational warning rather than as corrupt
     expect($exitCode)->toBe(VerificationReport::EXIT_ATTENTION)
         ->and(verifierFindings($report))->toBe([VerificationFinding::EventTimeInFuture->value])
         ->and($report['classification_counts'][VerificationClassification::Inconsistent->value])->toBe(0)
-        ->and($report['classification_counts'][VerificationClassification::InFlight->value])->toBe(1);
+        ->and($report['classification_counts'][VerificationClassification::InFlight->value])->toBe(0);
 });
 
 /*
@@ -757,12 +757,37 @@ it('stops on its work budget and keeps the findings it had already made', functi
 it('refuses an invalid bound before it opens a snapshot', function (): void {
     config(['payments.verification.batch_size' => 0]);
 
-    // AT CONTAINER RESOLUTION, which is before the command's handle() runs. An
-    // audit that discovered this on its first loop would already be holding a
-    // REPEATABLE READ transaction open.
-    expect(fn (): int => Artisan::call('payments:projections:verify'))
-        ->toThrow(InvalidArgumentException::class);
+    [$exitCode, $report] = verifierRun();
+
+    expect($exitCode)->toBe(VerificationReport::EXIT_INCOMPLETE)
+        ->and($report['reason'])->toBe('invalid_configuration')
+        ->and($report['complete'])->toBeFalse()
+        ->and($report['high_watermark'])->toBeNull()
+        ->and($report['scanned'])->toBe([])
+        ->and(DB::connection()->transactionLevel())->toBe(0);
 });
+
+it('includes a nil UUID in every reverse pass instead of reporting empty clean state', function (string $table, string $key, string $pass): void {
+    verifierSeed();
+    DB::table('stored_events')->delete();
+    foreach (['payment_projector_receipts', 'payment_details', 'payment_outbox'] as $other) {
+        if ($other !== $table) {
+            DB::table($other)->delete();
+        }
+    }
+    DB::table($table)->update([$key => '00000000-0000-0000-0000-000000000000']);
+    config(['payments.verification.batch_size' => 1]);
+
+    [$exitCode, $report] = verifierRun();
+
+    expect($exitCode)->toBe(VerificationReport::EXIT_INCONSISTENT)
+        ->and($report['complete'])->toBeTrue()
+        ->and($report['scanned'][$pass])->toBe(1);
+})->with([
+    'receipt' => ['payment_projector_receipts', 'event_id', 'projector_receipts'],
+    'read row' => ['payment_details', 'payment_id', 'payment_details'],
+    'envelope' => ['payment_outbox', 'event_id', 'payment_outbox'],
+]);
 
 it('changes no committed row and leaves each tuple writing transaction intact', function (): void {
     verifierSeed();
@@ -780,6 +805,53 @@ it('changes no committed row and leaves each tuple writing transaction intact', 
     expect(verifierCounts())->toBe($before)
         ->and(IntegrationDatabase::observedXmin('payment_outbox'))->toBe($xminBefore['payment_outbox'])
         ->and(IntegrationDatabase::observedXmin('payment_details'))->toBe($xminBefore['payment_details']);
+});
+
+it('returns safe JSON and exit 2 for an invalid verifier option', function (): void {
+    $exitCode = Artisan::call('payments:projections:verify', ['--not-an-option' => true]);
+    $report = json_decode(trim(Artisan::output()), true, flags: JSON_THROW_ON_ERROR);
+
+    expect($exitCode)->toBe(2)
+        ->and($report['reason'])->toBe('invalid_invocation')
+        ->and($report['complete'])->toBeFalse()
+        ->and($report['scanned'])->toBe([])
+        ->and(DB::connection()->transactionLevel())->toBe(0);
+});
+
+it('does not borrow an outer transaction or audit inside its savepoint', function (): void {
+    verifierSeed();
+    $before = verifierCounts();
+
+    DB::beginTransaction();
+
+    // THE EVENT IS THE NON-VACUOUS PART, and the reported fields are not. An
+    // unguarded run reaches the same reported values: PostgreSQL refuses
+    // `SET TRANSACTION ISOLATION LEVEL` in a subtransaction, its 25001 is not on
+    // the mapped list and becomes `database_error`, rollBack() restores the
+    // caller's level to 1, and no pass starts, so `scanned` stays empty. Every
+    // assertion below except this counter would therefore pass over a savepoint
+    // the audit should never have opened. MEASURED: with the guard disabled this
+    // test fails here, and not on any assertion after it.
+    $began = 0;
+    Event::listen(TransactionBeginning::class, function () use (&$began): void {
+        $began++;
+    });
+
+    try {
+        [$exitCode, $report] = verifierRun();
+    } finally {
+        Event::forget(TransactionBeginning::class);
+    }
+
+    expect($began)->toBe(0, 'the audit opened a transaction inside the caller\'s')
+        ->and($exitCode)->toBe(VerificationReport::EXIT_INCOMPLETE)
+        ->and($report['reason'])->toBe(DatabaseProjectionVerifier::REASON_DATABASE_ERROR)
+        ->and($report['complete'])->toBeFalse()
+        ->and($report['high_watermark'])->toBeNull()
+        ->and($report['audit_at'])->toBeNull()
+        ->and($report['scanned'])->toBe([])
+        ->and(DB::connection()->transactionLevel())->toBe(1)
+        ->and(verifierCounts())->toBe($before);
 });
 
 it('runs its scan inside a read-only transaction that PostgreSQL itself enforces', function (): void {
@@ -1302,6 +1374,12 @@ function verifierPlans(?string $sessionSetting = null): array
             continue;
         }
 
+        // Keep the first bindings for each query shape, not the empty terminal
+        // page that can replace a real batch and make plan evidence vacuous.
+        if (isset($plans[$sql])) {
+            continue;
+        }
+
         DB::beginTransaction();
 
         try {
@@ -1331,9 +1409,13 @@ function verifierPlans(?string $sessionSetting = null): array
  *
  * @param  array<string, string>  $plans
  */
-function verifierPlanFor(array $plans, string $needle): string
+function verifierPlanFor(array $plans, string $needle, string $comparison): string
 {
-    $matched = array_filter($plans, static fn (string $sql): bool => str_contains($sql, $needle), ARRAY_FILTER_USE_KEY);
+    $matched = array_filter(
+        $plans,
+        static fn (string $sql): bool => str_contains($sql, $needle) && str_contains($sql, $comparison),
+        ARRAY_FILTER_USE_KEY,
+    );
 
     if (count($matched) !== 1) {
         throw new RuntimeException(sprintf(
@@ -1373,8 +1455,10 @@ it('resolves every reverse pass without touching the unindexed JSON payload', fu
     $plans = verifierPlans();
 
     foreach (verifierReversePasses() as $pass) {
-        expect(verifierPlanFor($plans, $pass))
-            ->not->toContain('event_properties', "the {$pass} pass reached for the JSON payload");
+        foreach ([' >= ?', ' > ?'] as $comparison) {
+            expect(verifierPlanFor($plans, $pass, $comparison))
+                ->not->toContain('event_properties', "the {$pass} pass reached for the JSON payload");
+        }
     }
 });
 
@@ -1391,16 +1475,18 @@ it('has an indexed path into canonical history for every reverse pass', function
     $plans = verifierPlans('set local enable_seqscan = off');
 
     foreach (verifierReversePasses() as $pass) {
-        expect(verifierPlanFor($plans, $pass))->toMatch(
-            '/stored_events_aggregate_uuid_index|stored_events_aggregate_uuid_aggregate_version_unique/',
-            "the {$pass} pass has no indexed path into stored_events",
-        );
+        foreach ([' >= ?', ' > ?'] as $comparison) {
+            expect(verifierPlanFor($plans, $pass, $comparison))->toMatch(
+                '/stored_events_aggregate_uuid_index|stored_events_aggregate_uuid_aggregate_version_unique/',
+                "the {$pass} pass has no indexed path into stored_events",
+            );
+        }
     }
 });
 
 it('reads the JSON payload in exactly one bounded aggregate and nowhere else', function (): void {
-    // The duplicate-id check groups by the payload's event id, which no index can
-    // help and none is proposed for: it is ONE pass over the Payments slice of
+    // The duplicate-id check groups by the payload's event id without a dedicated
+    // index: it is one pass over the Payments slice of
     // history, the same work the canonical walk already does, and its result is
     // bounded by a limit. That it is the only such statement is the property worth
     // pinning, because a second one would be a per-row JSON lookup in disguise.

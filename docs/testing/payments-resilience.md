@@ -150,10 +150,9 @@ at fixture volume, not about speed or production scale; the repair lookup's cost
 measured at 22k and 200k canonical rows and recorded in
 [verification and rebuild](../specifications/payments/verification-and-rebuild.md). The rebuild group stays T11's, and the
 barrier-coordinated SIGTERM/SIGKILL process suite stays T12's, per **Failure injection** below.
-Query-plan behavior for JSON event-ID lookups and reverse joins is measured evidence T10 owes; a
-green suite on small fixtures is not an index or scale claim, and an index that turns out to be
-necessary is a separate forward-migration decision. Contracts in
-[verification and rebuild](../specifications/payments/verification-and-rebuild.md).
+The [T10 evidence table](../specifications/payments/verification-and-rebuild.md#t10-implementation-evidence) maps these contracts to the actual tests and states the limits of their claims.
+Final review additionally covers nil-UUID reverse cursors, combined transaction/audit failures, explicit repair isolation, invalid invocation/configuration, and refusal to borrow an outer transaction.
+A green suite on small fixtures is not a scale claim; any index justified by later measurements remains a separate forward-migration decision.
 
 ## Critical end-to-end paths
 

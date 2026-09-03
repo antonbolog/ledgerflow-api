@@ -255,7 +255,7 @@ class PaymentsServiceProvider extends ServiceProvider
         $this->app->scoped(
             VerifyPaymentProjectionsCommand::class,
             fn (Application $app): VerifyPaymentProjectionsCommand => new VerifyPaymentProjectionsCommand(
-                $app->make(ProjectionVerifier::class),
+                static fn (): ProjectionVerifier => $app->make(ProjectionVerifier::class),
                 static fn (): int => (int) hrtime(true),
             ),
         );

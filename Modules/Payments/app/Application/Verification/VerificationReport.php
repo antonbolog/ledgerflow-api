@@ -19,11 +19,9 @@ namespace Modules\Payments\Application\Verification;
  * from the counts in one place is what stops a caller from reassembling it
  * differently.
  *
- * A FINDING COUNT IS NOT WHAT MAKES A RUN FAIL. `classification_counts` decides
- * exit 1, because a finding may be non-contradictory — see
- * VerificationFinding::isContradiction(). `finding_counts` is the diagnostic
- * breakdown beside it, and the two are deliberately not the same number: one
- * event can carry several distinct findings.
+ * Contradiction findings decide exit 1, including reverse-pass orphans that belong
+ * to no canonical event classification. Operational findings are distinguished by
+ * VerificationFinding::isContradiction(). Counts describe facts, not unique payments.
  *
  * `scanned` NAMES THE PASSES THAT ACTUALLY RAN, and that is the scope statement.
  * A COMPLETE REPORT MUST CARRY ALL FOUR, which completed() refuses to build
@@ -90,7 +88,7 @@ final readonly class VerificationReport
     private function __construct(
         public bool $complete,
         public string $reason,
-        public int $highWatermark,
+        public ?int $highWatermark,
         public ?string $auditAt,
         public array $scanned,
         public array $classificationCounts,
@@ -155,7 +153,7 @@ final readonly class VerificationReport
      */
     public static function incomplete(
         string $reason,
-        int $highWatermark,
+        ?int $highWatermark,
         ?string $auditAt,
         array $scanned,
         array $classificationCounts,

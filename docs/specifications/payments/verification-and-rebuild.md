@@ -37,7 +37,7 @@ later on a schedule, once deployment monitoring and an alert destination exist.
 
 `stored_events` is canonical business history. The outbox, projector receipts, `payment_details`, and
 the completion marker are derived state. `payment_idempotency_receipts` is a separate,
-non-reconstructable HTTP contract that verification only reads.
+non-reconstructable HTTP contract; neither verification nor repair reads or changes that table.
 
 ### Snapshot and scope
 
@@ -90,7 +90,8 @@ it now stands matches no canonical event. Both are true and an operator needs bo
 count is a count of facts rather than of damaged rows.
 
 Each pass uses its own stable-key keyset cursor, never `OFFSET` and never an in-memory set of every
-visited ID. Passes 2 to 4 exist because a forward scan of canonical history cannot discover a derived
+visited ID. Reverse scans include the nil UUID on their first page, because corruption need not use application-generated identifiers.
+Passes 2 to 4 exist because a forward scan of canonical history cannot discover a derived
 record that has no canonical source, so they must not depend on pass 1 having reached their event.
 Every finding has one deterministic owning pass and check, so the same finding is not counted twice.
 Counts describe findings by category, not a globally deduplicated count of corrupt payments; one event
@@ -169,16 +170,19 @@ index exists or is proposed for that expression.
 
 **No reverse pass does so, and the plans are measured rather than assumed.** Each resolves through an
 aggregate identity column instead, and the owning integration test replays every statement the audit
-issued through `EXPLAIN`: no reverse-pass plan references `event_properties`, and each reaches
-`stored_events` through `stored_events_aggregate_uuid_aggregate_version_unique`. **T10 therefore adds
+issued through `EXPLAIN`: no reverse-pass plan references `event_properties`, and each has an
+existing aggregate-identity index path into `stored_events`. **T10 therefore adds
 no index**, and the Payments schema test's pinned index set is unchanged. The duplicate-id aggregate
-is the one statement that reads the JSON payload; it is a single bounded pass over the Payments slice
-of history, the same work the canonical walk already performs, and no index would help a grouping.
+is an additional history-wide JSON grouping beside the canonical payload reads.
+It returns a bounded sample and exact counts, but its database work still scales with Payments history and is subject to the timeouts.
+This is not a claim that an index could never benefit a future query design.
 
 That evidence is a claim about plan shape and index availability at fixture volume, **not a claim
 about speed or behaviour at production scale**. Index availability is asserted with sequential scans
 disabled, because at fixture size the planner may rightly prefer a scan of a tiny table and asserting
 its natural choice would measure the fixture rather than the schema.
+The reverse lookups use correlated `LATERAL ... LIMIT 1` rather than an `EXISTS` form that can choose a history-wide hashed subplan per batch.
+Tests inspect the first observed bindings for both the inclusive first-page and strict subsequent-page query shapes, not an empty terminal page.
 
 ### Result document
 
@@ -188,6 +192,10 @@ Common fields are `schema_version: 1`, `operation_id`, `command`, `outcome`, `re
 adds `complete`, `high_watermark`, `audit_at`, `scanned` counts by pass, `classification_counts`,
 `finding_counts`, and the capped `examples` with `examples_truncated`. Pass, check, and example
 ordering is deterministic.
+
+Before a snapshot is captured, `high_watermark` and `audit_at` are null, not invented values.
+Invalid configuration returns `invalid_configuration`; invalid command arguments/options return `invalid_invocation`, with exit `2` and no scan.
+`event_time_in_future` is counted as an operational finding, not ordinary `in_flight`, so classification counts alone need not sum to all scanned events.
 
 Finding examples carry only categories, owned field names, and validated identifiers. Neither stream
 nor any log carries actual or expected payment values, raw payloads, raw exception text, idempotency
@@ -345,12 +353,75 @@ Refusals mutate nothing and carry a safe reason.
 | Commit outcome unknown | `mutation_state: unknown`; exit `2`, with no automatic retry. |
 | Commit confirmed, final audit logging fails | `mutation_state: committed`, `reason: audit_failed`; exit `2`, without claiming rollback. |
 | No-op completed, final audit logging fails | `mutation_state: no_changes`; exit `2`. |
+| Final audit also fails after rollback or uncertainty | Preserve `rolled_back` or `unknown`; never upgrade either to `committed`. |
 
 Database commit and log persistence are not one transaction, so logging success is not durable atomic
 audit retention, and a killed process or unavailable stdout can produce no final JSON at all: absence
 of an answer is not evidence that nothing changed. Resolve uncertainty by inspecting state or running
 a fresh verification, never by repeating the mutation automatically. An atomic durable audit ledger
 would be a separate schema and design decision.
+
+## T10 implementation evidence
+
+The operator procedure lives in [Runtime Contract](../../operations/runtime-contract.md#manual-verification-and-targeted-repair).
+The following evidence is owned by executable tests, not by the existence of this document.
+
+| Contract | Owning executable evidence |
+|---|---|
+| Canonical field/identity mismatches, grace versus overdue/exhaustion, future-time warning | [PaymentProjectionVerifierTest](../../../Modules/Payments/tests/Integration/PaymentProjectionVerifierTest.php) |
+| Independent reverse passes, orphan findings, duplicate UUIDs, bounded examples, nil-UUID first-page inclusion | `PaymentProjectionVerifierTest`: reverse coverage, cross-batch duplicate and nil-UUID cases |
+| One read-only snapshot, lower-ID late commit excluded then found by a fresh run, real statement cancellation and backend loss | `PaymentProjectionVerifierTest`: snapshot and timeout cases |
+| Actual reverse SQL plans, both first and subsequent keyset pages | `PaymentProjectionVerifierTest`: the two reverse-plan assertions; index availability is not a throughput guarantee |
+| Canonical-only repair, ambiguity/conflict refusal, mutation matrix and unrelated-state preservation | [PaymentOutboxRepairTest](../../../Modules/Payments/tests/Integration/PaymentOutboxRepairTest.php) |
+| Canonical row contention, explicit READ COMMITTED despite a different session default, refusal to borrow an outer transaction | `PaymentOutboxRepairTest`: locking and transaction-ownership cases |
+| Intent/final audit failures, commit uncertainty, combined transaction and log failures, unchanged acknowledgement | `PaymentOutboxRepairTest`: audit cases; [RepairOutcomeTest](../../../Modules/Payments/tests/Unit/RepairOutcomeTest.php) for exit mapping |
+| Invalid config/invocation and malformed repair ID produce exit 2 without raw input disclosure | Both integration suites' command-boundary cases |
+| Semantic JSON comparison and bounds validation | [VerificationEnvelopeTest](../../../Modules/Payments/tests/Unit/VerificationEnvelopeTest.php), [VerificationConfigurationTest](../../../Modules/Payments/tests/Unit/VerificationConfigurationTest.php) |
+
+The repair contention test uses a held canonical-row lock on another connection and observes a real timeout.
+The committed-predecessor case and explicit isolation test are separate controls, not a barrier-coordinated two-process repair race.
+Commit uncertainty is injected at the framework commit boundary; this proves conservative reporting, not every possible network failure during COMMIT.
+The transaction-timeout test establishes PostgreSQL session termination separately from the verifier's coordinated backend-loss test.
+The 22k/200k repair timings above are earlier supporting measurements, not fixtures replayed by every suite run.
+No production-scale SLA, global quiescence detection, atomic durable audit, or T11/T12 completion follows from these tests.
+
+### Final local validation checkpoint
+
+The final production diff passed the `make check` stage inside `make ci`: 621 tests and 3347 assertions, Composer validation, Pint, Rector, PHPStan level 10, and instruction parity checks.
+CI guard and development-database isolation checks passed.
+The nested `make projection-contract` passed in 113 seconds against its 180-second work deadline; subsequent checks found no disposable project containers or volumes.
+The aggregate `make ci` invocation exited 2 at the image stage because the sandbox denied Docker Buildx activity-file access.
+Only the remaining repository-defined `make image-contract` target was retried with the required filesystem permission; it exited 0, completing the production and web image checks.
+These are successful component results from a split execution, not a claim that one uninterrupted `make ci` invocation exited 0.
+
+### Post-review checkpoint
+
+An independent review of the checkpoint above produced three changes, all of them after that validation ran.
+
+The verifier now refuses to run inside a transaction it does not own.
+`DatabaseProjectionVerifier::verify()` returns an incomplete report with the `database_error` reason when `transactionLevel()` is not zero, which is the guard `DatabaseOutboxRepair::apply()` already had.
+The snapshot, the `READ ONLY` declaration and the transaction bounds are the adapter's to own, and a savepoint carries none of them.
+
+That guard is pinned by `PaymentProjectionVerifierTest`: "does not borrow an outer transaction or audit inside its savepoint".
+Its control is the `TransactionBeginning` event count, not the reported fields.
+With the guard disabled the test was observed to fail on that counter, and on nothing before it.
+The remaining assertions would not have distinguished the two paths: the isolation statement fails either way, its `25001` is not on the verifier's mapped list and becomes `database_error`, `rollBack()` restores the caller's level to `1`, and no pass ever starts, so `scanned` stays empty and the watermark stays null.
+That derivation is why the event counter carries the control rather than the reported fields.
+
+This is deliberately **not** a claim that an unguarded audit would leak `READ ONLY` into the caller's transaction.
+Measured on this PostgreSQL, `BEGIN; SAVEPOINT s1; SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY;` fails with `SET TRANSACTION ISOLATION LEVEL must not be called in a subtransaction`, after only `BEGIN` and `SAVEPOINT` and therefore with no prior query to have taken a snapshot.
+The combined statement fails as a whole and applies neither characteristic, so no `READ ONLY` reaches the caller's transaction.
+The guard is justified by transaction ownership and by reporting the cause rather than the symptom, not by preventing a leak.
+
+Two comment-only corrections accompany it, with no SQL and no behavior change.
+`DatabaseOutboxRepair::identityHeldByAnotherEnvelope()` previously claimed its unlocked read and the write it guards see the same state.
+They do not, and the safety property holds for a different reason: the conflict set can only shrink, because a repair only ever writes its own canonical row's `(aggregate_uuid, aggregate_version)`, `stored_events` is unique on that pair, and no other writer touches those two columns.
+A stale read therefore costs at most a conservative refusal, and `FOR UPDATE` would add nothing because it cannot lock a row that does not exist yet.
+`RepairReason::MalformedEventId` moved from the refusal group to the failure group, where its existing `failed` outcome and exit `2` already belonged; `isRefusal()`, the outcome mapping and the owning test are unchanged.
+
+These three changes were validated by a **separate `make check` invocation only**, which exited `0` with 622 tests and 3356 assertions.
+That is one more test and nine more assertions than the checkpoint above records.
+`make ci`, `make projection-contract` and `make image-contract` were **not** re-run, so the split-execution evidence above stands as written and is not extended by this checkpoint.
 
 ## Projection gate
 

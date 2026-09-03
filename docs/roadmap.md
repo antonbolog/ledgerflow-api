@@ -23,11 +23,13 @@ table. **T9 is complete**, closing the read path: authenticated `GET /api/paymen
 projected `200`, pending `202` and `payment_not_found` `404`, evidence in the same table. That
 completes every M4 task; M4's `POST -> outbox -> Redis -> consumer -> GET` exit is **composed from
 T6, T7, T8 and T9 evidence rather than one measured end-to-end run**, and the full-chain resilience
-matrix stays [T12's](testing/payments-resilience.md). **T10 is in progress**: its contracts are
+matrix stays [T12's](testing/payments-resilience.md). **T10 implementation and local validation are complete; shipping is pending**: its contracts are
 reconciled in
 [verification and rebuild](specifications/payments/verification-and-rebuild.md),
-`payments:projections:verify` is complete across all four passes and `payments:outbox:repair` is
-complete, with the operational handoff and final evidence still outstanding.
+`payments:projections:verify` and `payments:outbox:repair` are implemented, with an
+[operator procedure](operations/runtime-contract.md#manual-verification-and-targeted-repair) and
+[executable evidence](specifications/payments/verification-and-rebuild.md#t10-implementation-evidence).
+The final validation checkpoint records the split CI execution and successful image-stage retry; T11 remains next.
 
 ## Outcome
 
@@ -191,29 +193,10 @@ backlog, scheduler-stop, and poison-handler cases.
 
 Detect and repair derived-state corruption while keeping partial rebuilds invisible.
 
-- T10 — Implement bounded projection/outbox verification and targeted repair. **In progress.** Its
-  contracts are now stated in
-  [verification and rebuild](specifications/payments/verification-and-rebuild.md): a read-only
-  `payments:projections:verify` over one `REPEATABLE READ, READ ONLY` snapshot with a captured high
-  watermark, four bounded keyset passes, separate in-flight/overdue/exhausted/inconsistent
-  classification and exit codes; and an audited `payments:outbox:repair {eventId}` that restores one
-  derived envelope under an explicit delivery-quiescence acknowledgement while preserving transport
-  history, exhaustion, and the failure-generation fence. **Delivered so far**: the whole verifier -
-  command, Application port and result, PostgreSQL adapter, the canonical forward pass, the three
-  bounded reverse passes, and the duplicate-event-id aggregate - with **no migration, index,
-  dependency, schedule entry, or process**. Measured `EXPLAIN` evidence shows every reverse pass
-  reaching `stored_events` through its existing aggregate-identity unique index and none of them
-  reading the JSON payload, so the audit's measured-index decision gate is closed without a schema
-  change. Targeted repair is delivered too: a `READ COMMITTED` transaction serialised on the
-  canonical stored-event row, the full mutation matrix, and structured intent/outcome audit records
-  correlated by one operation id. Its canonical event-UUID lookup is the one unindexed predicate in
-  T10, measured at about 6 ms over 22k canonical rows and 18 ms over 200k on one containerised
-  PostgreSQL 18 instance; **those fixture figures establish no production capacity threshold** and
-  no index was added for it. A lookup that exceeds the command's 2-second statement timeout is a
-  failed run - exit 2, with the mutation state reporting the real transaction outcome - not a
-  refusal.
-  **Not yet delivered**: the operational handoff and final measured evidence. T10 adds no projection
-  gate and no read-model rebuild.
+- T10 - Bounded projection/outbox verification and targeted repair. **Implemented and locally validated; shipping pending.**
+  Four read-only snapshot passes plus duplicate detection, and quiesced single-envelope repair preserving existing exhaustion and failure history.
+  Contracts and measured limits live in [verification and rebuild](specifications/payments/verification-and-rebuild.md#t10-implementation-evidence); the [runtime contract](operations/runtime-contract.md#manual-verification-and-targeted-repair) owns the operator procedure.
+  No new migration, index, dependency, recurring schedule, worker, projection gate, or read-model rebuild.
 - T11 — Implement connection-affine gated batch rebuild and recovery.
 - T12 — Prove end-to-end and process-level resilience failures.
 - T13 — Publish the five-minute resilience demo and operational guide.

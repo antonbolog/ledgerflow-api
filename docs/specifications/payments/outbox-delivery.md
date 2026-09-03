@@ -122,7 +122,7 @@ per-writer notes below already carried the T7 and T8 completions, and the
   acceptance - stays T7's alone. The full reset list, including the `projection_failure_generation`
   increment, belongs to [projection and query](projection-and-query.md) and is not repeated here.
 
-  **A fourth surface is planned by T10 and does not exist yet**: `payments:outbox:repair {eventId}`
+  **A fourth surface is implemented by T10**: `payments:outbox:repair {eventId} --delivery-quiesced`
   restores the immutable canonical fields of exactly one envelope from its stored event, and derives
   the completion marker from the named projector receipt. It **preserves** every column in the two
   bullets above - transport history, `projection_failure_count`, `last_projection_error`,

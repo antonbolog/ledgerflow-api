@@ -23,7 +23,7 @@ use stdClass;
 use Throwable;
 
 /**
- * The canonical forward pass, inside one snapshot, writing nothing.
+ * Four verification passes and duplicate detection in one read-only snapshot.
  *
  *     BEGIN
  *     SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY
@@ -50,11 +50,9 @@ use Throwable;
  * the previous batch, so memory is one batch regardless of how much history
  * exists. Counts accumulate; retained examples stop at a cap and say so.
  *
- * WHAT THIS PASS DOES NOT DO. It walks canonical history FORWARD, so it can only
- * find derived state that some canonical event points at. A projector receipt, a
- * read row or an envelope that no stored event refers to is invisible from here
- * by construction - that is the reverse-scan work, and `scanned` names only the
- * pass that actually ran so no reader can mistake one for the other.
+ * The canonical walk compares derived fields against history. Three independent
+ * reverse walks also inspect derived records unreachable from that forward walk.
+ * `scanned` names each started pass; only finishing every pass yields completeness.
  *
  * IT NEVER REHYDRATES PaymentAggregate, dispatches an event, or invokes the
  * consumer, the relay or the outbox writer. An audit that reused the live
@@ -77,10 +75,8 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
     /**
      * The keyset origin for a uuid-keyed reverse pass.
      *
-     * SAFE AS A STRICT LOWER BOUND because every identifier in these tables is a
-     * UUIDv7 minted by this application, and the nil uuid is not producible by
-     * that generator. A row keyed by it would be skipped, which is why it is
-     * stated here rather than left as an unexamined `> '000...'`.
+     * The first page includes this value: corrupted derived state need not contain
+     * an application-generated UUID. Later pages use a strict comparison.
      */
     private const string NIL_UUID = '00000000-0000-0000-0000-000000000000';
 
@@ -124,7 +120,7 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
      */
     private array $scanned = [];
 
-    private int $highWatermark = 0;
+    private ?int $highWatermark = null;
 
     private ?string $auditAt = null;
 
@@ -145,6 +141,22 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
     public function verify(): VerificationReport
     {
         $this->reset();
+
+        // AN OWNED TRANSACTION OR NONE AT ALL, exactly as the repair refuses a
+        // savepoint. Inside an outer transaction beginTransaction() opens a
+        // SAVEPOINT, and PostgreSQL refuses SET TRANSACTION ISOLATION LEVEL in a
+        // subtransaction - so the audit would fail anyway, but only after opening
+        // a savepoint, with a reason describing the symptom instead of the cause.
+        //
+        // THE SNAPSHOT IS THE CONTRACT, not merely the isolation statement. A
+        // savepoint carries no snapshot of its own, its commit() releases nothing,
+        // and the READ ONLY declaration that makes non-mutation a server-side
+        // guarantee belongs to a real transaction. Borrowing a caller's owns none
+        // of the three, so the audit declines rather than reporting over a scope
+        // it does not control.
+        if ($this->connection->transactionLevel() !== 0) {
+            return $this->partial(self::REASON_DATABASE_ERROR);
+        }
 
         $deadline = ($this->clock)() + $this->config->workBudgetNanoseconds();
         $transactionStarted = false;
@@ -192,7 +204,7 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
             $this->connection->commit();
 
             return VerificationReport::completed(
-                highWatermark: $this->highWatermark,
+                highWatermark: (int) $this->highWatermark,
                 auditAt: (string) $this->auditAt,
                 scanned: $this->scanned,
                 classificationCounts: $this->classificationCounts,
@@ -546,7 +558,11 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
             return;
         }
 
-        $this->classify($this->deliveryStateOf($storedEventId, $event, $envelope));
+        $deliveryState = $this->deliveryStateOf($storedEventId, $event, $envelope);
+
+        if ($deliveryState !== null) {
+            $this->classify($deliveryState);
+        }
     }
 
     /**
@@ -561,7 +577,7 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         int $storedEventId,
         PaymentInitiatedEnvelope $event,
         ?VerificationEnvelope $envelope,
-    ): VerificationClassification {
+    ): ?VerificationClassification {
         if ($envelope?->exhaustedAt !== null) {
             return VerificationClassification::Exhausted;
         }
@@ -574,7 +590,7 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
             // contradiction between two records nor an ordinary in-flight delivery.
             $this->record(VerificationFinding::EventTimeInFuture, $storedEventId, $event->eventId);
 
-            return VerificationClassification::InFlight;
+            return null;
         }
 
         $ageSeconds = $auditInstant === null
@@ -818,6 +834,8 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
      * history for every batch. The envelope holds the same event id as its PRIMARY
      * KEY and carries the aggregate identity that `stored_events` has a unique
      * index on, so the same question is answered by two indexed lookups.
+     * A correlated LATERAL LIMIT 1 keeps the lookup parameterized; EXISTS can
+     * instead plan a history-wide hashed subplan for each keyset batch.
      *
      * A MISSING ENVELOPE IS ITS OWN ANSWER, not a failure to resolve. The consumer
      * writes a receipt only while holding that envelope's row lock, so the pair
@@ -839,6 +857,7 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         $this->beginPass(VerificationReport::PASS_PROJECTOR_RECEIPTS);
 
         $cursor = self::NIL_UUID;
+        $comparison = '>=';
 
         while (true) {
             if (($this->clock)() >= $deadline) {
@@ -847,19 +866,21 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
 
             /** @var list<object{event_id: string, has_envelope: bool, has_canonical: bool}> $rows */
             $rows = $this->connection->select(
-                <<<'SQL'
+                <<<SQL
                 select receipts.event_id,
                        envelope.event_id is not null as has_envelope,
-                       exists (
-                           select 1
+                       canonical.id is not null as has_canonical
+                  from payment_projector_receipts receipts
+                  left join payment_outbox envelope on envelope.event_id = receipts.event_id
+                  left join lateral (
+                           select id
                              from stored_events canonical
                             where canonical.aggregate_uuid = envelope.aggregate_uuid
                               and canonical.event_class like ?
-                       ) as has_canonical
-                  from payment_projector_receipts receipts
-                  left join payment_outbox envelope on envelope.event_id = receipts.event_id
+                            limit 1
+                       ) canonical on true
                  where receipts.projector_name = ?
-                   and receipts.event_id > ?
+                   and receipts.event_id {$comparison} ?
                  order by receipts.event_id
                  limit ?
                 SQL,
@@ -897,6 +918,7 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
             }
 
             $cursor = $rows[count($rows) - 1]->event_id;
+            $comparison = '>';
 
             if (count($rows) < $this->config->batchSize) {
                 return null;
@@ -921,6 +943,7 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         $this->beginPass(VerificationReport::PASS_READ_ROWS);
 
         $cursor = self::NIL_UUID;
+        $comparison = '>=';
 
         while (true) {
             if (($this->clock)() >= $deadline) {
@@ -929,16 +952,18 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
 
             /** @var list<object{payment_id: string, has_canonical: bool}> $rows */
             $rows = $this->connection->select(
-                <<<'SQL'
+                <<<SQL
                 select details.payment_id,
-                       exists (
-                           select 1
+                       canonical.id is not null as has_canonical
+                  from payment_details details
+                  left join lateral (
+                           select id
                              from stored_events canonical
                             where canonical.aggregate_uuid = details.payment_id
                               and canonical.event_class like ?
-                       ) as has_canonical
-                  from payment_details details
-                 where details.payment_id > ?
+                            limit 1
+                       ) canonical on true
+                 where details.payment_id {$comparison} ?
                  order by details.payment_id
                  limit ?
                 SQL,
@@ -958,6 +983,7 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
             }
 
             $cursor = $rows[count($rows) - 1]->payment_id;
+            $comparison = '>';
 
             if (count($rows) < $this->config->batchSize) {
                 return null;
@@ -990,6 +1016,7 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         $this->beginPass(VerificationReport::PASS_OUTBOX_ENVELOPES);
 
         $cursor = self::NIL_UUID;
+        $comparison = '>=';
 
         while (true) {
             if (($this->clock)() >= $deadline) {
@@ -998,18 +1025,20 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
 
             /** @var list<object{event_id: string, aggregate_uuid: string, has_canonical: bool}> $rows */
             $rows = $this->connection->select(
-                <<<'SQL'
+                <<<SQL
                 select envelope.event_id,
                        envelope.aggregate_uuid,
-                       exists (
-                           select 1
+                       canonical.id is not null as has_canonical
+                  from payment_outbox envelope
+                  left join lateral (
+                           select id
                              from stored_events canonical
                             where canonical.aggregate_uuid = envelope.aggregate_uuid
                               and canonical.aggregate_version = envelope.aggregate_version
                               and canonical.event_class like ?
-                       ) as has_canonical
-                  from payment_outbox envelope
-                 where envelope.event_id > ?
+                            limit 1
+                       ) canonical on true
+                 where envelope.event_id {$comparison} ?
                  order by envelope.event_id
                  limit ?
                 SQL,
@@ -1033,6 +1062,7 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
             }
 
             $cursor = $rows[count($rows) - 1]->event_id;
+            $comparison = '>';
 
             if (count($rows) < $this->config->batchSize) {
                 return null;
@@ -1198,7 +1228,7 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         $this->examples = [];
         $this->examplesTruncated = false;
         $this->scanned = [];
-        $this->highWatermark = 0;
+        $this->highWatermark = null;
         $this->auditAt = null;
         $this->auditInstant = null;
     }

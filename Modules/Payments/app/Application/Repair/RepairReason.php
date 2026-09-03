@@ -30,9 +30,6 @@ enum RepairReason: string
     /** `--delivery-quiesced` was not supplied. Refused before any database work. */
     case DeliveryNotQuiesced = 'delivery_not_quiesced';
 
-    /** The supplied identifier is not a canonical UUID. It is never echoed back. */
-    case MalformedEventId = 'malformed_event_id';
-
     /** No canonical Payments event carries that durable event id. */
     case CanonicalEventAbsent = 'canonical_event_absent';
 
@@ -68,6 +65,18 @@ enum RepairReason: string
     | FAILURES. The command does not know, and may have changed something.
     */
 
+    /**
+     * The supplied identifier is not a canonical UUID, and is never echoed back.
+     *
+     * A FAILURE RATHER THAN A REFUSAL, DESPITE MUTATING NOTHING, and the exit code
+     * is what the distinction is for. A refusal is a well-formed request the
+     * command correctly declines; this is malformed input, which the contract puts
+     * beside invalid invocation and invalid configuration at exit `2`. Listing it
+     * above would only change isRefusal(), and with it the exit code the operator
+     * scripts against.
+     */
+    case MalformedEventId = 'malformed_event_id';
+
     /** Operator intent could not be recorded, so the mutation never began. */
     case IntentAuditFailed = 'intent_audit_failed';
 
@@ -78,6 +87,8 @@ enum RepairReason: string
 
     case DatabaseError = 'database_error';
 
+    case InvalidInvocation = 'invalid_invocation';
+
     /** COMMIT neither confirmed nor refused. Never retried automatically. */
     case CommitOutcomeUnknown = 'commit_outcome_unknown';
 
@@ -85,7 +96,6 @@ enum RepairReason: string
     {
         return match ($this) {
             self::DeliveryNotQuiesced,
-            self::MalformedEventId,
             self::CanonicalEventAbsent,
             self::CanonicalEventAmbiguous,
             self::CanonicalAliasUnsupported,

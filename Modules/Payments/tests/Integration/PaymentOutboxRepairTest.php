@@ -194,10 +194,22 @@ it('refuses a malformed event id without echoing it back', function (): void {
 
     // NEVER ECHOED. Whatever was typed is operator input, and the refusal is
     // diagnosable without repeating it into stdout or the audit.
-    expect($exitCode)->toBe(RepairOutcome::EXIT_REFUSED)
+    expect($exitCode)->toBe(RepairOutcome::EXIT_FAILED)
+        ->and($result['outcome'])->toBe(RepairOutcome::OUTCOME_FAILED)
         ->and($result['reason'])->toBe(RepairReason::MalformedEventId->value)
         ->and($result['event_id'])->toBeNull()
         ->and(json_encode($result))->not->toContain('not-a-uuid');
+});
+
+it('returns safe JSON and exit 2 when the repair event argument is missing', function (): void {
+    $exitCode = Artisan::call('payments:outbox:repair', ['--delivery-quiesced' => true]);
+    $result = json_decode(trim(Artisan::output()), true, flags: JSON_THROW_ON_ERROR);
+
+    expect($exitCode)->toBe(RepairOutcome::EXIT_FAILED)
+        ->and($result['reason'])->toBe('invalid_invocation')
+        ->and($result['mutation_state'])->toBe('none')
+        ->and($result['event_id'])->toBeNull()
+        ->and(DB::connection()->transactionLevel())->toBe(0);
 });
 
 it('refuses when no canonical event carries that durable id', function (): void {
@@ -726,6 +738,73 @@ it('audits intent and outcome under one operation id, with only safe fields', fu
         // NAMES ONLY: no payload, no previous or replacement value, no key.
         ->and($audited[1]['changed_fields'])->toBe($result['changed_fields'])
         ->and(json_encode($audited))->not->toContain('amountMinor');
+});
+
+it('preserves a failed transaction state when the outcome audit also fails', function (bool $commitFailure): void {
+    $seeded = repairSeed(withEnvelope: false);
+    repairWithFailingLogger(failOnCall: 2);
+
+    if ($commitFailure) {
+        Event::listen(TransactionCommitting::class, function (): void {
+            throw new RuntimeException('commit boundary unavailable');
+        });
+    } else {
+        $lock = DB::connection(IntegrationDatabase::LOCK);
+        $lock->beginTransaction();
+        $lock->select('select id from stored_events where aggregate_uuid = ? for update', [$seeded['payment_id']]);
+    }
+
+    try {
+        [$exitCode, $result] = repairRun($seeded['event_id']);
+    } finally {
+        Event::forget(TransactionCommitting::class);
+    }
+
+    expect($exitCode)->toBe(RepairOutcome::EXIT_FAILED)
+        ->and($result['reason'])->toBe(RepairReason::AuditFailed->value)
+        ->and($result['mutation_state'])->toBe($commitFailure ? 'unknown' : 'rolled_back')
+        ->and(repairEnvelope($seeded['event_id']))->toBeNull();
+})->with(['rollback then audit failure' => false, 'unknown commit then audit failure' => true]);
+
+it('owns read committed isolation even when the session default differs', function (): void {
+    $seeded = repairSeed(withEnvelope: false);
+    $isolation = null;
+    DB::statement('set default_transaction_isolation = \'repeatable read\'');
+    Event::listen(TransactionCommitting::class, function () use (&$isolation): void {
+        $isolation = DB::selectOne('show transaction_isolation')->transaction_isolation;
+    });
+
+    try {
+        [$exitCode] = repairRun($seeded['event_id']);
+    } finally {
+        Event::forget(TransactionCommitting::class);
+        DB::statement('set default_transaction_isolation = default');
+    }
+
+    expect($exitCode)->toBe(RepairOutcome::EXIT_DONE)
+        ->and($isolation)->toBe('read committed');
+});
+
+it('does not borrow an outer transaction or claim its savepoint as a durable repair', function (): void {
+    $seeded = repairSeed(withEnvelope: false);
+    DB::beginTransaction();
+
+    [$exitCode, $result] = repairRun($seeded['event_id']);
+
+    expect($exitCode)->toBe(RepairOutcome::EXIT_FAILED)
+        ->and($result['mutation_state'])->toBe(RepairMutationState::None->value)
+        ->and(DB::connection()->transactionLevel())->toBe(1)
+        ->and(DB::table('payment_outbox')->where('event_id', $seeded['event_id'])->exists())->toBeFalse();
+});
+
+it('preserves the missing acknowledgement when its refusal audit fails', function (): void {
+    repairWithFailingLogger(failOnCall: 1);
+
+    [$exitCode, $result] = repairRun((string) Str::uuid7(), quiesced: false);
+
+    expect($exitCode)->toBe(RepairOutcome::EXIT_FAILED)
+        ->and($result['delivery_quiesced'])->toBeFalse()
+        ->and($result['mutation_state'])->toBe(RepairMutationState::None->value);
 });
 
 it('audits a refusal with a safe reason and no mutation state', function (): void {

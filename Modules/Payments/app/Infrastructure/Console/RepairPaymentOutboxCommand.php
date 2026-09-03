@@ -8,6 +8,13 @@ use Closure;
 use Illuminate\Console\Command;
 use Illuminate\Support\Str;
 use Modules\Payments\Application\Repair\OutboxRepair;
+use Modules\Payments\Application\Repair\RepairMutationState;
+use Modules\Payments\Application\Repair\RepairOutcome;
+use Modules\Payments\Application\Repair\RepairReason;
+use Override;
+use Symfony\Component\Console\Exception\ExceptionInterface;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Output\OutputInterface;
 
 /**
  * The operator-facing surface of targeted repair: one JSON object, one exit code.
@@ -52,6 +59,27 @@ final class RepairPaymentOutboxCommand extends Command
         parent::__construct();
     }
 
+    #[Override]
+    public function run(InputInterface $input, OutputInterface $output): int
+    {
+        $startedAt = ($this->clock)();
+
+        try {
+            return parent::run($input, $output);
+        } catch (ExceptionInterface) {
+            return $this->emitOutcome(
+                RepairOutcome::failed(
+                    RepairReason::InvalidInvocation,
+                    RepairMutationState::None,
+                    null,
+                    deliveryQuiesced: $input->hasParameterOption('--delivery-quiesced', true),
+                ),
+                (string) Str::uuid7(),
+                $startedAt,
+            );
+        }
+    }
+
     public function handle(): int
     {
         // hrtime(), not microtime(): a duration that survives an NTP step or a
@@ -65,6 +93,11 @@ final class RepairPaymentOutboxCommand extends Command
             $operationId,
         );
 
+        return $this->emitOutcome($outcome, $operationId, $startedAt);
+    }
+
+    private function emitOutcome(RepairOutcome $outcome, string $operationId, int $startedAt): int
+    {
         $durationMs = (int) round((($this->clock)() - $startedAt) / 1_000_000);
 
         $this->line((string) json_encode([

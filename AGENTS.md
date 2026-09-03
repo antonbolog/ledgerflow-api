@@ -46,6 +46,10 @@ compatibility evidence live in
   differs only in the `instance` path it echoes. One adapter-owned transaction reads `payment_details`
   and, only on a miss, `payment_idempotency_receipts`; it never rehydrates `PaymentAggregate` and
   touches no other table.
+- Manual `payments:projections:verify` audits canonical and derived state in one read-only snapshot.
+  `payments:outbox:repair {eventId} --delivery-quiesced` repairs one envelope, preserves existing
+  exhaustion and failure history, and never rebuilds read rows. See the
+  [operator procedure](docs/operations/runtime-contract.md#manual-verification-and-targeted-repair).
 - No shared projection gate exists yet, so `503 projection_rebuilding` is unreachable. T11 owns both;
   the [roadmap](docs/roadmap.md) owns delivery order and task status.
 
