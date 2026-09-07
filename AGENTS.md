@@ -55,6 +55,11 @@ compatibility evidence live in
   Rebuild ownership and guarded recovery follow [ADR 0005](docs/adr/0005-payments-projection-gate-and-rebuild-ownership.md).
   Verify reports incomplete and repair refuses while the gate is closed, before scanning or canonical locking.
   The [roadmap](docs/roadmap.md) owns delivery order and task status.
+- T12 proves resilience end to end. The integration suites inject every persistence and delivery
+  failpoint in process; `make resilience-contract` drives the critical HTTP path, a real Redis
+  outage, a concurrent identical POST, and SIGKILL of the real relay, consumer and rebuild processes
+  under synchronization barriers in a disposable Compose project, and runs inside `make ci`. See the
+  [resilience test plan](docs/testing/payments-resilience.md#process-level-resilience).
 
 ## Architecture and boundaries
 
@@ -107,6 +112,7 @@ environment lifecycle, database lifecycle, validation, and CI contracts.
 | `make test` | Run Pest against `ledgerflow_test`; leaves PostgreSQL and Redis running |
 | `make check` | Run the normal local validation contract: `quality` then `test` |
 | `make projection-contract` | Prove the scheduler+Horizon pair in a disposable Compose project |
+| `make resilience-contract` | Prove Payments resilience under real OS-process SIGKILL in a disposable Compose project |
 | `make ci` | After `make install`, run the full CI guard, isolation, validation, and image contract |
 
 Use only these repository-defined validation commands. `make check` must not mutate source or the

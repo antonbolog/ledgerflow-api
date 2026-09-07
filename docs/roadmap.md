@@ -213,7 +213,16 @@ Detect and repair derived-state corruption while keeping partial rebuilds invisi
   rather than on a token, a stored pid, or a successful query. Contracts are reconciled in
   [verification and rebuild](specifications/payments/verification-and-rebuild.md#projection-gate) and
   its [rebuild algorithm](specifications/payments/verification-and-rebuild.md#rebuild-algorithm).
-- T12 — Prove end-to-end and process-level resilience failures.
+- T12 — Prove end-to-end and process-level resilience failures. **Complete locally; shipping pending.**
+  The integration half was delivered across T6-T11: transaction-lifecycle failpoints, a real Redis
+  push followed by an injected commit-boundary exception, `pg_locks` barriers, and backend
+  termination.
+  The process half is `make resilience-contract` - a disposable isolated Compose project that drives
+  the critical HTTP path, a real Redis outage, a concurrent identical `POST`, and `SIGKILL` of the
+  real relay, consumer and rebuild processes under synchronization barriers, wired into `make ci`.
+  Evidence and claim boundaries in the
+  [resilience test plan](testing/payments-resilience.md#process-level-resilience).
+  No production-code change; no new dependency, migration, or process.
 - T13 — Publish the five-minute resilience demo and operational guide.
 
 Exit: the complete [resilience test plan](testing/payments-resilience.md) passes through

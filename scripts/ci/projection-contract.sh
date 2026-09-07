@@ -1,102 +1,38 @@
 #!/usr/bin/env bash
 #
 # The scheduler + Horizon pair, proved end to end against real PostgreSQL and
-# real Redis, in a Compose project that exists only for the length of this run.
+# real Redis, in a disposable Compose project. Part of `make ci`.
 #
-# A DISPOSABLE PROJECT, NOT THE DEVELOPMENT STACK. Every container, network and
-# volume Compose creates is namespaced by project name, so `-p
-# ledgerflow-projection-contract` gets its own `postgres-data` and `redis-data`
-# and can be torn down with `down --volumes` without any possibility of reaching
-# the developer's database. Nothing here runs against `ledgerflow`.
+# It reuses the development image rather than building one, so a run starts the
+# bytes `make install` already built.
 #
-# IT REUSES THE DEVELOPMENT IMAGE rather than building its own. compose.yaml
-# names the image explicitly, so this project starts the bytes `make install`
-# already built; a rebuild here would add minutes and prove nothing about the
-# code under test.
-#
-# BOUNDED EVERYWHERE, AND ENFORCED RATHER THAN COOPERATIVE. Every external
-# command runs through run_bounded(), whose budget is whatever is LEFT of the
-# WORK deadline — so a single wedged `docker compose exec` cannot outlive the
-# contract the way a between-steps-only check would allow. Polling loops keep
-# their own attempt limits on top of that.
-#
-# THE DEADLINE BOUNDS THE WORK, NOT THE WHOLE WALL CLOCK. Guaranteed scoped
-# cleanup takes precedence over a flat cap: once the work stops, the obligatory
-# teardown adds its own separately bounded tail. See CLEANUP_BUDGET_SECONDS.
-#
-# NO GNU `timeout`. It is not a declared prerequisite and macOS does not ship it,
-# so the bound is built from POSIX job control: run the command in the
-# background, poll `kill -0`, then SIGTERM and SIGKILL it. That also avoids the
-# trap that makes a naive watchdog useless — bash defers a signal handler until
-# the current FOREGROUND command returns, so signalling the script itself would
-# do nothing at all while it is blocked in the hung command.
-#
-# QUIET ON SUCCESS. Diagnostics — container state, recent logs from both workers,
-# the outbox row — are printed only when a step fails, so a green run says one
-# line per step and a red one says everything needed to explain it.
+# The deadline, bounded runners and scoped teardown come from lib/contract.sh,
+# shared with resilience-contract.sh.
 
 set -euo pipefail
 
+readonly CONTRACT_NAME='projection contract'
 readonly PROJECT=ledgerflow-projection-contract
+readonly DEADLINE_CEILING=180
+requested_deadline=${PROJECTION_CONTRACT_DEADLINE_SECONDS:-}
 
-# THE WORK DEADLINE. Overridable ONLY DOWNWARDS: the accepted contract is "no
-# greater than 180 seconds", so a caller may shorten the budget — the self-test
-# below does — but an environment variable must not be able to lengthen it past
-# what was agreed. It bounds the contract's WORK; the teardown tail below is
-# bounded separately.
-requested_deadline=${PROJECTION_CONTRACT_DEADLINE_SECONDS:-180}
-
-case "$requested_deadline" in
-    ''|*[!0-9]*) requested_deadline=180 ;;
-esac
-
-if [ "$requested_deadline" -lt 1 ] || [ "$requested_deadline" -gt 180 ]; then
-    requested_deadline=180
-fi
-
-readonly DEADLINE_SECONDS="$requested_deadline"
-
-# Cleanup and diagnostics get their own FIXED budgets rather than the remaining
-# one, which is zero by definition on the path that matters most: the deadline
-# having just expired.
-#
-# WHAT THE DEADLINE GUARANTEES, PRECISELY. The contract's WORK stops at
-# DEADLINE_SECONDS — no step, and no command inside a step, can run past it. The
-# obligatory teardown then adds a bounded tail: at most four diagnostics at
-# DIAGNOSTIC_BUDGET_SECONDS each plus one CLEANUP_BUDGET_SECONDS `down`. The two
-# obligations pull against each other — "stop at 180" and "always clean up" — and
-# this is the split: the deadline bounds the work, and the tail is bounded
-# separately rather than being allowed to run free.
-readonly CLEANUP_BUDGET_SECONDS=60
-readonly DIAGNOSTIC_BUDGET_SECONDS=10
-
-readonly DC=(docker compose -p "$PROJECT" -f compose.yaml --profile projection)
-
-# The disposable project must never inherit the developer's port publishing or
-# project name from a local .env.
-export COMPOSE_PROJECT_NAME="$PROJECT"
-
-started_at=$(date +%s)
+source "$(dirname "${BASH_SOURCE[0]}")/lib/contract.sh"
 
 # --------------------------------------------------------------------------
-# Cleanup and diagnostics
+# Diagnostics
 # --------------------------------------------------------------------------
 
+# Called by lib/contract.sh cleanup() on a failing exit. Uses run_bounded
+# directly, never the guarded helpers: guard() calls fail(), which would exit
+# from inside cleanup and skip the teardown these diagnostics precede.
 diagnose() {
     printf '\n===== projection-contract diagnostics =====\n' >&2
-    # EACH DIAGNOSTIC IS ITSELF BOUNDED. They run after the deadline has already
-    # expired, against a daemon or a container that may be exactly what wedged, so
-    # an unbounded `logs` here would turn a terminated contract back into a hang —
-    # and the teardown below would never run.
     printf '\n--- container state ---\n' >&2
     run_bounded "$DIAGNOSTIC_BUDGET_SECONDS" "${DC[@]}" ps --all >&2 2>&1 || true
     printf '\n--- scheduler (last 40) ---\n' >&2
     run_bounded "$DIAGNOSTIC_BUDGET_SECONDS" "${DC[@]}" logs --tail 40 scheduler >&2 2>&1 || true
     printf '\n--- horizon (last 40) ---\n' >&2
     run_bounded "$DIAGNOSTIC_BUDGET_SECONDS" "${DC[@]}" logs --tail 40 horizon >&2 2>&1 || true
-    # DIRECT, NOT THROUGH psql_disposable(): that helper is guarded, and guard()
-    # calls fail() on expiry — which would exit the script from inside cleanup and
-    # skip the teardown these diagnostics precede.
     printf '\n--- payment_outbox ---\n' >&2
     run_bounded "$DIAGNOSTIC_BUDGET_SECONDS" "${DC[@]}" exec -T postgres psql -U ledgerflow -d ledgerflow -X -q -c \
         "select event_id, publish_count, projection_completed_at, projection_failure_count,
@@ -107,198 +43,6 @@ diagnose() {
         "select (select count(*) from payment_details) as details,
                 (select count(*) from payment_projector_receipts) as receipts" >&2 2>&1 || true
     printf '\n===========================================\n' >&2
-}
-
-# ON EVERY EXIT, INCLUDING A FAILED STEP, AN INTERRUPT AND THE DEADLINE. A
-# disposable project that survived a failure would hold its volumes and its
-# containers until someone noticed, and the next run would then start against
-# state it did not create.
-cleanup() {
-    local status=$?
-
-    trap - EXIT
-
-    if [ "$status" -ne 0 ]; then
-        diagnose
-    fi
-
-    # BOUNDED BY ITS OWN FIXED BUDGET, because the remaining overall budget is
-    # zero precisely when this matters most. Scoped to $PROJECT, so it can only
-    # ever remove the disposable project's containers, networks and volumes.
-    printf '==> removing the disposable project\n'
-    run_bounded "$CLEANUP_BUDGET_SECONDS" \
-        "${DC[@]}" down --volumes --remove-orphans --timeout 20 >/dev/null 2>&1 || true
-
-    exit "$status"
-}
-
-trap cleanup EXIT INT TERM
-
-fail() {
-    printf 'ERROR: %s\n' "$1" >&2
-    exit 1
-}
-
-# Seconds left of the overall deadline, never negative.
-remaining_seconds() {
-    local left=$((DEADLINE_SECONDS - ($(date +%s) - started_at)))
-
-    if [ "$left" -lt 0 ]; then
-        left=0
-    fi
-
-    printf '%s' "$left"
-}
-
-# Run a command with a hard wall-clock bound, returning 124 if it had to be killed.
-#
-# THE COMMAND RUNS IN THE BACKGROUND so this shell keeps control: a foreground
-# child would block bash entirely, including its signal handlers, which is
-# exactly why signalling the script from a watchdog does not work.
-#
-# SIGTERM FIRST, THEN SIGKILL. A `docker compose` client asked to stop politely
-# closes its connection and leaves the daemon's own work consistent; SIGKILL is
-# the floor for a client that ignores it. Both are aimed at the child only,
-# never at a process group, so nothing outside this script can be signalled.
-run_bounded() {
-    local budget="$1"
-    shift
-
-    if [ "$budget" -le 0 ]; then
-        return 124
-    fi
-
-    "$@" &
-    local pid=$!
-    local waited=0
-
-    while kill -0 "$pid" 2>/dev/null; do
-        if [ "$waited" -ge "$budget" ]; then
-            kill -TERM "$pid" 2>/dev/null || true
-            sleep 2
-            kill -KILL "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
-
-            return 124
-        fi
-
-        sleep 1
-        waited=$((waited + 1))
-    done
-
-    local status=0
-    wait "$pid" || status=$?
-
-    return "$status"
-}
-
-# Every external command goes through here, budgeted by what is LEFT overall.
-# A single hung step therefore ends the contract at the deadline instead of
-# running forever, and the EXIT trap still fires with diagnostics and teardown.
-guard() {
-    local description="$1"
-    shift
-
-    local status=0
-    run_bounded "$(remaining_seconds)" "$@" || status=$?
-
-    if [ "$status" -eq 124 ]; then
-        fail "the ${DEADLINE_SECONDS}s work deadline expired while: ${description}"
-    fi
-
-    return "$status"
-}
-
-# A SECOND, CHEAPER CHECK ON TOP OF guard(). Every external command is already
-# bounded by the remaining budget, so this cannot be the only enforcement — but
-# it is what catches expiry inside a polling loop promptly, and what gives the
-# failure the name of the STEP rather than of the last command it ran.
-check_deadline() {
-    local elapsed=$(($(date +%s) - started_at))
-
-    if [ "$elapsed" -ge "$DEADLINE_SECONDS" ]; then
-        fail "the projection contract exceeded its ${DEADLINE_SECONDS}s work deadline at step: $1"
-    fi
-}
-
-step() {
-    check_deadline "$1"
-    printf '==> %s\n' "$1"
-}
-
-# --------------------------------------------------------------------------
-# Helpers against the disposable project only
-# --------------------------------------------------------------------------
-
-psql_disposable() {
-    guard "psql: ${1:0:60}" "${DC[@]}" exec -T postgres psql -U ledgerflow -d ledgerflow -X -q -tAc "$1"
-}
-
-artisan_disposable() {
-    guard "artisan $*" "${DC[@]}" run --rm -T --no-deps app php artisan "$@"
-}
-
-# Compose itself, bounded. `up`, `stop` and `start` are the commands most able to
-# wedge, because they wait on the daemon rather than on this script.
-dc() {
-    local description="$1"
-    shift
-
-    guard "$description" "${DC[@]}" "$@"
-}
-
-# Poll until the command succeeds, or give up after $2 attempts one second apart.
-# BOUNDED, and it reports which condition it was waiting for.
-await() {
-    local description="$1" attempts="$2"
-    shift 2
-
-    local attempt=0
-
-    while [ "$attempt" -lt "$attempts" ]; do
-        # Bounded per attempt as well as per loop: an `exec` into a wedged
-        # container would otherwise stall a loop that counts only its own turns.
-        if run_bounded "$(remaining_seconds)" "$@" >/dev/null 2>&1; then
-            return 0
-        fi
-
-        attempt=$((attempt + 1))
-        check_deadline "waiting for ${description}"
-        sleep 1
-    done
-
-    fail "timed out after ${attempts}s waiting for ${description}"
-}
-
-# Poll until a scalar query returns the expected value.
-await_query() {
-    local description="$1" query="$2" expected="$3" attempts="$4"
-    local attempt=0 actual=''
-
-    while [ "$attempt" -lt "$attempts" ]; do
-        actual=$(psql_disposable "$query" 2>/dev/null | tr -d '[:space:]' || true)
-
-        if [ "$actual" = "$expected" ]; then
-            return 0
-        fi
-
-        attempt=$((attempt + 1))
-        check_deadline "waiting for ${description}"
-        sleep 1
-    done
-
-    fail "timed out after ${attempts}s waiting for ${description} (expected '${expected}', last saw '${actual}')"
-}
-
-assert_query() {
-    local description="$1" query="$2" expected="$3"
-    local actual
-
-    actual=$(psql_disposable "$query" | tr -d '[:space:]')
-
-    if [ "$actual" != "$expected" ]; then
-        fail "${description}: expected '${expected}', got '${actual}'"
-    fi
 }
 
 # --------------------------------------------------------------------------
