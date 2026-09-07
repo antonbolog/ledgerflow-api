@@ -35,6 +35,14 @@ export APP_PORT=0
 # Production reads this dial from config/payments.php and branches on nothing.
 readonly RELAY_CRASH_STATEMENT_TIMEOUT_MS=20000
 
+# Holders of the projection gate's EXCLUSIVE advisory lock. ProjectionGate takes
+# the two-integer form precisely so pg_locks reports the key as classid/objid with
+# objsubid = 2 and evidence can assert it exactly; the mode filter keeps a traffic
+# path's transaction-scoped SHARED acquisition out of the count.
+readonly GATE_EXCLUSIVE_HOLDERS="select count(*) from pg_locks
+     where locktype = 'advisory' and classid = 7011 and objid = 1
+       and objsubid = 2 and mode = 'ExclusiveLock' and granted"
+
 # Set by http_request().
 HTTP_CODE=''
 HTTP_BODY=''
@@ -655,11 +663,21 @@ await_query 'the rebuild to claim the rebuilding state' \
     "select state from payment_projection_controls where projection = 'payment_details'" 'rebuilding' 40
 await_backend_lock_wait 'payment_details' 'the rebuild to block on the destructive clear' 30
 
+# Non-vacuous control for the release assertion below, and the thing that pins
+# the hardcoded key: if CLASS_ID or the object id ever moved, this fails here
+# rather than letting the post-kill count pass against nothing.
+assert_query 'the live rebuild holds the exclusive gate lock' "$GATE_EXCLUSIVE_HOLDERS" '1'
+
 kill_process t12_rebuild KILL
 reap_process t12_rebuild "$rebuild_client"
 release_barrier
 
 step 'the killed rebuild left a closed gate that defers traffic without budget'
+# We killed a CONTAINER, not a backend, so the socket close is what has to reach
+# PostgreSQL before it drops the session lock. Asserted here rather than left to
+# the recovery loop below, whose three attempts would mask a slow release.
+await_query 'the killed rebuild advisory lock to be released' "$GATE_EXCLUSIVE_HOLDERS" '0' 15
+
 assert_query 'the rebuilding state survived the crash' \
     "select state from payment_projection_controls where projection = 'payment_details'" 'rebuilding'
 
