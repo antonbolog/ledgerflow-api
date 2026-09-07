@@ -14,18 +14,16 @@ use Throwable;
  * One delivered event id, one deterministic projection transaction.
  *
  *     BEGIN
- *     [T11 acquires the shared projection gate HERE, before the envelope lock]
+ *     SELECT pg_try_advisory_xact_lock_shared(...); SELECT state FROM ...   <- T11's gate
  *     SELECT ... FROM payment_outbox WHERE event_id = ? FOR UPDATE
  *     INSERT INTO payment_projector_receipts ... ON CONFLICT DO NOTHING
  *     INSERT INTO payment_details ...            <- first delivery only
  *     UPDATE payment_outbox SET projection_completed_at = now()
  *     COMMIT
  *
- * THE TRANSACTION OPENS ON THE ENVELOPE ROW LOCK, NOT ON A GATE, and that absence
- * is deliberate. `payment_projection_controls`, its advisory-key derivation and
- * consumer deferral are T11's; a provisional key or control table added here would
- * have to be unpicked. T11 PREPENDS its gate to this same transaction, on this same
- * connection, before the lock below. See ADR 0004.
+ * T11'S GATE IS PREPENDED TO THIS SAME TRANSACTION, on this same connection,
+ * before the envelope lock below - never a provisional key or control table of
+ * its own. See ADR 0004 and ProjectionGate.
  *
  * THE RECEIPT IS THE IDEMPOTENCY BOUNDARY, not the read row and not the marker.
  * `INSERT ... ON CONFLICT DO NOTHING` returns 1 for a first delivery and 0 for a
@@ -78,6 +76,7 @@ final readonly class PaymentProjectionConsumer
         private ProjectionConfiguration $config,
         private ProjectionFailureRecorder $recorder,
         private LoggerInterface $logger,
+        private ProjectionGate $gate,
     ) {}
 
     public function project(string $eventId): ProjectionOutcome
@@ -114,6 +113,20 @@ final readonly class PaymentProjectionConsumer
             // worker's own alarm killing the process mid-transaction thirteen
             // seconds later.
             $this->connection->statement($this->config->statementTimeoutStatement());
+
+            // T11'S GATE, FIRST, BEFORE THE ENVELOPE LOCK. A closed gate commits this
+            // (empty) transaction and returns rather than throwing (F5:
+            // ProjectPaymentEvent has tries = 1 and no try/catch, so an exception
+            // here would land the message in failed_jobs instead of being
+            // redelivered). No row is locked, so projection_failure_count,
+            // projection_failure_generation, exhausted_at and every transport column
+            // are untouched by construction. See ProjectionGate and D5 in ADR 0005.
+            if (! $this->gate->inspectPaymentDetails()->isOpen()) {
+                $commitAttempted = true;
+                $this->connection->commit();
+
+                return ProjectionOutcome::GateDeferred;
+            }
 
             $row = $this->connection->table('payment_outbox')
                 ->where('event_id', $eventId)

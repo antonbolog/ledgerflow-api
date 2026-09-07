@@ -45,13 +45,16 @@ compatibility evidence live in
   unknown and foreign are byte-identical; a malformed ID shares the same problem type and code and
   differs only in the `instance` path it echoes. One adapter-owned transaction reads `payment_details`
   and, only on a miss, `payment_idempotency_receipts`; it never rehydrates `PaymentAggregate` and
-  touches no other table.
+  checks `payment_projection_controls` through the shared gate before those reads.
 - Manual `payments:projections:verify` audits canonical and derived state in one read-only snapshot.
   `payments:outbox:repair {eventId} --delivery-quiesced` repairs one envelope, preserves existing
   exhaustion and failure history, and never rebuilds read rows. See the
   [operator procedure](docs/operations/runtime-contract.md#manual-verification-and-targeted-repair).
-- No shared projection gate exists yet, so `503 projection_rebuilding` is unreachable. T11 owns both;
-  the [roadmap](docs/roadmap.md) owns delivery order and task status.
+- T11 gates POST, GET, relay, and consumer traffic during a bounded batch rebuild.
+  POST and GET return `503 projection_rebuilding`; relay and consumer defer without consuming failure budgets.
+  Rebuild ownership and guarded recovery follow [ADR 0005](docs/adr/0005-payments-projection-gate-and-rebuild-ownership.md).
+  Verify reports incomplete and repair refuses while the gate is closed, before scanning or canonical locking.
+  The [roadmap](docs/roadmap.md) owns delivery order and task status.
 
 ## Architecture and boundaries
 
@@ -76,8 +79,9 @@ and replay/rebuild semantics require explicit review against the smallest releva
 
 - Preserve one-connection transaction ownership for receipt, stored event, and outbox writes.
 - Transport failure must not consume projection failure budget or exhaust an outbox row.
-- The relay intentionally has no shared projection gate until T11; do not add a provisional key or
-  control table. See [ADR 0004](docs/adr/0004-lock-through-push-outbox-relay.md).
+- Preserve the connection-affine shared gate on traffic paths and the rebuild's exclusive ownership fence.
+  Takeover must preserve inherited `cleared_at`; a non-null marker requires full replay.
+  See [ADR 0005](docs/adr/0005-payments-projection-gate-and-rebuild-ownership.md).
 - Logs and errors must not expose raw idempotency keys, credentials, or sensitive payment payloads.
 
 Additional scoped rules apply under `Modules/Payments/`, `.github/`, `tests/`, and `docs/` through

@@ -75,17 +75,15 @@ exhaustion. The full barrier-coordinated SIGTERM/SIGKILL multi-process suite sta
 - Owned receipt without projection returns `202 projection_pending` and `Retry-After`.
 - Missing, malformed, and differently owned payment IDs return the same `404 payment_not_found`
   shape.
-- Active rebuild returns `503 projection_rebuilding`. *(Unreachable until T11.)*
-- Shared advisory lock and protected query use the same PostgreSQL backend connection. *(T11.)*
+- Active rebuild returns `503 projection_rebuilding`. Delivered by T11: `QueryPaymentTest`, `answers 503 projection_rebuilding with Retry-After: 1 while the gate is closed`.
+- Shared advisory lock and protected query use the same PostgreSQL backend connection. Delivered by T11: `PaymentQueryTest`, `holds the gate lock on its own connection while a read is refused by the control row`.
 
 **Evidence ownership.** T9 owns the projected, pending, missing, malformed, and foreign-ownership
 bullets, plus evidence that the `payment_details` lookup and its `payment_idempotency_receipts`
-fallback run in one adapter-owned transaction and that the query adapter reads no other table.
+fallback run in one adapter-owned transaction; T11 additionally reads the control row through the gate.
 **All five are delivered**; see
 [implementation evidence](../specifications/payments/projection-and-query.md#implementation-evidence),
-rows Q-1 to Q-14. The last two bullets stay T11's: the `503` branch has no producer until the shared
-projection gate exists, and backend identity cannot be proved before there is a gate lock to prove it
-against.
+rows Q-1 to Q-14. T11 delivers the last two bullets through the named HTTP and PostgreSQL observer tests above.
 
 ## Verify and rebuild
 
@@ -132,15 +130,37 @@ Targeted outbox repair (T10):
 - Every other envelope, canonical event, idempotency receipt, projector receipt, and read row is
   unchanged.
 
-Rebuild (T11):
+Rebuild (T11). **Implemented**, with owning tests and evidence limits in the
+[T11 evidence table](../specifications/payments/verification-and-rebuild.md#t11-implementation-evidence), under
+[ADR 0005](../adr/0005-payments-projection-gate-and-rebuild-ownership.md).
+The following contracts are delivered by `ProjectionRebuildTest` unless another suite is named:
 
 - Rebuild waits for a consumer transaction that started before the rebuild flag.
-- Lock timeout clears no projection data.
-- Pinned-session reconnect aborts rather than assuming the advisory lock survived.
-- Replay uses bounded global-ID batches and recreates deterministic business state and receipts.
-- Stale queued jobs after replay are ignored through recreated receipts.
-- Kill after a committed batch leaves `rebuilding`; the next authorized run clears and restarts.
-- Guarded recovery returns to `ready` without replay only when no projection mutation began.
+- Lock timeout clears no projection data and writes no control-row column.
+- Pinned-session reconnect aborts rather than assuming the advisory lock survived, **including while
+  the run's own owner token still matches because no takeover has happened**. A token-only fence is the
+  non-vacuous control: it must be observed to let the same run proceed.
+- A rebuild whose `COMMIT` response is lost reports an unknown outcome, never a rollback, and recovery
+  reads the durable row instead of trusting that report.
+- Replay uses bounded global-ID batches over canonical `stored_events` and recreates deterministic
+  business state and receipts.
+- Stale queued jobs after replay are ignored through recreated receipts, without draining any queue.
+- Kill after a committed batch leaves `rebuilding` and a non-null `cleared_at`; the next authorized run
+  clears and restarts.
+- A takeover, and a run that fails before its own clear, both preserve an inherited `cleared_at`.
+- Guarded recovery returns to `ready` without replay only when the durable row proves no clear was
+  committed.
+- Traffic reaching a closed gate is deferred or refused without consuming poison or transport budget,
+  and a deferred delivery never reaches `failed_jobs`.
+  Owning suites: `OutboxRelayTest`, `PaymentProjectionConsumerTest`, `InitiationCommitBoundaryTest`, and `QueryPaymentTest`.
+- Verification reports `rebuild_in_progress`, incomplete exit `2`, without scanning; repair refuses with exit `1` before canonical locking.
+  `PaymentProjectionVerifierTest` and `PaymentOutboxRepairTest` cover both gate halves, missing control rows, backend affinity, and successful operation after reopening.
+- Corrupt read model -> failed verification -> bounded rebuild -> successful verification is covered by `ProjectionRebuildTest`, `gates verification and repair during a real rebuild and verifies the rebuilt canonical state`.
+
+Commit uncertainty is injected after real commits at claim, clear, batch, ready, and guarded-recovery ready boundaries.
+It proves the committed side of uncertainty and subsequent state-based recovery, not a lost network acknowledgement.
+The lock-half test releases the lock on a healthy session while the token still matches and observes that the row-only condition would pass; separate backend-kill tests prove abort and durable recovery.
+No production-scale SLA, throughput figure, zero-downtime behavior, OS-process kill matrix, or real-incident operator rehearsal is established by these tests.
 
 **Evidence ownership.** T10 owns the two groups named above, and **both are delivered**, proved by
 real-transaction integration suites that commit without `RefreshDatabase`, coordinate through
@@ -148,7 +168,7 @@ injected clocks and second-connection locks rather than sleeps, and replay the s
 command issued through `EXPLAIN`. Plan evidence is a claim about plan shape and index availability
 at fixture volume, not about speed or production scale; the repair lookup's cost is additionally
 measured at 22k and 200k canonical rows and recorded in
-[verification and rebuild](../specifications/payments/verification-and-rebuild.md). The rebuild group stays T11's, and the
+[verification and rebuild](../specifications/payments/verification-and-rebuild.md). T11 delivers the rebuild group, while the
 barrier-coordinated SIGTERM/SIGKILL process suite stays T12's, per **Failure injection** below.
 The [T10 evidence table](../specifications/payments/verification-and-rebuild.md#t10-implementation-evidence) maps these contracts to the actual tests and states the limits of their claims.
 Final review additionally covers nil-UUID reverse cursors, combined transaction/audit failures, explicit repair isolation, invalid invocation/configuration, and refusal to borrow an outer transaction.

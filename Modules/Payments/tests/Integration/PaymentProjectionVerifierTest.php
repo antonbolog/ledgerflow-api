@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Carbon\CarbonImmutable;
 use Illuminate\Database\DatabaseManager;
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Database\Events\TransactionBeginning;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Artisan;
@@ -19,9 +20,11 @@ use Modules\Payments\Application\Verification\VerificationReport;
 use Modules\Payments\Domain\Payment\Events\PaymentInitiated;
 use Modules\Payments\Infrastructure\Persistence\RetryingAtomicTransaction;
 use Modules\Payments\Infrastructure\Projection\PaymentProjectionConsumer;
+use Modules\Payments\Infrastructure\Projection\ProjectionGate;
 use Modules\Payments\Infrastructure\Verification\DatabaseProjectionVerifier;
 use Modules\Payments\Infrastructure\Verification\VerificationConfiguration;
 use Modules\Payments\Tests\Integration\IntegrationDatabase;
+use Modules\Payments\Tests\Integration\ProjectionGateLocks;
 use RuntimeException;
 
 /*
@@ -196,6 +199,7 @@ beforeEach(function (): void {
     IntegrationDatabase::register();
     IntegrationDatabase::refuseIfWrapped();
     IntegrationDatabase::truncate();
+    $this->controlBefore = (array) DB::table('payment_projection_controls')->first();
 });
 
 afterEach(function (): void {
@@ -203,8 +207,104 @@ afterEach(function (): void {
 
     IntegrationDatabase::rollbackOpenTransactions();
     IntegrationDatabase::releaseLocks();
+    ProjectionGateLocks::releaseAll(IntegrationDatabase::LOCK);
+    DB::table('payment_projection_controls')->updateOrInsert(
+        ['projection' => ProjectionGate::PAYMENT_DETAILS], $this->controlBefore,
+    );
     IntegrationDatabase::truncate();
     IntegrationDatabase::disconnectAll();
+});
+
+it('reports a closed maintenance gate as incomplete before scanning and preserves the observed control state', function (string $closure): void {
+    // This contradiction must become visible only after the gate reopens.
+    verifierSeed(readRowOverrides: ['amount_minor' => 9_999]);
+    $counts = verifierCounts();
+
+    if ($closure === 'lock') {
+        DB::connection(IntegrationDatabase::LOCK)->select('select pg_advisory_lock(?, ?)', [
+            ProjectionGate::CLASS_ID, ProjectionGate::PAYMENT_DETAILS_OBJECT_ID,
+        ]);
+    } elseif ($closure === 'row') {
+        DB::table('payment_projection_controls')->update([
+            'state' => 'rebuilding', 'owner_token' => (string) Str::uuid7(),
+            'owner_pid' => ProjectionGateLocks::pid(IntegrationDatabase::LOCK),
+            'started_at' => now(), 'cleared_at' => now(),
+        ]);
+    } else {
+        DB::table('payment_projection_controls')->delete();
+    }
+
+    $control = DB::table('payment_projection_controls')->first();
+    DB::enableQueryLog();
+    DB::flushQueryLog();
+    [$exitCode, $report] = verifierRun();
+    $queries = array_column(DB::getQueryLog(), 'query');
+    DB::disableQueryLog();
+
+    expect($exitCode)->toBe(VerificationReport::EXIT_INCOMPLETE)
+        ->and($report['reason'])->toBe('rebuild_in_progress')
+        ->and($report['complete'])->toBeFalse()
+        ->and($report['projection_control_state'])->toBe($control?->state)
+        ->and($report['high_watermark'])->toBeNull()
+        ->and($report['audit_at'])->toBeNull()
+        ->and($report['scanned'])->toBe([])
+        ->and($report['finding_counts'])->toBe([])
+        ->and($report['examples'])->toBe([])
+        ->and(verifierCounts())->toBe($counts)
+        ->and(DB::table('payment_projection_controls')->first())->toEqual($control)
+        ->and(DB::transactionLevel())->toBe(0);
+
+    foreach ($queries as $query) {
+        expect($query)->not->toMatch('/\b(stored_events|payment_outbox|payment_details|payment_projector_receipts)\b/i');
+    }
+
+    ProjectionGateLocks::releaseAll(IntegrationDatabase::LOCK);
+    DB::table('payment_projection_controls')->updateOrInsert(
+        ['projection' => ProjectionGate::PAYMENT_DETAILS], $this->controlBefore,
+    );
+    [$reopened, $report] = verifierRun();
+    expect($reopened)->toBe(VerificationReport::EXIT_INCONSISTENT)
+        ->and($report['complete'])->toBeTrue()
+        ->and($report['projection_control_state'])->toBe('ready');
+})->with(['exclusive lock before claim' => 'lock', 'abandoned rebuilding row' => 'row', 'missing control row' => 'missing']);
+
+it('holds the shared gate on the audit snapshot backend until verification finishes', function (): void {
+    verifierSeed();
+    $pid = ProjectionGateLocks::pid(DB::getDefaultConnection());
+    expect($pid)->not->toBe(ProjectionGateLocks::pid(IntegrationDatabase::LOCK));
+    $observed = [];
+
+    DB::listen(function (QueryExecuted $query) use (&$observed, $pid): void {
+        if ($query->connection !== DB::connection() || ! str_contains($query->sql, 'as high_watermark')) {
+            return;
+        }
+
+        $observed['locks'] = array_values(array_filter(
+            ProjectionGateLocks::onKey(ProjectionGate::CLASS_ID, ProjectionGate::PAYMENT_DETAILS_OBJECT_ID),
+            static fn (array $lock): bool => $lock['pid'] === $pid && $lock['granted']
+                && $lock['mode'] === 'ShareLock' && $lock['objsubid'] === 2,
+        ));
+        $observed['isolation'] = DB::selectOne("select current_setting('transaction_isolation') as value")->value;
+        $observed['read_only'] = DB::selectOne("select current_setting('transaction_read_only') as value")->value;
+        $observed['exclusive'] = (int) DB::connection(IntegrationDatabase::LOCK)->selectOne(
+            'select pg_try_advisory_lock(?, ?)::int as acquired',
+            [ProjectionGate::CLASS_ID, ProjectionGate::PAYMENT_DETAILS_OBJECT_ID],
+        )->acquired;
+    });
+
+    [$exitCode, $report] = verifierRun();
+    expect($exitCode)->toBe(VerificationReport::EXIT_CONSISTENT)
+        ->and($report['projection_control_state'])->toBe('ready')
+        ->and($observed['locks'])->toHaveCount(1)
+        ->and($observed['isolation'])->toBe('repeatable read')
+        ->and($observed['read_only'])->toBe('on')
+        ->and($observed['exclusive'])->toBe(0)
+        ->and(ProjectionGateLocks::onKey(ProjectionGate::CLASS_ID, ProjectionGate::PAYMENT_DETAILS_OBJECT_ID))->toBe([]);
+
+    expect((int) DB::connection(IntegrationDatabase::LOCK)->selectOne(
+        'select pg_try_advisory_lock(?, ?)::int as acquired',
+        [ProjectionGate::CLASS_ID, ProjectionGate::PAYMENT_DETAILS_OBJECT_ID],
+    )->acquired)->toBe(1);
 });
 
 /*

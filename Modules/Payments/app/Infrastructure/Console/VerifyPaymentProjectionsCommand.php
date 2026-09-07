@@ -119,6 +119,7 @@ final class VerifyPaymentProjectionsCommand extends Command
             'reason' => $report->reason,
             'duration_ms' => $durationMs,
             'complete' => $report->complete,
+            'projection_control_state' => $report->projectionControlState,
             'high_watermark' => $report->highWatermark,
             'audit_at' => $report->auditAt,
             'scanned' => $report->scanned,

@@ -105,6 +105,7 @@ it('reports the exact healthy schema and exits 0 on an empty backlog', function 
                 'eligible_count' => 0,
                 'oldest_eligible_age_seconds' => null,
                 'active_count' => 0,
+                'gate' => 'open',
             ],
         ])
         ->and($body['heartbeat']['timestamp'])->toBeString();
@@ -229,6 +230,7 @@ it('reports the database as unavailable, with null metrics and a non-zero exit, 
             'eligible_count' => null,
             'oldest_eligible_age_seconds' => null,
             'active_count' => null,
+            'gate' => null,
         ]);
 
     expect(Artisan::output())->not->toContain($sentinel)

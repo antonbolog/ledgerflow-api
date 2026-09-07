@@ -9,7 +9,9 @@ use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
 use Modules\Payments\Application\Initiation\IdempotencyContention;
 use Modules\Payments\Application\Initiation\IdempotencyPayloadMismatch;
+use Modules\Payments\Application\Initiation\ProjectionRebuilding as InitiationProjectionRebuilding;
 use Modules\Payments\Application\Query\PaymentNotFound;
+use Modules\Payments\Application\Query\ProjectionRebuilding as QueryProjectionRebuilding;
 use Symfony\Component\HttpFoundation\Response;
 use Throwable;
 
@@ -82,7 +84,7 @@ final readonly class ProblemDetailsMapper
             $this->detailFor($problem, $e),
             $request->getPathInfo(),
             $errors,
-            $problem === ProblemType::IdempotencyContention ? 1 : null,
+            in_array($problem, [ProblemType::IdempotencyContention, ProblemType::ProjectionRebuilding], true) ? 1 : null,
         )->toResponse();
 
         foreach (self::PRESERVED_HEADERS as $header) {
@@ -124,6 +126,14 @@ final readonly class ProblemDetailsMapper
             // payload mismatch, and a generic 503 is not idempotency contention.
             $e instanceof IdempotencyPayloadMismatch => ProblemType::IdempotencyPayloadMismatch,
             $e instanceof IdempotencyContention => ProblemType::IdempotencyContention,
+
+            // ONE PROBLEM TYPE, TWO EXCEPTION TYPES. T11's shared projection gate is
+            // checked from two different Infrastructure adapters - the write path's
+            // RetryingAtomicTransaction and the read path's DatabasePaymentQuery - and
+            // each raises its own context's exception rather than importing the
+            // other's, exactly as IdempotencyContention and PaymentNotFound already do
+            // for their own contexts. Both render as the one 503.
+            $e instanceof InitiationProjectionRebuilding, $e instanceof QueryProjectionRebuilding => ProblemType::ProjectionRebuilding,
 
             // ABOVE THE 404 FALLBACK ON PURPOSE. A generic framework 404 means "no
             // such route"; this one means "no such payment for this merchant", and

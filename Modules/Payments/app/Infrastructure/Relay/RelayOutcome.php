@@ -28,4 +28,15 @@ enum RelayOutcome: string
 
     /** Redis refused; the failure count and backoff committed. */
     case TransportRejected = 'transport_rejected';
+
+    /**
+     * T11's shared projection gate was closed. No row was selected, nothing was
+     * written, and the transport budget is untouched by construction.
+     *
+     * A SEPARATE CASE FROM NothingEligible, DELIBERATELY. An operator reading
+     * `payments:outbox:status` or a relay pass log must never mistake a closed
+     * gate for a drained backlog - they call for opposite responses, and
+     * collapsing them into one value would hide which one is true.
+     */
+    case GateClosed = 'gate_closed';
 }

@@ -6,14 +6,18 @@ use Illuminate\Database\Events\TransactionCommitting;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 use Modules\Merchant\Infrastructure\Persistence\Eloquent\Merchant;
 use Modules\Payments\Application\Initiation\IdempotencyContention;
 use Modules\Payments\Application\Initiation\InitiatePayment;
+use Modules\Payments\Application\Initiation\ProjectionRebuilding;
 use Modules\Payments\Domain\Payment\Events\PaymentInitiated;
+use Modules\Payments\Infrastructure\Projection\ProjectionGate;
 use Modules\Payments\Tests\Integration\ContentionProbe;
 use Modules\Payments\Tests\Integration\IdentityRecorder;
 use Modules\Payments\Tests\Integration\Initiations;
 use Modules\Payments\Tests\Integration\IntegrationDatabase;
+use Modules\Payments\Tests\Integration\ProjectionGateLocks;
 use Modules\Payments\Tests\Integration\ThrowingProjector;
 use Spatie\EventSourcing\Projectionist;
 
@@ -59,6 +63,12 @@ beforeEach(function (): void {
 afterEach(function (): void {
     IntegrationDatabase::rollbackOpenTransactions();
     IntegrationDatabase::releaseLocks();
+
+    // UNCONDITIONAL, NOT ONLY AT A TEST'S HAPPY-PATH END. See OutboxRelayTest's
+    // afterEach for why: a failed assertion between closing and reopening the gate
+    // must not leak `rebuilding` into every later test in this process.
+    initiationReopenGate();
+
     IntegrationDatabase::truncate();
     IntegrationDatabase::disconnectAll();
 });
@@ -455,4 +465,115 @@ it('explains a truncation it cannot lock, and gives the bound back afterwards', 
     // NON-VACUOUS: the row really is still locked, so the failure above was the
     // conflict this test staged and not some unrelated error.
     expect(IntegrationDatabase::observedCount('merchants'))->toBe(1);
+});
+
+/*
+|--------------------------------------------------------------------------
+| T11's shared projection gate
+|--------------------------------------------------------------------------
+|
+| Only the CLOSED-gate behaviour belongs here. Every test above ran with a
+| `ready` control row, and none of it changed - the regression boundary Slice 2
+| promises for T6.
+*/
+
+/** Close the gate as a rebuild-shaped holder of the durable row would. */
+function initiationCloseGate(): void
+{
+    DB::table('payment_projection_controls')->where('projection', 'payment_details')->update([
+        'state' => 'rebuilding',
+        'owner_token' => (string) Str::uuid7(),
+        'owner_pid' => 999_999,
+        'started_at' => now(),
+        'updated_at' => now(),
+    ]);
+}
+
+/** Reopen it, exactly as a completed rebuild would. */
+function initiationReopenGate(): void
+{
+    DB::table('payment_projection_controls')->where('projection', 'payment_details')->update([
+        'state' => 'ready',
+        'owner_token' => null,
+        'owner_pid' => null,
+        'started_at' => null,
+        'cleared_at' => null,
+        'updated_at' => now(),
+    ]);
+}
+
+it('refuses initiation with ProjectionRebuilding on the first attempt and writes nothing', function (): void {
+    $merchant = Merchant::factory()->create();
+    $context = Initiations::context($merchant->getKey());
+
+    initiationCloseGate();
+
+    $thrown = null;
+
+    try {
+        resolve(InitiatePayment::class)($context);
+    } catch (Throwable $exception) {
+        $thrown = $exception;
+    }
+
+    // NEVER RETRIED: ProjectionRebuilding carries no SQLSTATE, so
+    // RetryingAtomicTransaction's classifier treats it as non-retryable and it
+    // escapes on the first attempt - the gate does not reopen mid-loop.
+    expect($thrown)->toBeInstanceOf(ProjectionRebuilding::class);
+
+    expect(IntegrationDatabase::observedCount('payment_idempotency_receipts'))->toBe(0)
+        ->and(IntegrationDatabase::observedCount('stored_events'))->toBe(0)
+        ->and(IntegrationDatabase::observedCount('payment_outbox'))->toBe(0)
+        ->and(DB::transactionLevel())->toBe(0)
+        ->and(DB::connection()->getPdo()->inTransaction())->toBeFalse();
+
+    initiationReopenGate();
+
+    // The mutation: the gate reopened is what makes the refusal above non-vacuous.
+    $receipt = resolve(InitiatePayment::class)($context);
+    expect($receipt->paymentId)->toBe($context->paymentId);
+});
+
+it('holds the gate lock on its own connection while initiation is refused by the control row', function (): void {
+    $merchant = Merchant::factory()->create();
+    $context = Initiations::context($merchant->getKey());
+
+    initiationCloseGate();
+
+    $lockDuringTransaction = [];
+
+    // DB::listen() FIRES RIGHT AFTER EACH STATEMENT, WHILE THE TRANSACTION IS
+    // STILL OPEN — a TransactionCommitting listener never fires on this path: the
+    // gate throws, so RetryingAtomicTransaction's transaction() rolls back rather
+    // than commits.
+    DB::listen(function ($query) use (&$lockDuringTransaction): void {
+        if (str_contains($query->sql, 'payment_projection_controls')) {
+            $lockDuringTransaction = ProjectionGateLocks::onKey(
+                ProjectionGate::CLASS_ID,
+                ProjectionGate::PAYMENT_DETAILS_OBJECT_ID,
+            );
+        }
+    });
+
+    $thrown = null;
+
+    try {
+        resolve(InitiatePayment::class)($context);
+    } catch (Throwable $exception) {
+        $thrown = $exception;
+    }
+
+    expect($thrown)->toBeInstanceOf(ProjectionRebuilding::class);
+
+    // GRANTED, ON ONE BACKEND. The control row is what refused initiation, not the
+    // lock - both checks are load-bearing, for different failures (D3).
+    expect($lockDuringTransaction)->toHaveCount(1)
+        ->and($lockDuringTransaction[0]['mode'])->toBe('ShareLock')
+        ->and($lockDuringTransaction[0]['granted'])->toBeTrue();
+
+    // Gone once the transaction rolled back.
+    expect(ProjectionGateLocks::onKey(ProjectionGate::CLASS_ID, ProjectionGate::PAYMENT_DETAILS_OBJECT_ID))
+        ->toBe([]);
+
+    initiationReopenGate();
 });

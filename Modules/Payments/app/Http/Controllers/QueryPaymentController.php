@@ -22,8 +22,9 @@ use Modules\Payments\Application\Query\ProjectedPayment;
  * type as the one 404 document. A branch here would be a second place for the
  * three answers to drift apart.
  *
- * NO 503 BRANCH. projection_rebuilding has no producer until T11's shared
- * projection gate exists; this controller must not anticipate it.
+ * NO 503 BRANCH HERE EITHER. A closed projection gate leaves the port as
+ * ProjectionRebuilding, and ProblemDetailsMapper renders it - this controller
+ * still decides nothing about it.
  *
  * The bodies below ARE the contract, pinned in the projection and query
  * specification. Keys are written literally and in wire order rather than derived

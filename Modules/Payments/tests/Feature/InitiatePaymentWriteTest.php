@@ -290,3 +290,48 @@ it('writes the raw idempotency key to no durable column, exception or log line',
     // Without this the loop above proves nothing.
     expect($captured)->not->toBeEmpty();
 });
+
+/*
+|--------------------------------------------------------------------------
+| T11's shared projection gate
+|--------------------------------------------------------------------------
+*/
+
+it('answers 503 projection_rebuilding with Retry-After: 1 while the gate is closed, and writes nothing', function (): void {
+    DB::table('payment_projection_controls')->where('projection', 'payment_details')->update([
+        'state' => 'rebuilding',
+        'owner_token' => (string) Str::uuid7(),
+        'owner_pid' => 999_999,
+        'started_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    $merchant = Merchant::factory()->create();
+    $response = Initiation::send(merchant: $merchant);
+
+    $response->assertStatus(503);
+
+    expect($response->json('code'))->toBe('projection_rebuilding')
+        ->and($response->json('detail'))->toBe('A projection rebuild is in progress. Retry.')
+        ->and($response->headers->get('Retry-After'))->toBe('1')
+        ->and($response->headers->get('Content-Type'))->toStartWith('application/problem+json');
+
+    // NEVER RETRIED (see ProjectionRebuilding's docblock): it carries no SQLSTATE,
+    // so RetryingAtomicTransaction's classifier treats it as non-retryable and it
+    // escapes on the first attempt, with nothing durable written.
+    expect(DB::table('payment_idempotency_receipts')->count())->toBe(0)
+        ->and(DB::table('stored_events')->count())->toBe(0)
+        ->and(DB::table('payment_outbox')->count())->toBe(0);
+
+    DB::table('payment_projection_controls')->where('projection', 'payment_details')->update([
+        'state' => 'ready',
+        'owner_token' => null,
+        'owner_pid' => null,
+        'started_at' => null,
+        'cleared_at' => null,
+        'updated_at' => now(),
+    ]);
+
+    // The mutation: the gate reopened is what makes the refusal above non-vacuous.
+    Initiation::send(merchant: $merchant)->assertStatus(202);
+});

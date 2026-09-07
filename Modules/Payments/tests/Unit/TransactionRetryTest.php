@@ -2,12 +2,26 @@
 
 declare(strict_types=1);
 
+use Illuminate\Database\ConnectionInterface;
 use Illuminate\Database\DeadlockException;
 use Modules\Payments\Application\Initiation\IdempotencyContention;
 use Modules\Payments\Infrastructure\Persistence\RetryingAtomicTransaction;
+use Modules\Payments\Infrastructure\Projection\ProjectionGate;
 use Modules\Payments\Tests\Support\RecordingConnection;
 use Modules\Payments\Tests\Support\SqlStates;
 use Modules\Payments\Tests\Support\StringCodeException;
+
+/**
+ * The runner under test, wired with an open-gate ProjectionGate over the SAME
+ * fake connection — mirroring how PaymentsServiceProvider wires production,
+ * where RetryingAtomicTransaction and ProjectionGate resolve one shared
+ * Connection. T11's gate is not this file's subject; see RecordingConnection's
+ * docblock for why every test here sees it open.
+ */
+function retryingAtomicTransaction(ConnectionInterface $connection): RetryingAtomicTransaction
+{
+    return new RetryingAtomicTransaction($connection, new ProjectionGate($connection));
+}
 
 /*
 |--------------------------------------------------------------------------
@@ -110,7 +124,7 @@ it('attempts a non-retryable failure exactly once and rethrows it unchanged', fu
     $thrown = null;
 
     try {
-        new RetryingAtomicTransaction($connection)->run(fn (): string => 'never reached');
+        retryingAtomicTransaction($connection)->run(fn (): string => 'never reached');
     } catch (Throwable $exception) {
         $thrown = $exception;
     }
@@ -133,7 +147,7 @@ it('does not retry a failure that carries no sqlstate at all', function (): void
     $thrown = null;
 
     try {
-        new RetryingAtomicTransaction($connection)->run(fn (): string => 'never reached');
+        retryingAtomicTransaction($connection)->run(fn (): string => 'never reached');
     } catch (Throwable $exception) {
         $thrown = $exception;
     }
@@ -156,7 +170,7 @@ it('stops a retryable failure at three attempts and reports contention', functio
     $thrown = null;
 
     try {
-        new RetryingAtomicTransaction($connection)->run(fn (): string => 'succeeded on the fourth');
+        retryingAtomicTransaction($connection)->run(fn (): string => 'succeeded on the fourth');
     } catch (Throwable $exception) {
         $thrown = $exception;
     }
@@ -177,7 +191,7 @@ it('retries a retryable failure and returns the value once it succeeds', functio
     // assertion above.
     $connection = new RecordingConnection(SqlStates::fromErrorInfo('40001'));
 
-    $result = new RetryingAtomicTransaction($connection)->run(fn (): string => 'committed');
+    $result = retryingAtomicTransaction($connection)->run(fn (): string => 'committed');
 
     expect($result)->toBe('committed')
         ->and($connection->calls)->toBe(2);
@@ -195,7 +209,7 @@ it('gives laravel one inner attempt on every call so the budget cannot multiply'
     );
 
     try {
-        new RetryingAtomicTransaction($connection)->run(fn (): string => 'unreachable');
+        retryingAtomicTransaction($connection)->run(fn (): string => 'unreachable');
     } catch (IdempotencyContention) {
         // The outcome is asserted by the exhaustion test; this one is about the
         // argument, on EVERY attempt and not just the first.

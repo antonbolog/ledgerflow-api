@@ -77,7 +77,9 @@ marker.
 - `payment_projector_receipts` owns idempotent projector completion by `(projector_name, event_id)`.
 - `payment_details` owns queryable payment state.
 - `payment_projection_controls` is planned for T11, not present: it will own durable
-  `ready`/`rebuilding` state, with advisory locks providing mutual exclusion.
+  `ready`/`rebuilding` state, an owner token, an owner backend pid, and `cleared_at`, with advisory
+  locks providing mutual exclusion. Designed in
+  [ADR 0005](../adr/0005-payments-projection-gate-and-rebuild-ownership.md).
 
 ## Verification and targeted repair
 
@@ -88,15 +90,22 @@ See the [operator procedure](../operations/runtime-contract.md#manual-verificati
 
 ## Rebuild path
 
-The following gate and rebuild path are planned for T11, not implemented by T10.
+T11's control-row migration and shared gate primitive are implemented.
+The traffic integration and rebuild path below remain planned; no Payments traffic path calls the gate yet.
+See [ADR 0005](../adr/0005-payments-projection-gate-and-rebuild-ownership.md).
 
 A controlled rebuild closes only Payments traffic and workers, acquires an exclusive
 connection-affine PostgreSQL advisory lock, clears derived projection state, and replays stored
-Payments events in bounded global-ID batches. It exposes `ready` only after complete success.
+Payments events in bounded global-ID batches from canonical history. It exposes `ready` only after
+complete success. Traffic reaching a closed gate gets a retryable `503` on HTTP and a deferral on the
+relay and consumer that consumes no delivery or poison budget.
 
-A crash releases the session lock but leaves durable state as `rebuilding`. The next authorized
-run clears partial derived state and restarts from zero. Resumable staging-table rebuild is deferred
-until measured volume makes the simpler gated replay operationally unacceptable.
+A lost session releases the advisory lock but leaves durable state as `rebuilding`. The next
+authorized run clears partial derived state and restarts from zero, unless the durable row proves no
+clear was ever committed. A rebuild proves it is still the owner by holding the lock, not by a
+successful query, a transaction counter, or a stored process id, none of which survive a silent
+reconnect. Resumable staging-table rebuild is deferred until measured volume makes the simpler gated
+replay operationally unacceptable.
 
 ## Detailed specifications
 

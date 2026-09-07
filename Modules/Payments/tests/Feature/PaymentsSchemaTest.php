@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Modules\Merchant\Infrastructure\Persistence\Eloquent\Merchant;
 use Modules\Payments\Infrastructure\Persistence\RetryingAtomicTransaction;
+use Modules\Payments\Infrastructure\Projection\PaymentProjectionConsumer;
 
 /*
 |--------------------------------------------------------------------------
@@ -46,6 +47,7 @@ const PAYMENTS_TABLES = [
     'payment_outbox',
     'payment_projector_receipts',
     'payment_details',
+    'payment_projection_controls',
 ];
 
 /** The complete set of Payments-owned timestamp columns, qualified. */
@@ -61,6 +63,10 @@ const T5_TIMESTAMP_COLUMNS = [
     'payment_outbox.updated_at',
     'payment_projector_receipts.created_at',
     'payment_details.initiated_at',
+    'payment_projection_controls.cleared_at',
+    'payment_projection_controls.created_at',
+    'payment_projection_controls.started_at',
+    'payment_projection_controls.updated_at',
 ];
 
 /**
@@ -1064,4 +1070,103 @@ it('reports 23514 naming the violated projection constraint', function (): void 
 
     expect($sqlState)->toBe('23514')
         ->and($message)->toContain('payment_outbox_projection_failure_count_non_negative');
+});
+
+/*
+|--------------------------------------------------------------------------
+| T11 — the durable projection gate control row
+|--------------------------------------------------------------------------
+|
+| The advisory lock is the gate's other half and cannot be read from the
+| catalogs; ProjectionGateTest owns that evidence against real backends. What
+| belongs here is the shape and the state machine, read back from PostgreSQL
+| rather than from the migration source.
+|
+*/
+
+it('gives payment_projection_controls its exact documented shape', function (): void {
+    $columns = t5Columns('payment_projection_controls');
+
+    expect(array_keys($columns))->toEqualCanonicalizing([
+        'projection', 'state', 'owner_token', 'owner_pid',
+        'started_at', 'cleared_at', 'created_at', 'updated_at',
+    ])
+        ->and($columns['projection'])->toMatchArray(['type' => 'character varying', 'nullable' => false])
+        // varchar(32), matching payment_details.status: a CHECK is widened with
+        // one statement where a native enum would need a type migration.
+        ->and($columns['state'])->toMatchArray(['type' => 'character varying', 'nullable' => false, 'length' => 32])
+        // THE THREE OWNERSHIP COLUMNS ARE NULLABLE, and null is the resting
+        // state. A `ready` projection has no owner, which the ready CHECK below
+        // enforces rather than assumes.
+        ->and($columns['owner_token'])->toMatchArray(['type' => 'uuid', 'nullable' => true])
+        ->and($columns['owner_pid'])->toMatchArray(['type' => 'integer', 'nullable' => true])
+        ->and($columns['started_at'])->toMatchArray(['type' => 'timestamp with time zone', 'nullable' => true])
+        // NULLABLE, and its nullness is load-bearing: null means no clear has
+        // been committed since the last completed replay, which is the single
+        // fact guarded recovery is allowed to act on.
+        ->and($columns['cleared_at'])->toMatchArray(['type' => 'timestamp with time zone', 'nullable' => true])
+        ->and($columns['created_at'])->toMatchArray(['type' => 'timestamp with time zone', 'nullable' => false])
+        ->and($columns['updated_at'])->toMatchArray(['type' => 'timestamp with time zone', 'nullable' => false]);
+
+    // No column default anywhere, `state` included. A default would let a row be
+    // inserted without deciding whether the projection is readable.
+    foreach ($columns as $name => $column) {
+        expect($column['default'])->toBeNull($name);
+    }
+
+    // EXACTLY ONE KEY, and no second. The table holds one row per projection and
+    // every gate check reads it by primary key; an index on `state` would be
+    // speculative on a table that fits in a single page.
+    $indexes = t5IndexCatalog('payment_projection_controls');
+
+    expect(array_keys($indexes))->toEqualCanonicalizing(['payment_projection_controls_pkey'])
+        ->and($indexes['payment_projection_controls_pkey'])
+        ->toMatchArray(['columns' => 'projection', 'unique' => true, 'partial' => false]);
+
+    expect(t8PrimaryKey('payment_projection_controls'))->toBe([
+        'name' => 'payment_projection_controls_pkey',
+        'columns' => 'projection',
+    ]);
+
+    // NO FOREIGN KEY, asserted as a whole array. The gate must be readable even
+    // when the projection it governs has been cleared to nothing, so a key to
+    // payment_details would invert the dependency exactly backwards.
+    expect(t8ForeignKeys('payment_projection_controls'))->toBe([]);
+});
+
+it('seeds exactly one ready control row as part of the schema', function (): void {
+    // THE ROW IS SCHEMA, NOT FIXTURE DATA. A missing control row is treated as a
+    // CLOSED gate rather than as `ready`, so a projection whose row never existed
+    // would be permanently unreadable. Seeding it in the migration makes its
+    // presence a schema fact.
+    $rows = DB::table('payment_projection_controls')->get();
+
+    expect($rows)->toHaveCount(1);
+    expect($rows[0]->projection)->toBe('payment_details');
+    expect($rows[0]->state)->toBe('ready');
+    expect($rows[0]->owner_token)->toBeNull();
+    expect($rows[0]->owner_pid)->toBeNull();
+    expect($rows[0]->started_at)->toBeNull();
+    expect($rows[0]->cleared_at)->toBeNull();
+
+    // The projection name is the durable projector name the receipts table
+    // already uses, not a second vocabulary for the same read model.
+    expect($rows[0]->projection)->toBe(PaymentProjectionConsumer::PROJECTOR_NAME);
+});
+
+it('constrains the projection gate state machine under addressable names', function (): void {
+    $checks = t7CheckConstraints('payment_projection_controls');
+
+    expect(array_keys($checks))->toEqualCanonicalizing([
+        'payment_projection_controls_state_allowed',
+        'payment_projection_controls_ready_unowned',
+        'payment_projection_controls_rebuilding_owned',
+    ]);
+
+    // 63-byte identifier limit, measured rather than eyeballed: the longest of
+    // the three is 44 bytes, and a truncated name cannot be dropped by the name
+    // down() computes.
+    foreach (array_keys($checks) as $name) {
+        expect(strlen($name))->toBeLessThan(64);
+    }
 });

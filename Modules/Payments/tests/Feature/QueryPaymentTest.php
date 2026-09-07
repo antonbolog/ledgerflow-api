@@ -25,13 +25,9 @@ use Modules\Payments\Tests\Support\Initiation;
 |
 | WHAT THIS FILE PROVES: status, exact body, field order, header presence and
 | absence, and that missing, foreign and malformed ids are ONE answer at the wire.
-| The transaction, connection and table-allowlist claims below HTTP belong to
-| Modules/Payments/tests/Integration/PaymentQueryTest.php, where no RefreshDatabase
-| wrapper turns a transaction into a savepoint.
-|
-| THERE IS NO REBUILDING TEST. 503 projection_rebuilding has no producer until
-| T11's shared projection gate exists; asserting it here would require inventing
-| one.
+| The transaction, connection, table-allowlist and gate-affinity claims below HTTP
+| belong to Modules/Payments/tests/Integration/PaymentQueryTest.php, where no
+| RefreshDatabase wrapper turns a transaction into a savepoint.
 |
 */
 
@@ -265,4 +261,55 @@ it('leaves an unknown api path on the generic not_found contract', function (): 
     $response->assertStatus(404);
 
     expect($response->json('code'))->toBe('not_found');
+});
+
+/*
+|--------------------------------------------------------------------------
+| T11's shared projection gate
+|--------------------------------------------------------------------------
+*/
+
+it('answers 503 projection_rebuilding with Retry-After: 1 while the gate is closed', function (): void {
+    $merchant = Merchant::factory()->create();
+    $paymentId = (string) Str::uuid7();
+
+    // A PROJECTED ROW EXISTS, so a response that skipped the gate check would
+    // answer 200 instead of refusing - the non-vacuity control.
+    showPaymentProjection($merchant->getKey(), $paymentId);
+
+    DB::table('payment_projection_controls')->where('projection', 'payment_details')->update([
+        'state' => 'rebuilding',
+        'owner_token' => (string) Str::uuid7(),
+        'owner_pid' => 999_999,
+        'started_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    $response = showPayment($paymentId, $merchant);
+
+    $response->assertStatus(503);
+
+    expect($response->json())->toBe([
+        'type' => '/problems/projection-rebuilding',
+        'title' => 'Projection rebuilding',
+        'status' => 503,
+        'detail' => 'A projection rebuild is in progress. Retry.',
+        'instance' => '/api/payments/'.$paymentId,
+        'code' => 'projection_rebuilding',
+    ]);
+
+    expect($response->headers->get('Retry-After'))->toBe('1')
+        ->and($response->headers->get('Content-Type'))->toStartWith('application/problem+json');
+
+    DB::table('payment_projection_controls')->where('projection', 'payment_details')->update([
+        'state' => 'ready',
+        'owner_token' => null,
+        'owner_pid' => null,
+        'started_at' => null,
+        'cleared_at' => null,
+        'updated_at' => now(),
+    ]);
+
+    // The mutation: the gate reopened is what makes the refusal above non-vacuous.
+    showPayment($paymentId, $merchant)->assertStatus(200);
 });

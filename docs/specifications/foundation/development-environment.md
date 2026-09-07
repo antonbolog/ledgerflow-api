@@ -625,9 +625,9 @@ for an environment reason unrelated to `compose.yaml` or the `Dockerfile`.
   no target that starts either alone.
 - **No shared projection gate.** `OutboxRelay::relayOne()` acquires no advisory lock and reads no
   `payment_projection_controls` row — recorded as HS-1 in
-  [outbox delivery](../payments/outbox-delivery.md#hs-1-no-shared-projection-gate-is-acquired) and as
+  [outbox delivery](../payments/outbox-delivery.md#hs-1-discharged-by-t11-slice-2) and as
   T11's reciprocal obligation in
-  [verification and rebuild](../payments/verification-and-rebuild.md#t7s-reciprocal-obligation-the-gate-does-not-exist-yet-in-the-relay).
+  [verification and rebuild](../payments/verification-and-rebuild.md#t7s-reciprocal-obligation-discharged-by-t11-slice-2).
 - **No live scheduler ran inside Pest.** Every `everySecond()`, heartbeat, and status assertion in the
   suite uses an injected monotonic clock or a direct command invocation; the only evidence that
   `schedule:work` itself drives `payments:outbox:relay` on a real cadence is the disposable Compose

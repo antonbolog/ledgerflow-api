@@ -158,6 +158,11 @@ apart, so this margin is for the one cold first tick only.
   one statement before eligibility selection.
 - No production code claims zero advisory locks are ever taken during relay — HS-1 records that as
   temporary, not permanent, so a later reader must not treat this ADR as forbidding T11's gate.
+- **HS-1 now has an approved design to point at.**
+  [ADR 0005](0005-payments-projection-gate-and-rebuild-ownership.md) records the control row, the
+  advisory-key derivation, the non-blocking traffic acquisition, and the deferral semantics. It is
+  **not implemented**, so the relay still runs with no gate; HS-1 is discharged by T11's gate slice,
+  not by that ADR existing. The one-statement insertion point described above is unchanged.
 - `redis-data` persistence across scheduler restarts is now a documented operational fact, not an
   edge case a future incident rediscovers: a restarted scheduler is briefly `stale`, never falsely
   `fresh`, before its own next tick.
@@ -176,6 +181,8 @@ apart, so this margin is for the one cold first tick only.
   ADR decides the mechanism for, including the full state-transition table and queue transport policy.
 - [Verification and rebuild](../specifications/payments/verification-and-rebuild.md) — T11's reciprocal
   obligation to add the shared gate this ADR omits.
+- [ADR 0005](0005-payments-projection-gate-and-rebuild-ownership.md) — the gate design that discharges
+  HS-1 once T11 implements it.
 - [Development environment](../specifications/foundation/development-environment.md) — what T7 added,
   the disposable-project environment limitation, and the non-claims this ADR does not restate.
 - [ADR 0003](0003-postgresql-idempotency-arbitration.md) — the retry-allowlist and commit-boundary

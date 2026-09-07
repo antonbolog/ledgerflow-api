@@ -12,7 +12,10 @@ use Modules\Payments\Application\Query\PaymentNotFound;
 use Modules\Payments\Application\Query\PaymentQuery;
 use Modules\Payments\Application\Query\PendingPayment;
 use Modules\Payments\Application\Query\ProjectedPayment;
+use Modules\Payments\Application\Query\ProjectionRebuilding;
+use Modules\Payments\Infrastructure\Projection\ProjectionGate;
 use Modules\Payments\Tests\Integration\IntegrationDatabase;
+use Modules\Payments\Tests\Integration\ProjectionGateLocks;
 
 /*
 |--------------------------------------------------------------------------
@@ -117,6 +120,12 @@ beforeEach(function (): void {
 afterEach(function (): void {
     IntegrationDatabase::rollbackOpenTransactions();
     IntegrationDatabase::releaseLocks();
+
+    // UNCONDITIONAL, NOT ONLY AT A TEST'S HAPPY-PATH END. See OutboxRelayTest's
+    // afterEach for why: a failed assertion between closing and reopening the gate
+    // must not leak `rebuilding` into every later test in this process.
+    paymentQueryReopenGate();
+
     IntegrationDatabase::truncate();
     IntegrationDatabase::disconnectAll();
 });
@@ -202,10 +211,15 @@ it('short-circuits the receipt fallback when the projection exists', function ()
 
     expect($found)->toBeInstanceOf(ProjectedPayment::class);
 
-    // One statement, and it is the projection lookup. An implementation that read
-    // the receipt anyway would answer identically and fail only here.
-    expect(paymentQuerySql($statements))->toHaveCount(1);
-    expect(paymentQuerySql($statements)[0])->toContain('payment_details')
+    // T11'S GATE, THEN THE PROJECTION LOOKUP - three statements, not one. An
+    // implementation that read the receipt anyway would answer identically and
+    // fail only on the last assertion below.
+    $sql = paymentQuerySql($statements);
+
+    expect($sql)->toHaveCount(3)
+        ->and($sql[0])->toContain('pg_try_advisory_xact_lock_shared')
+        ->and($sql[1])->toContain('payment_projection_controls');
+    expect($sql[2])->toContain('payment_details')
         ->not->toContain('payment_idempotency_receipts');
 });
 
@@ -335,10 +349,12 @@ it('runs both lookups in one transaction on the injected connection', function (
     expect($begun)->toBe(1)
         ->and($committed)->toBe(1);
 
-    // Both statements ran at depth 1 - inside that transaction, not around it.
+    // All four statements ran at depth 1 - inside that transaction, not around it.
+    // The first two are T11's gate (the try-lock, then the control row); the last
+    // two are the projection lookup and the receipt fallback it reaches.
     $rows = iterator_to_array($statements);
-    expect($rows)->toHaveCount(2)
-        ->and(array_column($rows, 'level'))->toBe([1, 1])
+    expect($rows)->toHaveCount(4)
+        ->and(array_column($rows, 'level'))->toBe([1, 1, 1, 1])
         ->and(array_unique(array_column($rows, 'connection')))->toBe([DB::getDefaultConnection()]);
 
     // THE INJECTED CONNECTION IS THE DEFAULT CONNECTION OBJECT, by identity rather
@@ -368,24 +384,149 @@ it('reads only the two allowed tables and writes nothing', function (): void {
     $sql = paymentQuerySql($statements);
     expect($sql)->not->toBeEmpty();
 
+    $sawGateProbe = false;
+
     foreach ($sql as $statement) {
         // READ-ONLY, ASSERTED ON THE VERB. An adapter that cached a lookup by
         // writing a row would be caught here and nowhere else in this file.
         expect($statement)->toStartWith('select');
 
+        // T11'S ADVISORY-LOCK PROBE NAMES NO TABLE AT ALL - it is a system function
+        // call, `select pg_try_advisory_xact_lock_shared(...)`, with no FROM clause.
+        // Recorded rather than skipped silently, so a probe that stopped running
+        // could not make this loop vacuously pass.
+        if (str_contains($statement, 'pg_try_advisory_xact_lock_shared')) {
+            $sawGateProbe = true;
+
+            continue;
+        }
+
         // AN ALLOWLIST, NOT A LIST OF TABLES WE HAPPENED TO THINK OF. Naming
-        // forbidden tables individually would pass any table nobody predicted -
-        // `payment_projection_controls` above all, which is exactly the read T11
-        // prepends to this adapter. So every table the statement names is
-        // collected and the set is required to be a subset of the two allowed
-        // ones; `join` is matched as well as `from`, or a join would smuggle a
-        // third table into a statement that still names an allowed one.
-        preg_match_all('/(?:from|join)\s+"([^"]+)"/i', $statement, $tables);
+        // forbidden tables individually would pass any table nobody predicted. So
+        // every table the statement names is collected and the set is required to
+        // be a subset of the three allowed ones - `payment_projection_controls`
+        // included, which is T11's own gate read, quoted like the other two
+        // (Eloquent's table()) or bare (the gate's raw selectOne()); `join` is
+        // matched as well as `from`, or a join would smuggle a fourth table into a
+        // statement that still names an allowed one.
+        preg_match_all('/(?:from|join)\s+"?([a-z_]+)"?/i', $statement, $tables);
 
         expect($tables[1])->not->toBeEmpty()
             ->and(array_values(array_diff(
                 array_unique($tables[1]),
-                ['payment_details', 'payment_idempotency_receipts'],
+                ['payment_details', 'payment_idempotency_receipts', 'payment_projection_controls'],
             )))->toBe([]);
     }
+
+    expect($sawGateProbe)->toBeTrue();
+});
+
+/*
+|--------------------------------------------------------------------------
+| T11's shared projection gate
+|--------------------------------------------------------------------------
+|
+| Only the CLOSED-gate behaviour belongs here. Every test above ran with a
+| `ready` control row, and none of it changed - the regression boundary Slice 2
+| promises for T9.
+*/
+
+/** Close the gate as a rebuild-shaped holder of the durable row would. */
+function paymentQueryCloseGate(): void
+{
+    DB::table('payment_projection_controls')->where('projection', 'payment_details')->update([
+        'state' => 'rebuilding',
+        'owner_token' => (string) Str::uuid7(),
+        'owner_pid' => 999_999,
+        'started_at' => now(),
+        'updated_at' => now(),
+    ]);
+}
+
+/** Reopen it, exactly as a completed rebuild would. */
+function paymentQueryReopenGate(): void
+{
+    DB::table('payment_projection_controls')->where('projection', 'payment_details')->update([
+        'state' => 'ready',
+        'owner_token' => null,
+        'owner_pid' => null,
+        'started_at' => null,
+        'cleared_at' => null,
+        'updated_at' => now(),
+    ]);
+}
+
+it('refuses a read with ProjectionRebuilding before either table is touched, and leaves no transaction open', function (): void {
+    $merchantId = Merchant::factory()->create()->getKey();
+    $paymentId = (string) Str::uuid7();
+
+    // A PROJECTED ROW EXISTS, so an adapter that skipped the gate check would
+    // answer normally instead of refusing - the non-vacuity control.
+    paymentQueryProjection($merchantId, $paymentId);
+
+    paymentQueryCloseGate();
+
+    $statements = paymentQueryStatements();
+
+    expect(fn () => paymentQueryAdapter()->findOwned($merchantId, $paymentId))
+        ->toThrow(ProjectionRebuilding::class);
+
+    // TWO STATEMENTS, BOTH T11's GATE, NEITHER TABLE T9 OWNS.
+    $sql = paymentQuerySql($statements);
+
+    expect($sql)->toHaveCount(2)
+        ->and($sql[0])->toContain('pg_try_advisory_xact_lock_shared')
+        ->and($sql[1])->toContain('payment_projection_controls')
+        ->and(implode(' ', $sql))->not->toContain('payment_details')
+        ->and(implode(' ', $sql))->not->toContain('payment_idempotency_receipts');
+
+    // Rolled back cleanly, exactly like PaymentNotFound's own refusal path.
+    expect(DB::connection()->transactionLevel())->toBe(0)
+        ->and(DB::connection()->getPdo()->inTransaction())->toBeFalse();
+
+    paymentQueryReopenGate();
+});
+
+it('holds the gate lock on its own connection while a read is refused by the control row', function (): void {
+    $merchantId = Merchant::factory()->create()->getKey();
+    $paymentId = (string) Str::uuid7();
+
+    paymentQueryCloseGate();
+
+    $lockDuringTransaction = [];
+
+    // DB::listen() FIRES RIGHT AFTER EACH STATEMENT, WHILE THE TRANSACTION IS
+    // STILL OPEN — unlike a TransactionCommitting listener, which never fires on
+    // this path: the gate throws, so the transaction rolls back rather than
+    // commits.
+    DB::listen(function ($query) use (&$lockDuringTransaction): void {
+        if (str_contains($query->sql, 'payment_projection_controls')) {
+            $lockDuringTransaction = ProjectionGateLocks::onKey(
+                ProjectionGate::CLASS_ID,
+                ProjectionGate::PAYMENT_DETAILS_OBJECT_ID,
+            );
+        }
+    });
+
+    expect(fn () => paymentQueryAdapter()->findOwned($merchantId, $paymentId))
+        ->toThrow(ProjectionRebuilding::class);
+
+    // GRANTED, ON ONE BACKEND. The control row is what refused the read, not the
+    // lock - both checks are load-bearing, for different failures (D3).
+    expect($lockDuringTransaction)->toHaveCount(1)
+        ->and($lockDuringTransaction[0]['mode'])->toBe('ShareLock')
+        ->and($lockDuringTransaction[0]['granted'])->toBeTrue();
+
+    // THE SAME BACKEND THE ADAPTER'S TRANSACTION RUNS ON, proved by object
+    // identity - the stronger evidence T4's rule about self-reported lock
+    // possession leaves available.
+    $adapter = paymentQueryAdapter();
+    $connection = new ReflectionProperty($adapter, 'connection')->getValue($adapter);
+    expect($connection)->toBe(DB::connection());
+
+    // Gone once the transaction rolled back.
+    expect(ProjectionGateLocks::onKey(ProjectionGate::CLASS_ID, ProjectionGate::PAYMENT_DETAILS_OBJECT_ID))
+        ->toBe([]);
+
+    paymentQueryReopenGate();
 });

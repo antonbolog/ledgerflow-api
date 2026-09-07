@@ -95,6 +95,7 @@ final readonly class VerificationReport
         public array $findingCounts,
         public array $examples,
         public bool $examplesTruncated,
+        public ?string $projectionControlState,
     ) {}
 
     /**
@@ -111,6 +112,7 @@ final readonly class VerificationReport
         array $findingCounts,
         array $examples,
         bool $examplesTruncated,
+        ?string $projectionControlState = null,
     ): self {
         // FULL SCOPE OR NOT COMPLETE, ENFORCED HERE RATHER THAN TRUSTED. An
         // adapter that grew a fifth pass, or lost one to an early return, would
@@ -136,6 +138,7 @@ final readonly class VerificationReport
             findingCounts: $findingCounts,
             examples: $examples,
             examplesTruncated: $examplesTruncated,
+            projectionControlState: $projectionControlState,
         );
     }
 
@@ -160,6 +163,7 @@ final readonly class VerificationReport
         array $findingCounts,
         array $examples,
         bool $examplesTruncated,
+        ?string $projectionControlState = null,
     ): self {
         return new self(
             complete: false,
@@ -171,6 +175,7 @@ final readonly class VerificationReport
             findingCounts: $findingCounts,
             examples: $examples,
             examplesTruncated: $examplesTruncated,
+            projectionControlState: $projectionControlState,
         );
     }
 

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Carbon\CarbonImmutable;
 use Illuminate\Database\DatabaseManager;
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Database\Events\TransactionCommitting;
 use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Support\Facades\Artisan;
@@ -17,8 +18,10 @@ use Modules\Payments\Application\Repair\RepairOutcome;
 use Modules\Payments\Application\Repair\RepairReason;
 use Modules\Payments\Domain\Payment\Events\PaymentInitiated;
 use Modules\Payments\Infrastructure\Projection\PaymentProjectionConsumer;
+use Modules\Payments\Infrastructure\Projection\ProjectionGate;
 use Modules\Payments\Infrastructure\Repair\DatabaseOutboxRepair;
 use Modules\Payments\Tests\Integration\IntegrationDatabase;
+use Modules\Payments\Tests\Integration\ProjectionGateLocks;
 use Modules\Payments\Tests\Support\FailingLogger;
 
 /*
@@ -159,6 +162,7 @@ beforeEach(function (): void {
     IntegrationDatabase::register();
     IntegrationDatabase::refuseIfWrapped();
     IntegrationDatabase::truncate();
+    $this->controlBefore = (array) DB::table('payment_projection_controls')->first();
 });
 
 afterEach(function (): void {
@@ -166,8 +170,97 @@ afterEach(function (): void {
 
     IntegrationDatabase::rollbackOpenTransactions();
     IntegrationDatabase::releaseLocks();
+    ProjectionGateLocks::releaseAll(IntegrationDatabase::LOCK);
+    DB::table('payment_projection_controls')->updateOrInsert(
+        ['projection' => ProjectionGate::PAYMENT_DETAILS], $this->controlBefore,
+    );
     IntegrationDatabase::truncate();
     IntegrationDatabase::disconnectAll();
+});
+
+it('refuses a closed maintenance gate before canonical locking without changing any durable state', function (string $closure): void {
+    $seeded = repairSeed(envelopeOverrides: ['event_type' => 'payments.drifted']);
+    $envelope = repairEnvelope($seeded['event_id']);
+    $untouched = repairUntouchedState();
+
+    if ($closure === 'lock') {
+        DB::connection(IntegrationDatabase::LOCK)->select('select pg_advisory_lock(?, ?)', [
+            ProjectionGate::CLASS_ID, ProjectionGate::PAYMENT_DETAILS_OBJECT_ID,
+        ]);
+    } elseif ($closure === 'row') {
+        DB::table('payment_projection_controls')->update([
+            'state' => 'rebuilding', 'owner_token' => (string) Str::uuid7(),
+            'owner_pid' => ProjectionGateLocks::pid(IntegrationDatabase::LOCK),
+            'started_at' => now(), 'cleared_at' => now(),
+        ]);
+    } else {
+        DB::table('payment_projection_controls')->delete();
+    }
+
+    $control = DB::table('payment_projection_controls')->first();
+    DB::enableQueryLog();
+    DB::flushQueryLog();
+    [$exitCode, $result] = repairRun($seeded['event_id']);
+    $queries = array_column(DB::getQueryLog(), 'query');
+    DB::disableQueryLog();
+
+    expect($exitCode)->toBe(RepairOutcome::EXIT_REFUSED)
+        ->and($result['reason'])->toBe('rebuild_in_progress')
+        ->and($result['mutation_state'])->toBe(RepairMutationState::None->value)
+        ->and($result['changed_fields'])->toBe([])
+        ->and($result['delivery_quiesced'])->toBeTrue()
+        ->and(repairEnvelope($seeded['event_id']))->toBe($envelope)
+        ->and(repairUntouchedState())->toEqual($untouched)
+        ->and(DB::table('payment_projection_controls')->first())->toEqual($control)
+        ->and(DB::transactionLevel())->toBe(0);
+
+    foreach ($queries as $query) {
+        expect($query)->not->toMatch('/\b(stored_events|payment_outbox|payment_details|payment_projector_receipts)\b/i');
+    }
+
+    ProjectionGateLocks::releaseAll(IntegrationDatabase::LOCK);
+    DB::table('payment_projection_controls')->updateOrInsert(
+        ['projection' => ProjectionGate::PAYMENT_DETAILS], $this->controlBefore,
+    );
+    [$reopened, $result] = repairRun($seeded['event_id']);
+    expect($reopened)->toBe(RepairOutcome::EXIT_DONE)
+        ->and($result['outcome'])->toBe(RepairOutcome::OUTCOME_REPAIRED);
+})->with(['exclusive lock before claim' => 'lock', 'abandoned rebuilding row' => 'row', 'missing control row' => 'missing']);
+
+it('holds the shared gate on the repair write backend until its commit', function (): void {
+    $seeded = repairSeed(withEnvelope: false);
+    $pid = ProjectionGateLocks::pid(DB::getDefaultConnection());
+    expect($pid)->not->toBe(ProjectionGateLocks::pid(IntegrationDatabase::LOCK));
+    $observed = [];
+
+    DB::listen(function (QueryExecuted $query) use (&$observed, $pid): void {
+        if ($query->connection !== DB::connection() || ! str_starts_with(strtolower(ltrim($query->sql)), 'insert into payment_outbox')) {
+            return;
+        }
+
+        $observed['locks'] = array_values(array_filter(
+            ProjectionGateLocks::onKey(ProjectionGate::CLASS_ID, ProjectionGate::PAYMENT_DETAILS_OBJECT_ID),
+            static fn (array $lock): bool => $lock['pid'] === $pid && $lock['granted']
+                && $lock['mode'] === 'ShareLock' && $lock['objsubid'] === 2,
+        ));
+        $observed['isolation'] = DB::selectOne("select current_setting('transaction_isolation') as value")->value;
+        $observed['exclusive'] = (int) DB::connection(IntegrationDatabase::LOCK)->selectOne(
+            'select pg_try_advisory_lock(?, ?)::int as acquired',
+            [ProjectionGate::CLASS_ID, ProjectionGate::PAYMENT_DETAILS_OBJECT_ID],
+        )->acquired;
+    });
+
+    [$exitCode] = repairRun($seeded['event_id']);
+    expect($exitCode)->toBe(RepairOutcome::EXIT_DONE)
+        ->and($observed['locks'])->toHaveCount(1)
+        ->and($observed['isolation'])->toBe('read committed')
+        ->and($observed['exclusive'])->toBe(0)
+        ->and(ProjectionGateLocks::onKey(ProjectionGate::CLASS_ID, ProjectionGate::PAYMENT_DETAILS_OBJECT_ID))->toBe([]);
+
+    expect((int) DB::connection(IntegrationDatabase::LOCK)->selectOne(
+        'select pg_try_advisory_lock(?, ?)::int as acquired',
+        [ProjectionGate::CLASS_ID, ProjectionGate::PAYMENT_DETAILS_OBJECT_ID],
+    )->acquired)->toBe(1);
 });
 
 /*

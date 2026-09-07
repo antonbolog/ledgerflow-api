@@ -11,6 +11,8 @@ use Modules\Payments\Application\Query\PaymentNotFound;
 use Modules\Payments\Application\Query\PaymentQuery;
 use Modules\Payments\Application\Query\PendingPayment;
 use Modules\Payments\Application\Query\ProjectedPayment;
+use Modules\Payments\Application\Query\ProjectionRebuilding;
+use Modules\Payments\Infrastructure\Projection\ProjectionGate;
 use Override;
 
 /**
@@ -38,7 +40,10 @@ use Override;
  */
 final readonly class DatabasePaymentQuery implements PaymentQuery
 {
-    public function __construct(private ConnectionInterface $connection) {}
+    public function __construct(
+        private ConnectionInterface $connection,
+        private ProjectionGate $gate,
+    ) {}
 
     /**
      * MALFORMED IS REFUSED BEFORE PostgreSQL SEES IT, and that is a contract
@@ -69,8 +74,19 @@ final readonly class DatabasePaymentQuery implements PaymentQuery
         return $found;
     }
 
+    /**
+     * T11'S GATE, FIRST, INSIDE THIS SAME TRANSACTION, before either lookup. A
+     * closed gate throws ProjectionRebuilding rather than reading either table:
+     * findOwned()'s caller's transaction() then rolls back cleanly, and
+     * ProblemDetailsMapper renders 503 with Retry-After: 1, exactly like
+     * IdempotencyContention. See ProjectionGate and D4 in ADR 0005.
+     */
     private function lookUp(int $merchantId, string $paymentId): ProjectedPayment|PendingPayment
     {
+        if (! $this->gate->inspectPaymentDetails()->isOpen()) {
+            throw ProjectionRebuilding::forRequestedPayment();
+        }
+
         $projected = $this->projected($merchantId, $paymentId);
 
         // SHORT-CIRCUIT, NOT A PREFERENCE BETWEEN TWO RESULTS. A projected payment

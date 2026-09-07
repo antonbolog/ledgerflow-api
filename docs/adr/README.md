@@ -31,10 +31,13 @@ Use sequential names such as `0001-custom-ddd-module-layout.md`; do not put date
   scheduler-driven relay — one row, one short transaction, publish before commit, no shared
   projection gate. Accepted, implemented by T7. Records HS-1: the projection gate is deliberately
   omitted and becomes T11's reciprocal obligation.
+- [0005](0005-payments-projection-gate-and-rebuild-ownership.md) — Gate the Payments projection with a
+  durable control row plus a connection-affine advisory lock, defer rather than fail gated work, and
+  prove rebuild ownership by lock possession rather than by a token, a pid, or a successful query.
+  Accepted, **not yet implemented**; T11 owns it.
 
 ## Candidates
 
-- Use a connection-affine PostgreSQL advisory-lock gate for projection rebuild.
 - Split the system into `ledgerflow-api`, `ledgerflow-spa`, and `ledgerflow-infra` with explicit
   ownership.
 - Serve the business admin panel through Filament at `/admin` without exposing developer/DevOps

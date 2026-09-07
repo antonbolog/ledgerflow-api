@@ -17,11 +17,14 @@ The consumer applies one deterministic projection transaction. A durable project
 idempotency boundary. The query API reads only `PaymentDetails` and the merchant-owned idempotency
 receipt.
 
-**T8 and T9 are implemented; T11 is not.** The consumer, its two tables, the projection failure
-fence, the failure recorder, and `payments:outbox:retry` all exist, and so does the merchant-scoped
-query endpoint; both carry the evidence recorded below. **The shared projection gate remains T11's** -
-the consumer deliberately opens on the envelope row lock, the query opens on nothing at all, and
-neither acquires a gate. [The roadmap](../../roadmap.md) owns task state.
+**T8 and T9 are implemented; T11 adds traffic gating, bounded rebuild, and recovery.** The
+consumer, its two tables, the projection failure fence, the failure recorder, and
+`payments:outbox:retry` all exist, and so does the merchant-scoped query endpoint; both carry the
+evidence recorded below. **The shared projection gate now guards both**: the consumer's transaction
+checks it before the envelope row lock, and the query's transaction checks it before either table
+lookup - see [verification and rebuild](verification-and-rebuild.md#t11-slice-2-implementation-evidence).
+The bounded batch rebuild and recovery are documented in the [T11 evidence](verification-and-rebuild.md#t11-implementation-evidence). [The roadmap](../../roadmap.md)
+owns task state.
 
 ## Consumer transaction
 
@@ -37,13 +40,12 @@ Owned by T8. For `(projector_name, event_id)`:
 5. Set the outbox `projection_completed_at` marker.
 6. Commit receipt, read model, and completion marker together.
 
-The transaction deliberately opens on the envelope row lock, **not on a gate**.
-`payment_projection_controls`, its advisory-key derivation, and consumer deferral belong to T11, so
-T8 must not add a provisional gate, control table, or advisory key. **T11 prepends connection-affine
-gate acquisition and deferral semantics to this same transaction**, before the envelope lock and on
-the same connection. That is the consumer side of the reciprocal obligation recorded as HS-1 in
+**T11 Slice 2 prepends connection-affine gate acquisition and deferral semantics to this same
+transaction**, before the envelope lock, on the same connection. A closed gate returns
+`ProjectionOutcome::GateDeferred` and raises no exception; no envelope is locked. That is the consumer
+side of the reciprocal obligation recorded as HS-1 in
 [ADR 0004](../../adr/0004-lock-through-push-outbox-relay.md) and in
-[verification and rebuild](verification-and-rebuild.md#t8s-reciprocal-obligation-the-consumer-arrives-without-a-gate-either).
+[verification and rebuild](verification-and-rebuild.md#t8s-reciprocal-obligation-discharged-by-t11-slice-2).
 
 An already-exhausted locked row is an observability-only no-op: no projection, no counter, no
 marker mutation. Operator retry is the sole reactivation path. A missing outbox row is a typed
@@ -105,14 +107,14 @@ primary and unique keys above; a later index requires measured query-plan eviden
 
 ## Query contract
 
-**Implemented by T9. The gate check inside it is still T11's.** Everything below is live except the
-`503` branch, which has no producer until the shared projection gate exists.
+**Implemented by T9, with T11 Slice 2's gate check landed inside it.** Every branch below is live,
+including `503`.
 
 `GET /api/payments/{paymentId}` is merchant-scoped and resolves the merchant only through
 `MerchantContext`. The `payment_details` lookup and, only when that lookup finds nothing, the
 `payment_idempotency_receipts` fallback run inside one short PostgreSQL transaction owned by a single
-query adapter on one injected default connection, so **T11 prepends its gate check to that same
-transaction** without relocating either read:
+query adapter on one injected default connection, and **T11 Slice 2 prepends its gate check to that
+same transaction**, before either read, without relocating either one:
 
 - owned `PaymentDetails` -> `200 OK` carrying exactly `payment_id`, `amount_minor`, `currency`,
   `status` and `initiated_at`. `initiated_at` is UTC ISO-8601 with six fractional digits and a
@@ -125,10 +127,14 @@ transaction** without relocating either read:
 - no owned projection or receipt -> `404 payment_not_found`. A malformed payment ID shares this exact
   contract and is refused inside the query boundary before PostgreSQL receives an invalid UUID, so a
   syntactically invalid unknown identifier is not a distinguishable error class.
-- active rebuild -> `503 projection_rebuilding` with retry guidance. **T11 owns this branch
-  outright**: the control row, the advisory-key derivation, the shared gate lock, and the only code
-  path that can produce the response. It is unreachable until T11 ships, so T9 adds neither the
-  problem code nor a provisional key or control table.
+- closed gate -> `503 projection_rebuilding` with `Retry-After: 1`. **T11 Slice 2 owns this branch**:
+  the control row, the advisory-key derivation, and the shared gate lock. The gate check runs inside
+  the query adapter's existing transaction, before the `payment_details` lookup, so the two reads and
+  the gate stay on one connection and neither read moves. The adapter raises a typed
+  `Modules\Payments\Application\Query\ProjectionRebuilding` and the Problem Details mapper renders it,
+  keeping the controller's "decides nothing about the answer" property.
+  The bounded rebuild closes the gate, and an abandoned run's durable row keeps it closed until recovery.
+  Recorded in [ADR 0005](../../adr/0005-payments-projection-gate-and-rebuild-ownership.md).
 
 A projected lookup short-circuits the receipt fallback, so an owned projection is never followed by
 a receipt read. Another merchant's payment returns the same not-found shape as a missing one. The
@@ -144,8 +150,12 @@ performs its normal Sanctum and `MerchantContext` identity queries. The endpoint
   transaction.
 - A hard worker crash leaves no false completion and relies on transport redelivery or outbox
   reconciliation.
-- Work deferred by the rebuild gate does not consume transport or poison budgets. T11 owns that
-  path.
+- Work deferred by the rebuild gate does not consume transport or poison budgets. **Implemented in
+  T11 Slice 2**, and structural rather than a rule: a deferred delivery (`ProjectionOutcome::GateDeferred`)
+  raises no exception and locks no envelope, so there is no statement that could write a counter, a
+  generation, an exhaustion timestamp, or an availability. Raising an exception instead would retire
+  the message into `failed_jobs`, because the job has one attempt and no `try`/`catch`. See
+  [ADR 0005](../../adr/0005-payments-projection-gate-and-rebuild-ownership.md).
 - Stale messages delivered after a successful rebuild are ignored by recreated projector receipts.
 
 **Crash evidence splits with T12.** T8 owns deterministic rollback and redelivery evidence from an
@@ -304,9 +314,10 @@ deterministic in-process commit-boundary failpoint plus a live Horizon stop/back
 and the barrier-coordinated process suite stays [T12's](../../testing/payments-resilience.md). No
 multi-process consumer race: concurrency is proved with two PostgreSQL backends inside one PHP
 process, not with two workers. No load, throughput or query-plan claim, and therefore no secondary
-index. No rebuild-safety claim, because **the shared projection gate does not exist** - see the
-reciprocal obligation in
-[verification and rebuild](verification-and-rebuild.md#t8s-reciprocal-obligation-the-consumer-arrives-without-a-gate-either).
+index. No rebuild-safety claim: **the shared projection gate did not exist at T8** - it landed in
+T11 Slice 2, see the reciprocal obligation in
+[verification and rebuild](verification-and-rebuild.md#t8s-reciprocal-obligation-discharged-by-t11-slice-2)
+and its [Slice 2 evidence](verification-and-rebuild.md#t11-slice-2-implementation-evidence).
 `GET /api/payments/{paymentId}` did not exist at T8, so the read model was not yet observable
 through HTTP; **T9 supplies it below**.
 
@@ -337,10 +348,14 @@ dependency and no process.** Every row below was observed through `make check` a
 | Q-15 | A not-found payment is not reported to the log | `QueryPaymentTest::it does not report a not-found payment to the log` | `shouldReport()` is false for `PaymentNotFound` and true for an unrelated `RuntimeException`. Laravel already declines to report the framework's `NotFoundHttpException`; without the `dontReport` in `bootstrap/app.php` this endpoint would be the one 404 in the API writing an error-level line with a stack trace once per request, at whatever rate a client asks for identifiers it does not own | **PASS** |
 
 **What T9 did not prove.** No load, throughput, latency or query-plan claim, and therefore no new
-index. No rebuild-safety claim and no backend-affinity claim across a gate lock and its protected
-read: **the shared projection gate does not exist**, so `503 projection_rebuilding` has no producer
-and both remain T11's. The absence of Redis from the query path is established by source inspection
-only - the SQL listener that pins the table allowlist cannot observe a Redis call.
+index. At T9, no rebuild-safety claim and no backend-affinity claim across a gate lock and its
+protected read: **the shared projection gate did not exist yet**, so `503 projection_rebuilding` had
+no producer. T11 Slice 2 closed that gap - both the gate check and its backend-affinity evidence now
+live in `PaymentQueryTest`'s closed-gate section, per
+[Slice 2 evidence](verification-and-rebuild.md#t11-slice-2-implementation-evidence). The bounded
+batch rebuild that would close the gate for real is still T11's. The absence of Redis from the query
+path is established by source inspection only - the SQL listener that pins the table allowlist cannot
+observe a Redis call.
 `make projection-contract` was not extended: T9 adds no process, and the live scheduler+Horizon
 evidence it depends on for a *projected* read is T8's, unchanged.
 

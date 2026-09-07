@@ -18,6 +18,8 @@ use Modules\Payments\Infrastructure\Persistence\RetryingAtomicTransaction;
 use Modules\Payments\Infrastructure\Projection\PaymentInitiatedEnvelope;
 use Modules\Payments\Infrastructure\Projection\PaymentProjectionConsumer;
 use Modules\Payments\Infrastructure\Projection\ProjectionEnvelopeRejected;
+use Modules\Payments\Infrastructure\Projection\ProjectionGate;
+use Modules\Payments\Infrastructure\Projection\ProjectionGateState;
 use Override;
 use stdClass;
 use Throwable;
@@ -28,6 +30,7 @@ use Throwable;
  *     BEGIN
  *     SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY
  *     SET LOCAL statement_timeout / transaction_timeout
+ *     shared gate, then observed control state     <- before any audit pass
  *     select max(id), now()                       <- watermark and audit_at
  *     loop: one keyset batch of canonical Payments events, then its derived rows
  *     COMMIT
@@ -96,6 +99,8 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
 
     public const string REASON_DATABASE_ERROR = 'database_error';
 
+    public const string REASON_REBUILD_IN_PROGRESS = 'rebuild_in_progress';
+
     /** @var array<string, int> */
     private array $classificationCounts;
 
@@ -125,6 +130,8 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
     private ?string $auditAt = null;
 
     private ?CarbonImmutable $auditInstant = null;
+
+    private ?string $projectionControlState = null;
 
     /**
      * @param  Closure(): int  $clock  monotonic nanoseconds, for the work budget
@@ -173,6 +180,24 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
             $this->connection->statement($this->config->statementTimeoutStatement());
             $this->connection->statement($this->config->transactionTimeoutStatement());
 
+            $gate = new ProjectionGate($this->connection)->inspectPaymentDetails();
+
+            // Report the row even when the exclusive lock denied entry. During
+            // lock-first acquisition it may still say ready; that never overrides
+            // the lock refusal. All reads use this same read-only snapshot.
+            /** @var object{state: string}|null $control */
+            $control = $this->connection->selectOne(
+                'select state from payment_projection_controls where projection = ?',
+                [ProjectionGate::PAYMENT_DETAILS],
+            );
+            $this->projectionControlState = $control?->state;
+
+            if ($gate !== ProjectionGateState::Open) {
+                $this->rollBackQuietly();
+
+                return $this->partial(self::REASON_REBUILD_IN_PROGRESS);
+            }
+
             $this->captureSnapshot();
 
             // FOUR PASSES, ONE SNAPSHOT, IN THIS ORDER. Every one of them reads the
@@ -211,6 +236,7 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
                 findingCounts: $this->sortedFindingCounts(),
                 examples: $this->examples,
                 examplesTruncated: $this->examplesTruncated,
+                projectionControlState: $this->projectionControlState,
             );
         } catch (Throwable $failure) {
             if ($transactionStarted) {
@@ -1184,6 +1210,7 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
             findingCounts: $this->sortedFindingCounts(),
             examples: $this->examples,
             examplesTruncated: $this->examplesTruncated,
+            projectionControlState: $this->projectionControlState,
         );
     }
 
@@ -1231,5 +1258,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         $this->highWatermark = null;
         $this->auditAt = null;
         $this->auditInstant = null;
+        $this->projectionControlState = null;
     }
 }

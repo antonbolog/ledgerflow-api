@@ -13,10 +13,12 @@ use Illuminate\Support\ServiceProvider;
 use Modules\Payments\Application\Initiation\AtomicTransaction;
 use Modules\Payments\Application\Initiation\IdempotencyReceipts;
 use Modules\Payments\Application\Query\PaymentQuery;
+use Modules\Payments\Application\Rebuild\ProjectionRebuild;
 use Modules\Payments\Application\Repair\OutboxRepair;
 use Modules\Payments\Application\Verification\ProjectionVerifier;
 use Modules\Payments\Infrastructure\Console\PaymentOutboxRetryCommand;
 use Modules\Payments\Infrastructure\Console\PaymentOutboxStatusCommand;
+use Modules\Payments\Infrastructure\Console\RebuildPaymentProjectionsCommand;
 use Modules\Payments\Infrastructure\Console\RelayPaymentOutboxCommand;
 use Modules\Payments\Infrastructure\Console\RepairPaymentOutboxCommand;
 use Modules\Payments\Infrastructure\Console\VerifyPaymentProjectionsCommand;
@@ -26,7 +28,10 @@ use Modules\Payments\Infrastructure\Persistence\RetryingAtomicTransaction;
 use Modules\Payments\Infrastructure\Projection\PaymentProjectionConsumer;
 use Modules\Payments\Infrastructure\Projection\ProjectionConfiguration;
 use Modules\Payments\Infrastructure\Projection\ProjectionFailureRecorder;
+use Modules\Payments\Infrastructure\Projection\ProjectionGate;
 use Modules\Payments\Infrastructure\Projectors\PaymentOutboxWriter;
+use Modules\Payments\Infrastructure\Rebuild\DatabaseProjectionRebuild;
+use Modules\Payments\Infrastructure\Rebuild\RebuildConfiguration;
 use Modules\Payments\Infrastructure\Relay\OutboxRelay;
 use Modules\Payments\Infrastructure\Relay\RelayConfiguration;
 use Modules\Payments\Infrastructure\Relay\RelayHeartbeat;
@@ -58,11 +63,22 @@ class PaymentsServiceProvider extends ServiceProvider
         // singleton would outlive a connection swap.
         //
         // ConnectionInterface is a container alias of db.connection, so both resolve
-        // the SAME default Connection object that the transaction is opened on.
+        // the SAME default Connection object that the transaction is opened on. This
+        // is also the identity T11's gate depends on: every binding below that takes
+        // a ProjectionGate::class resolves it against that same default connection,
+        // whichever concrete or interface type the caller itself asks for.
+        $this->app->scoped(
+            ProjectionGate::class,
+            fn (Application $app): ProjectionGate => new ProjectionGate(
+                $app->make(ConnectionInterface::class),
+            ),
+        );
+
         $this->app->scoped(
             AtomicTransaction::class,
             fn (Application $app): RetryingAtomicTransaction => new RetryingAtomicTransaction(
                 $app->make(ConnectionInterface::class),
+                $app->make(ProjectionGate::class),
             ),
         );
 
@@ -84,6 +100,7 @@ class PaymentsServiceProvider extends ServiceProvider
             PaymentQuery::class,
             fn (Application $app): DatabasePaymentQuery => new DatabasePaymentQuery(
                 $app->make(ConnectionInterface::class),
+                $app->make(ProjectionGate::class),
             ),
         );
 
@@ -117,6 +134,7 @@ class PaymentsServiceProvider extends ServiceProvider
                 $app->make(QueueFactory::class),
                 $app->make(RelayConfiguration::class),
                 $app->make(LoggerInterface::class),
+                $app->make(ProjectionGate::class),
             ),
         );
 
@@ -163,6 +181,7 @@ class PaymentsServiceProvider extends ServiceProvider
                 $app->make(ProjectionConfiguration::class),
                 $app->make(ProjectionFailureRecorder::class),
                 $app->make(LoggerInterface::class),
+                $app->make(ProjectionGate::class),
             ),
         );
 
@@ -215,6 +234,7 @@ class PaymentsServiceProvider extends ServiceProvider
                 $app->make(RelayHeartbeat::class),
                 $app->make(DatabaseManager::class)->connection(),
                 $app->make(RelayConfiguration::class),
+                $app->make(ProjectionGate::class),
             ),
         );
 
@@ -280,6 +300,43 @@ class PaymentsServiceProvider extends ServiceProvider
                 static fn (): int => (int) hrtime(true),
             ),
         );
+
+        // VALIDATED AT RESOLUTION, WHICH IS BEFORE THE EXCLUSIVE LOCK IS EVEN
+        // REQUESTED. batch_size is an operator dial; lock_timeout_ms and
+        // statement_timeout_ms bound how long this destructive, gate-closing
+        // command may wait or hold one statement.
+        $this->app->scoped(
+            RebuildConfiguration::class,
+            fn (): RebuildConfiguration => RebuildConfiguration::fromArray(
+                (array) config('payments.rebuild'),
+            ),
+        );
+
+        // THE CONCRETE Connection, for the same reason every other Payments
+        // command owning its own transaction lifecycle takes it. UNLIKE every
+        // other binding above, this ONE connection is pinned for the whole run
+        // and has its reconnector disabled (F3) - safe only because a console
+        // command owns one process with nothing else sharing this connection
+        // object once the rebuild starts.
+        $this->app->scoped(
+            ProjectionRebuild::class,
+            fn (Application $app): DatabaseProjectionRebuild => new DatabaseProjectionRebuild(
+                $app->make(DatabaseManager::class)->connection(),
+                $app->make(RebuildConfiguration::class),
+                $app->make(LoggerInterface::class),
+            ),
+        );
+
+        // BOUND EXPLICITLY BECAUSE OF THE CLOSURE, exactly as the relay and
+        // repair commands are: a monotonic clock is the one constructor
+        // parameter the container cannot autowire.
+        $this->app->scoped(
+            RebuildPaymentProjectionsCommand::class,
+            fn (Application $app): RebuildPaymentProjectionsCommand => new RebuildPaymentProjectionsCommand(
+                $app->make(ProjectionRebuild::class),
+                static fn (): int => (int) hrtime(true),
+            ),
+        );
     }
 
     public function boot(): void
@@ -306,6 +363,7 @@ class PaymentsServiceProvider extends ServiceProvider
                 PaymentOutboxRetryCommand::class,
                 VerifyPaymentProjectionsCommand::class,
                 RepairPaymentOutboxCommand::class,
+                RebuildPaymentProjectionsCommand::class,
             ]);
         }
     }
