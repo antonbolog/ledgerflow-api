@@ -42,7 +42,7 @@ return RectorConfig::configure()
 
         // T3 spike migrations are byte-for-byte copies of Spatie's published
         // stubs, kept identical on purpose: the spike runs against the exact
-        // schema T5 will publish, and `diff` against the vendor file is the
+        // schema T5 publishes, and `diff` against the vendor file is the
         // check that proves it has not drifted. Reformatting them would make
         // that diff report noise and hide a real change. They are excluded from
         // Pint for the same reason.

@@ -1,0 +1,480 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Ledgerflow Payments API",
+    "version": "1.0.0",
+    "summary": "Idempotent payment initiation and merchant-scoped payment query.",
+    "description": "The two implemented `/api/*` routes of `ledgerflow-api`. Every failure is an RFC 9457 problem document with the media type `application/problem+json`. Behavioral invariants are canonical in docs/specifications/payments/, not here; this document is the transport contract only.",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8080",
+      "description": "Local Docker Compose stack, loopback only."
+    }
+  ],
+  "tags": [
+    {
+      "name": "Payments",
+      "description": "Payment initiation and query for the authenticated merchant."
+    }
+  ],
+  "paths": {
+    "/api/payments": {
+      "post": {
+        "tags": [
+          "Payments"
+        ],
+        "operationId": "initiatePayment",
+        "summary": "Initiate a payment",
+        "description": "Commits the idempotency receipt, the stored event and the outbox envelope in one PostgreSQL transaction or none of them. The merchant is resolved from the authenticated user and can never be supplied by the client. An identical retry replays the exact stored response bytes, status and `Location`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InitiatePaymentRequest"
+              },
+              "examples": {
+                "minimal": {
+                  "summary": "A twelve dollar and fifty cent payment",
+                  "value": {
+                    "amount_minor": 1250,
+                    "currency": "USD"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted. Returned both for a first acceptance and for an identical retry, byte-identical in the latter case.",
+            "headers": {
+              "Location": {
+                "description": "Relative URI reference of the created payment.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "examples": [
+                    "/api/payments/019bd0f6-3a8e-7c21-9d5a-2f4b6c8e0a13"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentAccepted"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "409": {
+            "description": "The idempotency key was already used by this merchant with a different canonical payload. Nothing new is written.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "/problems/idempotency-payload-mismatch",
+                  "title": "Idempotency key reused with a different payload",
+                  "status": 409,
+                  "detail": "This idempotency key was already used with a different payload.",
+                  "instance": "/api/payments",
+                  "code": "idempotency_payload_mismatch"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The request payload did not satisfy the initiation contract.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "/problems/validation-failed",
+                  "title": "Validation failed",
+                  "status": 422,
+                  "detail": "The request payload did not satisfy the initiation contract.",
+                  "instance": "/api/payments",
+                  "code": "validation_failed",
+                  "errors": {
+                    "currency": [
+                      "The currency must be USD."
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Either idempotency arbitration exhausted its allowlisted transaction retries, or the Payments projection gate is closed for a rebuild. The two are distinguished by `code`, never by the status alone.",
+            "headers": {
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "idempotency_contention": {
+                    "summary": "Transaction retry exhausted",
+                    "value": {
+                      "type": "/problems/idempotency-contention",
+                      "title": "Idempotency contention",
+                      "status": 503,
+                      "detail": "The request could not be arbitrated in time. Retry.",
+                      "instance": "/api/payments",
+                      "code": "idempotency_contention"
+                    }
+                  },
+                  "projection_rebuilding": {
+                    "summary": "Projection gate closed",
+                    "value": {
+                      "type": "/problems/projection-rebuilding",
+                      "title": "Projection rebuilding",
+                      "status": 503,
+                      "detail": "A projection rebuild is in progress. Retry.",
+                      "instance": "/api/payments",
+                      "code": "projection_rebuilding"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/payments/{paymentId}": {
+      "get": {
+        "tags": [
+          "Payments"
+        ],
+        "operationId": "showPayment",
+        "summary": "Query one owned payment",
+        "description": "Reads `payment_details` and, only on a miss, the `payment_idempotency_receipts` fallback, inside one adapter-owned transaction. It never rehydrates the aggregate. A malformed, an unknown and another merchant's payment ID all produce the same `404 payment_not_found`; for one requested ID the unknown and foreign answers are byte-identical, so the endpoint never reveals that a payment exists but belongs to someone else.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "paymentId",
+            "in": "path",
+            "required": true,
+            "description": "The payment identifier returned by initiation. The route carries no format constraint: a malformed value is refused by the query adapter with the same answer an unknown one gets.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "019bd0f6-3a8e-7c21-9d5a-2f4b6c8e0a13"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The owned projection exists.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectedPayment"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "The owned idempotency receipt exists but the projection has not landed yet.",
+            "headers": {
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectionPending"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "404": {
+            "description": "No payment matching this identifier is available to this merchant. `instance` echoes the requested path, which is the only field that differs between a malformed and a well-formed unknown identifier.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "/problems/payment-not-found",
+                  "title": "Payment not found",
+                  "status": 404,
+                  "detail": "No payment matching this identifier is available.",
+                  "instance": "/api/payments/019bd0f6-3a8e-7c21-9d5a-2f4b6c8e0a13",
+                  "code": "payment_not_found"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Payments projection gate is closed for a rebuild.",
+            "headers": {
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "/problems/projection-rebuilding",
+                  "title": "Projection rebuilding",
+                  "status": 503,
+                  "detail": "A projection rebuild is in progress. Retry.",
+                  "instance": "/api/payments/019bd0f6-3a8e-7c21-9d5a-2f4b6c8e0a13",
+                  "code": "projection_rebuilding"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A Sanctum personal access token. Locally, obtain one with `make demo-token`."
+      }
+    },
+    "parameters": {
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "description": "Merchant-scoped request key, bounded in BYTES rather than characters, so a multibyte key can exceed 255 before it reaches 255 characters. Only its SHA-256 digest is ever stored; the raw value never reaches an event, an envelope, a receipt or a log line.",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "example": "demo-2026-09-07-0001"
+      }
+    },
+    "headers": {
+      "RetryAfter": {
+        "description": "Seconds to wait before retrying.",
+        "required": true,
+        "schema": {
+          "type": "integer",
+          "const": 1
+        }
+      }
+    },
+    "responses": {
+      "Unauthenticated": {
+        "description": "No valid bearer token was presented.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            },
+            "example": {
+              "type": "/problems/unauthenticated",
+              "title": "Unauthenticated",
+              "status": 401,
+              "detail": "This endpoint requires an authenticated merchant user.",
+              "instance": "/api/payments",
+              "code": "unauthenticated"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "InitiatePaymentRequest": {
+        "type": "object",
+        "required": [
+          "amount_minor",
+          "currency"
+        ],
+        "properties": {
+          "amount_minor": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100000000,
+            "description": "Minor units. A numeric string is rejected: the contract is a JSON integer."
+          },
+          "currency": {
+            "type": "string",
+            "description": "The only settlement currency this API accepts. Case-insensitive on the wire: the request object upper-cases the value before validating it, so \"usd\" and \"Usd\" are accepted and normalised to \"USD\". Anything else is refused with 422 validation_failed.",
+            "examples": [
+              "USD"
+            ],
+            "pattern": "^[Uu][Ss][Dd]$"
+          }
+        },
+        "description": "Unknown members are ignored rather than refused; only `merchant_id` is explicitly rejected, because the merchant is resolved from the bearer token."
+      },
+      "PaymentAccepted": {
+        "type": "object",
+        "required": [
+          "payment_id",
+          "status"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "payment_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "UUIDv7."
+          },
+          "status": {
+            "type": "string",
+            "const": "initiated"
+          }
+        }
+      },
+      "ProjectedPayment": {
+        "type": "object",
+        "required": [
+          "payment_id",
+          "amount_minor",
+          "currency",
+          "status",
+          "initiated_at"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "payment_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "amount_minor": {
+            "type": "integer"
+          },
+          "currency": {
+            "type": "string",
+            "examples": [
+              "USD"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "examples": [
+              "initiated"
+            ]
+          },
+          "initiated_at": {
+            "type": "string",
+            "description": "Derived from the event's occurrence time with microsecond fidelity, never from processing time, so a replay reproduces the same value."
+          }
+        }
+      },
+      "ProjectionPending": {
+        "type": "object",
+        "required": [
+          "payment_id",
+          "status"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "payment_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "const": "projection_pending",
+            "description": "Transport state, not a payment status the domain ever records."
+          }
+        }
+      },
+      "Problem": {
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "instance",
+          "code"
+        ],
+        "description": "RFC 9457 problem document. Member order below is the wire order. `code` is the stable contract; `type` is derived from it.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Relative URI reference, resolved against the request URI, of the form `/problems/<code with dashes>`."
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string",
+            "description": "The client-safe sentence. An exception message is never substituted except for an unmapped internal error with debug enabled."
+          },
+          "instance": {
+            "type": "string",
+            "description": "The requested path."
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "unauthenticated",
+              "validation_failed",
+              "idempotency_payload_mismatch",
+              "idempotency_contention",
+              "payment_not_found",
+              "projection_rebuilding",
+              "not_found",
+              "method_not_allowed",
+              "internal_error"
+            ]
+          },
+          "errors": {
+            "type": "object",
+            "description": "Present only on `validation_failed`. Field name to list of messages.",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

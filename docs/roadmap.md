@@ -31,11 +31,15 @@ reconciled in
 [operator procedure](operations/runtime-contract.md#manual-verification-and-targeted-repair) and
 [executable evidence](specifications/payments/verification-and-rebuild.md#t10-implementation-evidence).
 The final validation checkpoint records the split CI execution and successful image-stage retry.
-**T11 is complete locally and shipping is pending.**
+**T11 is complete and shipped** in pull request #12, merged to `main` as `28d3ad6`.
 The control row, connection-affine gate on all four traffic paths, bounded batch rebuild, ownership
 fence, guarded recovery, takeover, T10 verify/repair participation, and operator procedure are
 implemented under [ADR 0005](adr/0005-payments-projection-gate-and-rebuild-ownership.md).
 The final continuous `make ci` checkpoint passed before shipping.
+**T12 is complete and shipped** in pull request #13, merged to `main` as `2521f80`:
+`make resilience-contract` proves the process half against real services, and its evidence and claim
+boundaries live in the
+[resilience test plan](testing/payments-resilience.md#process-level-resilience).
 
 ## Outcome
 
@@ -213,20 +217,35 @@ Detect and repair derived-state corruption while keeping partial rebuilds invisi
   rather than on a token, a stored pid, or a successful query. Contracts are reconciled in
   [verification and rebuild](specifications/payments/verification-and-rebuild.md#projection-gate) and
   its [rebuild algorithm](specifications/payments/verification-and-rebuild.md#rebuild-algorithm).
-- T12 — Prove end-to-end and process-level resilience failures. **Complete locally; shipping pending.**
+- T12 — Prove end-to-end and process-level resilience failures. **Complete**, shipped in pull request #13,
+  merged to `main` as `2521f80`.
   The integration half was delivered across T6-T11: transaction-lifecycle failpoints, a real Redis
   push followed by an injected commit-boundary exception, `pg_locks` barriers, and backend
   termination.
   The process half is `make resilience-contract` - a disposable isolated Compose project that drives
-  the critical HTTP path, a real Redis outage, a concurrent identical `POST`, `SIGKILL` of the real
+  the critical HTTP path, a real Redis outage, two identical `POST`s held in overlapping write
+  transactions, `SIGKILL` of the real
   relay, consumer and rebuild processes, and `SIGTERM` of a real worker that must commit its
   projection and exit by itself - all under synchronization barriers, wired into `make ci`.
   Both disposable-project contracts share one bounded-deadline, scoped-teardown harness,
   `scripts/ci/lib/contract.sh`; `projection-contract` moved onto it in the same change.
+  Post-merge review closed two evidence gaps: the concurrent `POST` is now barrier-coordinated and
+  proves genuine transaction overlap, and a failed mandatory teardown can no longer be reported as a
+  passing contract.
   Evidence and claim boundaries in the
   [resilience test plan](testing/payments-resilience.md#process-level-resilience).
   No production-code change; no new dependency, migration, or process.
-- T13 — Publish the five-minute resilience demo and operational guide.
+- T13 - Publish the five-minute resilience demo and operational guide.
+  **Complete locally; shipping pending.** The
+  [five-minute demo](operations/five-minute-demo.md) drives the healthy flow, a real Redis outage and
+  recovery, deliberate read-model corruption, read-only verification and an explicit rebuild through
+  project-defined commands, with three guarded local `demo-` Make targets replacing the previously
+  undocumented token and corruption steps. [`docs/api/openapi.json`](api/openapi.json) becomes the
+  canonical wire contract, with parity asserted by `tests/Feature/OpenApiContractTest.php` inside
+  `make test`. Local process topology is recorded in the
+  [runtime contract](operations/runtime-contract.md#local-process-topology), and the stale T11 claims
+  carried by the README, the documentation index, the payments flow and the ADR index are corrected.
+  No production behavior, dependency, migration, or process was added.
 
 Exit: the complete [resilience test plan](testing/payments-resilience.md) passes through
 project-defined commands; the README demo works from a clean checkout.

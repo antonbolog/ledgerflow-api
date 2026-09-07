@@ -88,10 +88,10 @@ fi
 
 projection_start_plan=$(make -n projection-start 2>&1)
 
-grep -q 'scheduler' <<<"$projection_start_plan" \
-    || fail 'make projection-start does not start the scheduler'
-grep -q 'horizon' <<<"$projection_start_plan" \
-    || fail 'make projection-start does not start Horizon'
+# `make -n` prints the banner echoes too, and those name both services. Match the
+# real Compose invocation instead, so only a genuine paired startup passes.
+grep -Eq 'compose .* up .*(scheduler +horizon|horizon +scheduler)' <<<"$projection_start_plan" \
+    || fail 'make projection-start does not bring the scheduler and Horizon up in one command'
 
 # --------------------------------------------------------------------------
 # 2. Infrastructure, then schema, then the pair

@@ -30,8 +30,13 @@ architecture anchor for the three-repository Ledgerflow system.
   that same answer: for one requested ID, unknown and foreign are byte-identical, so the endpoint
   never reveals that a payment exists but belongs to someone else. The query reads only the read
   model and its idempotency-receipt fallback, and
-  never rehydrates the aggregate. The `503 projection_rebuilding` state is unreachable until T11
-  adds the shared projection gate.
+  never rehydrates the aggregate.
+- A connection-affine projection gate closes Payments traffic during a bounded batch rebuild: `POST`
+  and `GET` return `503 projection_rebuilding` with `Retry-After: 1`, while the relay and consumer
+  defer without consuming any delivery or failure budget.
+- `payments:projections:verify` audits canonical and derived state read-only;
+  `payments:projections:rebuild` and `payments:outbox:repair` are explicit operator actions that
+  never run automatically.
 
 The [roadmap](docs/roadmap.md) is the canonical source for delivery status and sequencing.
 
@@ -51,6 +56,11 @@ The API is available at <http://127.0.0.1:8080> (loopback only). `GET /up` is th
 Run `make` to see the complete command surface. Destructive targets require target-specific typed
 confirmation, for example `make destroy CONFIRM=destroy` and
 `make db-reset CONFIRM=db-reset`.
+
+To watch the whole slice work, including a real Redis outage, deliberate read-model corruption and a
+controlled rebuild, follow the
+[five-minute resilience demo](docs/operations/five-minute-demo.md). The exact wire contract of both
+endpoints is published as [`docs/api/openapi.json`](docs/api/openapi.json).
 
 ## Architecture
 
@@ -110,6 +120,8 @@ not general-purpose merchant or admin CRUD.
 ## Documentation
 
 - [Architecture map](ARCHITECTURE.md)
+- [Five-minute resilience demo](docs/operations/five-minute-demo.md)
+- [OpenAPI artifact](docs/api/openapi.json)
 - [Documentation index](docs/README.md)
 - [Roadmap](docs/roadmap.md)
 - [System overview](docs/architecture/system-overview.md)

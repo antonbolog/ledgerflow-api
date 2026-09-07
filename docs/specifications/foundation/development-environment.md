@@ -28,8 +28,9 @@ Composer, Pest, Pint, Rector, PHPStan, Artisan, or image-build sequence of its o
 
 - **guard assertions** — `destroy`, `db-reset`, `db-migrate`, and `db-seed` must refuse, each with
   its documented refusal message;
-- **isolation assertion** — a marker row proves `make check` leaves the development database
-  untouched while the suite resets `ledgerflow_test`;
+- **isolation assertion** - a marker table created before `make check` still holds its row
+  afterwards, proving the suite resets `ledgerflow_test` without dropping or resetting the
+  development database;
 - **image-contract builds** — `docker build --target production` and `--target web`, because
   Compose only ever builds the `dev` target;
 Failure diagnostics remain workflow orchestration only. The guard and image commands live behind

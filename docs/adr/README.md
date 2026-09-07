@@ -34,7 +34,7 @@ Use sequential names such as `0001-custom-ddd-module-layout.md`; do not put date
 - [0005](0005-payments-projection-gate-and-rebuild-ownership.md) — Gate the Payments projection with a
   durable control row plus a connection-affine advisory lock, defer rather than fail gated work, and
   prove rebuild ownership by lock possession rather than by a token, a pid, or a successful query.
-  Accepted, **not yet implemented**; T11 owns it.
+  Accepted, implemented by T11.
 
 ## Candidates
 

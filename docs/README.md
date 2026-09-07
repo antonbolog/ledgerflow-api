@@ -18,6 +18,8 @@ unrelated implementation details.
 | What is the exact Payments behavior? | [Payments specifications](specifications/payments/README.md) |
 | How is resilience proved? | [Resilience test plan](testing/payments-resilience.md) |
 | Which application processes run locally and on AWS? | [Runtime contract](operations/runtime-contract.md) |
+| How do I see the whole slice working in five minutes? | [Five-minute demo](operations/five-minute-demo.md) |
+| What exactly do the two HTTP endpoints return? | [OpenAPI artifact](api/openapi.json) |
 | Why was a durable architecture choice made? | [Architecture decision records](adr/README.md) |
 
 ## Documentation rules
@@ -36,8 +38,9 @@ unrelated implementation details.
 ## Delivery status
 
 The write path, the scheduler-driven outbox relay, the Horizon-supervised projection consumer with
-its failure accounting and operator retry, and the merchant-scoped read model query endpoint
-(`GET /api/payments/{paymentId}`, projected `200` / pending `202` / `payment_not_found` `404`) are
-implemented. The shared projection gate is not, so the `503 projection_rebuilding` state is
-unreachable: T11 owns both. The [roadmap](roadmap.md) is the only canonical source for task history,
+its failure accounting and operator retry, the merchant-scoped read model query endpoint
+(`GET /api/payments/{paymentId}`, projected `200` / pending `202` / `payment_not_found` `404`), the
+shared projection gate with its `503 projection_rebuilding` state, and the manual verification,
+repair and rebuild commands are implemented. Resilience is proved end to end by
+`make resilience-contract`. The [roadmap](roadmap.md) is the only canonical source for task history,
 current sequencing, and completion status.

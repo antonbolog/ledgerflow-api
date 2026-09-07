@@ -151,8 +151,8 @@ final readonly class ProblemDetailsMapper
             // not idempotency contention. A status arm would hand an unrelated
             // failure a Payments code, and in the 503 case a Retry-After: 1 that
             // tells a client to retry something nothing said was transient. They
-            // are reachable only through their exception types, which Slice 2 adds
-            // above this fallback.
+            // are reachable only through their exception types, which sit above this
+            // fallback.
             default => match ($response->getStatusCode()) {
                 401 => ProblemType::Unauthenticated,
                 404 => ProblemType::NotFound,

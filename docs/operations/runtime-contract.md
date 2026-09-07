@@ -19,6 +19,41 @@ scaled, restarted, and observed.
 The first Payments slice requires HTTP/API, Horizon, and scheduler/relay. Reverb and SQS workers
 arrive only with their milestones.
 
+### Local process topology
+
+`make install` and `make start` bring up four services and no workers:
+
+| Compose service | Process | Healthcheck |
+|---|---|---|
+| `web` | nginx serving `/api/*` and `/up` on `127.0.0.1:8080`, loopback only | HTTP `/up` |
+| `app` | PHP-FPM, and the container operator commands run in | PHP-FPM status |
+| `postgres` | PostgreSQL 18, business and delivery truth | `pg_isready` |
+| `redis` | Redis 8, queue, cache and coordination | `redis-cli ping` |
+
+`make projection-start` adds two more from the opt-in `projection` profile, together and never one
+alone, and `make projection-stop` removes the same pair:
+
+| Compose service | Process | Healthcheck |
+|---|---|---|
+| `scheduler` | `php artisan schedule:work`, which runs the per-second outbox relay | `payments:outbox:status` |
+| `horizon` | `php artisan horizon`, supervising the `payments-projection` queue | `horizon:status` |
+
+**A clean checkout whose outbox never moves is a missing `projection-start`, not a defect.** Payments
+commit correctly with the pair down; `GET /api/payments/{paymentId}` simply answers
+`202 projection_pending` indefinitely.
+
+**A Redis outage stops the scheduler's current plan.** `schedule:work` plans sub-minute events one
+minute at a time, so after Redis returns an untouched scheduler resumes at the next minute boundary
+rather than instantly; `docker compose restart scheduler` makes recovery immediate. Horizon
+reconnects on its own. Neither case consumes projection failure budget or exhausts an envelope.
+
+Three `demo-` Make targets support [the five-minute demo](five-minute-demo.md): `demo-token` prints a
+Sanctum token for a seeded fixture identity, `demo-status` shows relay and Horizon state read-only,
+and `demo-corrupt` deletes one named `payment_details` row behind a typed confirmation and the local
+database allowlist. They are local development tooling. No validation target performs their effect:
+`make check` never invokes them, and `ci-contract` asserts only that their guards refuse, alongside
+the `destroy` and `db-reset` guards it already covers.
+
 **Scheduler/relay, as implemented by T7.** `Schedule::command('payments:outbox:relay')->everySecond()`
 in root `routes/console.php`, run by `php artisan schedule:work`. `payments:outbox:status` is the
 health surface: exit `0` only when the scheduler heartbeat is fresh (one of five states — `fresh`,
@@ -62,6 +97,12 @@ once the work stops the obligatory teardown adds a **separately bounded tail**: 
 10-second diagnostics plus one 60-second `down --volumes`. Total wall clock on a terminated run is
 therefore the work deadline plus that bounded tail, never unbounded.
 
+**Teardown is mandatory, so a teardown failure is a contract failure.** Every stage is attempted even
+after an earlier one fails and each stays bounded; a run whose work passed but whose teardown left a
+crash container, a Compose service, a volume or its fixture directory behind exits non-zero, while a
+run that already failed keeps its first cause. Diagnostics are best-effort and never skip the
+teardown they precede.
+
 `PROJECTION_CONTRACT_DEADLINE_SECONDS` may shorten the work deadline but never lengthen it past 180;
 a non-numeric or out-of-range value falls back to 180. `PROJECTION_CONTRACT_SELF_TEST=1` runs one
 deliberate hang before anything is created, which is how the enforcement itself is evidenced without
@@ -76,11 +117,12 @@ the paired stop reaches both processes.
 disposable Compose project built on the shared `scripts/ci/lib/contract.sh` harness - bounded work
 deadline, scoped teardown, failure-only diagnostics, `RESILIENCE_CONTRACT_SELF_TEST=1` hang - and
 also runs as part of `make ci`.
-It drives the critical `POST -> GET` HTTP path, a real Redis-daemon outage and recovery, a concurrent
-identical `POST`, barrier-coordinated `SIGKILL` of the real relay, consumer and rebuild processes,
-and a `SIGTERM` of a real worker from the same barrier position that must commit its projection and
-exit by itself. Each signal is gated on an observed PostgreSQL lock wait or control-row state rather
-than a timer. Its claim boundaries against the integration evidence live in the
+It drives the critical `POST -> GET` HTTP path, a real Redis-daemon outage and recovery, two identical
+`POST`s held in overlapping write transactions, barrier-coordinated `SIGKILL` of the real relay,
+consumer and rebuild processes, and a `SIGTERM` of a real worker from the same barrier position that
+must commit its projection and exit by itself. Each signal is gated on an observed PostgreSQL lock
+wait or control-row state rather than a timer, and the concurrent `POST` is released only after
+`pg_blocking_pids()` names the first request's backend as the second's blocker. Its claim boundaries against the integration evidence live in the
 [resilience test plan](../testing/payments-resilience.md#process-level-resilience).
 
 That consumer gets **one Horizon execution per published job**; outbox reconciliation, not Horizon,
@@ -283,6 +325,7 @@ those artifacts rather than building application source. See
 
 ## Related
 
+- [Five-minute demo](five-minute-demo.md) - the reproducible local walkthrough of these processes.
 - [ADR 0004](../adr/0004-lock-through-push-outbox-relay.md) — the scheduler/relay decision record.
 - [Development environment](../specifications/foundation/development-environment.md)
 - [Outbox delivery](../specifications/payments/outbox-delivery.md)

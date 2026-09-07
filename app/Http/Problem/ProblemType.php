@@ -22,12 +22,11 @@ namespace App\Http\Problem;
  * and the default is silence.
  *
  * `payment_not_found` ARRIVED WITH T9's QUERY ENDPOINT. `projection_rebuilding`
- * arrives with T11 Slice 2's shared projection gate: the write path
- * (RetryingAtomicTransaction), the transactional read (DatabasePaymentQuery), the
- * relay and the consumer each check the gate and, on POST and GET, raise a typed
- * ProjectionRebuilding application exception that this case renders as 503 with
- * Retry-After: 1 - see docs/specifications/payments/projection-and-query.md,
- * "Query contract".
+ * belongs to the shared projection gate: the write path (RetryingAtomicTransaction),
+ * the transactional read (DatabasePaymentQuery), the relay and the consumer each
+ * check the gate and, on POST and GET, raise a typed ProjectionRebuilding
+ * application exception that this case renders as 503 with Retry-After: 1 - see
+ * docs/specifications/payments/projection-and-query.md, "Query contract".
  */
 enum ProblemType: string
 {

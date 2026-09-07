@@ -44,7 +44,7 @@ use Modules\Payments\Tests\Integration\ProjectionGateLocks;
 | synchronised by the database rather than by hoping.
 |
 | WHAT THIS FILE DELIBERATELY DOES NOT ASSERT: failure counting, last_projection_error
-| and exhausted_at are written by the failure recorder, which does not exist yet.
+| and exhausted_at are written by ProjectionFailureRecorder, which this file does not exercise.
 | Every test below therefore asserts that the four columns it does not own are
 | UNCHANGED, which is the strongest claim available in this slice and the one that
 | would catch the consumer growing a second owner of them.

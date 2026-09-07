@@ -11,9 +11,8 @@ Artisan::command('inspire', function (): void {
 })->purpose('Display an inspiring quote');
 
 // Registration only. The command bounds its own batch/start-budget, so this
-// invocation is inert until something actually runs `schedule:work` — which a
-// normal `make install` or `make start` never does. See `relay-start` in the
-// Makefile and docs/specifications/payments/outbox-delivery.md: T7 proves this
-// chain against a disposable project; T8 owns the production-like activation
-// that starts the scheduler and its Horizon-supervised consumer together.
+// invocation is inert until something actually runs `schedule:work` - which a
+// normal `make install` or `make start` never does. The scheduler and its
+// Horizon-supervised consumer are activated together by `make projection-start`;
+// see docs/specifications/payments/outbox-delivery.md.
 Schedule::command('payments:outbox:relay')->everySecond();
