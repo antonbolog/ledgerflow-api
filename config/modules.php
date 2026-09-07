@@ -281,13 +281,10 @@ return [
     |
     */
     'composer' => [
-        // Project-owned defaults. The published package ships its own maintainer
-        // as the fallback author, which would silently attribute every future
-        // module to a third party. The address uses the IANA-reserved .example
-        // TLD: it is a valid address that can never be routed or owned by anyone,
-        // which is the point. Module manifests carry no `authors` block by
-        // convention anyway; this exists so the generator cannot reintroduce one
-        // that names someone who did not write the code.
+        // Overridden because the package ships its own maintainer as the fallback
+        // author, which would attribute every generated module to a third party.
+        // The address uses the IANA-reserved .example TLD, which can never be
+        // routed or owned.
         'vendor' => env('MODULE_VENDOR', 'mythern'),
         'author' => [
             'name' => env('MODULE_AUTHOR_NAME', 'Ledgerflow'),
