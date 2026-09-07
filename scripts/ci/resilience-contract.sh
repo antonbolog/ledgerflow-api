@@ -21,7 +21,7 @@ requested_deadline=${RESILIENCE_CONTRACT_DEADLINE_SECONDS:-}
 
 # Fixed names so `docker kill` and the cleanup trap can find these `compose run`
 # containers.
-readonly CRASH_CONTAINERS=(t12_relay t12_consumer t12_rebuild)
+readonly CRASH_CONTAINERS=(t12_relay t12_consumer t12_sigterm t12_rebuild)
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib/contract.sh"
 
@@ -217,7 +217,8 @@ assert_converged_once() {
 #
 # spawn_process backgrounds a `compose run` container as a direct child so `wait`
 # can reap it. kill_process signals the container's PID 1 (`php artisan`), not
-# the client, so the death is a real process kill, not a cooperative shutdown.
+# the client, so SIGKILL is a real process kill and SIGTERM reaches the worker's
+# own signal handler rather than the compose client's.
 
 spawn_process() {
     local name="$1"
@@ -238,8 +239,22 @@ kill_process() {
     docker kill "--signal=${signal}" "$name" >/dev/null 2>&1 || true
 }
 
+# Bounded, because a SIGTERM'd worker is expected to exit ON ITS OWN: a bare
+# `wait` would hang past the work deadline if graceful shutdown never completed,
+# and that hang is the very defect this step exists to catch.
 reap_process() {
-    local name="$1" client_pid="$2"
+    local name="$1" client_pid="$2" timeout="${3:-30}"
+    local deadline
+    deadline=$(( $(date +%s) + timeout ))
+
+    while kill -0 "$client_pid" 2>/dev/null; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            fail "${name} did not exit within ${timeout}s of its signal"
+        fi
+
+        check_deadline "reaping ${name}"
+        sleep 0.2
+    done
 
     wait "$client_pid" 2>/dev/null || true
     guard "removing ${name}" docker rm -f "$name" >/dev/null 2>&1 || true
@@ -558,7 +573,53 @@ await_projected 'the crashed-consumer payment to project' "$consumer_event_id" 6
 assert_converged_once "$consumer_event_id"
 
 # --------------------------------------------------------------------------
-# 7. Rebuild SIGKILL while it holds the rebuilding state, then guarded recovery
+# 7. Consumer SIGTERM mid projection transaction: the job finishes
+# --------------------------------------------------------------------------
+#
+# The other half of the signal contract, and the one a deploy actually sends.
+# Laravel's worker installs a SIGTERM handler (pcntl_async_signals) that sets
+# shouldQuit rather than dying, so the in-flight projection must COMMIT and the
+# process must then exit on its own - the opposite outcome to section 6 from the
+# same barrier position. The worker runs without --once, so exiting is evidence
+# that the signal was honoured rather than the command simply ending.
+
+step 'draining the pipeline, then publishing one envelope for the consumer SIGTERM'
+drain_all
+term_payment_id=$(post_payment 't12-consumer-sigterm')
+term_event_id=$(event_id_for "$term_payment_id")
+
+artisan_disposable payments:outbox:relay >/dev/null
+await_query 'the SIGTERM envelope to be published' \
+    "select publish_count from payment_outbox where event_id = '${term_event_id}'" '1' 20
+
+step 'holding the envelope row lock so the worker blocks inside its transaction'
+start_barrier "select 1 from payment_outbox where event_id = '${term_event_id}' for update"
+
+step 'spawning a real queue worker and asking it to stop while it is mid transaction'
+spawn_process t12_sigterm --no-deps app \
+    php artisan queue:work payments-projection --queue=payments-projection --no-interaction
+term_client=$SPAWN_PID
+
+await_backend_lock_wait 'payment_outbox' 'the worker to block on the envelope row lock' 30
+
+kill_process t12_sigterm TERM
+# Released BEFORE the reap, unlike a SIGKILL step: the worker cannot finish the
+# job it was asked to finish while the barrier still holds its row.
+release_barrier
+reap_process t12_sigterm "$term_client" 45
+
+step 'the SIGTERM worker committed its projection and exited by itself'
+assert_query 'the completion marker was written' \
+    "select count(*) from payment_outbox
+      where event_id = '${term_event_id}' and projection_completed_at is not null" '1'
+assert_converged_once "$term_event_id"
+assert_budget_untouched 'a graceful shutdown' "$term_event_id"
+
+http_request GET "/api/payments/${term_payment_id}"
+[ "$HTTP_CODE" = '200' ] || fail "GET after a graceful worker shutdown returned ${HTTP_CODE}: ${HTTP_BODY}"
+
+# --------------------------------------------------------------------------
+# 8. Rebuild SIGKILL while it holds the rebuilding state, then guarded recovery
 # --------------------------------------------------------------------------
 #
 # Barrier: SHARE lock on payment_details. The rebuild commits the `rebuilding`
@@ -655,7 +716,7 @@ http_request GET "/api/payments/${critical_payment_id}"
 [ "$HTTP_CODE" = '200' ] || fail "GET after the recovery rebuild returned ${HTTP_CODE}: ${HTTP_BODY}"
 
 # --------------------------------------------------------------------------
-# 8. Teardown leaves no orphan
+# 9. Teardown leaves no orphan
 # --------------------------------------------------------------------------
 
 step 'asserting no crash process survived'

@@ -74,12 +74,13 @@ the paired stop reaches both processes.
 
 `make resilience-contract` proves the process half of the Payments resilience plan in a second
 disposable Compose project built on the shared `scripts/ci/lib/contract.sh` harness - bounded work
-deadline, scoped teardown,
-failure-only diagnostics, `RESILIENCE_CONTRACT_SELF_TEST=1` hang - and also runs as part of `make ci`.
+deadline, scoped teardown, failure-only diagnostics, `RESILIENCE_CONTRACT_SELF_TEST=1` hang - and
+also runs as part of `make ci`.
 It drives the critical `POST -> GET` HTTP path, a real Redis-daemon outage and recovery, a concurrent
-identical `POST`, and barrier-coordinated `SIGKILL` of the real relay, consumer, and rebuild
-processes, each kill gated on an observed PostgreSQL lock wait or control-row state rather than a
-timer. Its claim boundaries against the integration evidence live in the
+identical `POST`, barrier-coordinated `SIGKILL` of the real relay, consumer and rebuild processes,
+and a `SIGTERM` of a real worker from the same barrier position that must commit its projection and
+exit by itself. Each signal is gated on an observed PostgreSQL lock wait or control-row state rather
+than a timer. Its claim boundaries against the integration evidence live in the
 [resilience test plan](../testing/payments-resilience.md#process-level-resilience).
 
 That consumer gets **one Horizon execution per published job**; outbox reconciliation, not Horizon,

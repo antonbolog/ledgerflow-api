@@ -657,3 +657,134 @@ it('does not mistake a comment or an unrelated name for an opt-in', function ():
         '<?php final class M { public function afterCommitHook(): void {} }'
     )))->toBeEmpty();
 });
+
+/*
+|--------------------------------------------------------------------------
+| Production module code must not branch on the environment
+|--------------------------------------------------------------------------
+|
+| The resilience evidence rests on production code taking the SAME path under
+| test that it takes in production. A fault reachable only behind an environment
+| check proves nothing about the failure boundary, and it is the one defect the
+| suite itself cannot detect: every crash step would still pass.
+|
+| Scoped to app/, which the layer rules above already establish as where a
+| module's production code lives. config/ reads env() by design, and
+| ledgerflowTokens() already excludes tests/.
+|
+| database/seeders is out of scope on purpose: MerchantDatabaseSeeder refuses to
+| run outside local and testing, which is a guard that makes production safer and
+| fails loudly, not a branch that changes behaviour under test. It is also not on
+| any delivery path a resilience claim rests on.
+|
+*/
+
+/**
+ * Environment-conditioned branches, found in a token stream.
+ *
+ * A pure function over tokens rather than a scan of the real files, so the
+ * failure path is exercised against fabricated input.
+ *
+ * runningInConsole() is deliberately absent: it answers "console or HTTP", not
+ * "test or production", and PaymentsServiceProvider registers its commands
+ * behind it.
+ *
+ * @param  list<array{0: int, 1: string, 2: int}|string>  $tokens
+ * @return list<string>
+ */
+function ledgerflowEnvironmentBranches(array $tokens): array
+{
+    $methods = ['environment', 'runningunittests'];
+    $functions = ['env', 'getenv'];
+    $found = [];
+
+    foreach ($tokens as $index => $token) {
+        if (! is_array($token)) {
+            continue;
+        }
+
+        [$type, $text] = [$token[0], $token[1]];
+
+        if ($type === T_VARIABLE && in_array($text, ['$_ENV', '$_SERVER'], true)) {
+            $found[] = $text;
+
+            continue;
+        }
+
+        // Both spellings: the bare constant and the defined('...') string a
+        // test-runner probe is normally written as.
+        if (in_array($type, [T_STRING, T_CONSTANT_ENCAPSED_STRING], true) && str_contains($text, 'PHPUNIT')) {
+            $found[] = 'PHPUNIT constant';
+
+            continue;
+        }
+
+        if ($type !== T_STRING || ledgerflowNextSymbol($tokens, $index) !== '(') {
+            continue;
+        }
+
+        $previous = ledgerflowPreviousToken($tokens, $index);
+        $lowered = strtolower($text);
+        $isMethod = in_array($previous, [T_OBJECT_OPERATOR, T_NULLSAFE_OBJECT_OPERATOR, T_DOUBLE_COLON], true);
+
+        if ($isMethod ? in_array($lowered, $methods, true) : in_array($lowered, $functions, true) && $previous !== T_FUNCTION) {
+            $found[] = $text.'() call';
+        }
+    }
+
+    return array_values(array_unique($found));
+}
+
+it('keeps production module code free of environment-conditioned branches', function (string $module): void {
+    $scanned = [];
+    $violations = [];
+
+    foreach (ledgerflowTokens(ledgerflowModulePath($module).'/app') as $file => $tokens) {
+        $scanned[] = $file;
+
+        foreach (ledgerflowEnvironmentBranches($tokens) as $violation) {
+            $violations[] = "Modules/{$module}/app/{$file}: {$violation}";
+        }
+    }
+
+    expect($violations)->toBeEmpty(implode(PHP_EOL, $violations));
+
+    // An empty scan reports success, so a moved tree cannot pass silently.
+    expect($scanned)->not->toBeEmpty("Modules/{$module}/app produced no scannable production source.");
+})->with('modules');
+
+it('detects each environment-conditioned spelling in fabricated source', function (string $source, string $expected): void {
+    // Without these, a rule that returned a constant empty array would leave the
+    // rule above green forever.
+    expect(ledgerflowEnvironmentBranches(token_get_all($source)))->toBe([$expected]);
+})->with([
+    ['<?php if (app()->environment("testing")) { throw new RuntimeException("boom"); }', 'environment() call'],
+    ['<?php if (App::environment("local")) {}', 'environment() call'],
+    ['<?php if ($this->app->runningUnitTests()) {}', 'runningUnitTests() call'],
+    ['<?php if (env("PAYMENTS_FAIL_AFTER_PUSH")) {}', 'env() call'],
+    ['<?php if (getenv("PAYMENTS_FAIL_AFTER_PUSH")) {}', 'getenv() call'],
+    ['<?php $flag = $_ENV["PAYMENTS_FAIL_AFTER_PUSH"];', '$_ENV'],
+    ['<?php if (defined("PHPUNIT_COMPOSER_INSTALL")) {}', 'PHPUNIT constant'],
+]);
+
+it('does not mistake a comment or console detection for an environment branch', function (): void {
+    // RelayConfiguration's docblock says "not env()" and two configuration classes
+    // discuss env() in prose. If comments counted, the rule would fail on the very
+    // documentation that explains it.
+    expect(ledgerflowEnvironmentBranches(token_get_all(
+        '<?php /** THE THREE NAMES ARE LITERALS IN config/payments.php, not env(). */ final class M {}'
+    )))->toBeEmpty();
+
+    // The one environment-adjacent call production code legitimately makes.
+    expect(ledgerflowEnvironmentBranches(token_get_all(
+        '<?php if ($this->app->runningInConsole()) { $this->commands([]); }'
+    )))->toBeEmpty();
+});
+
+it('would still catch the seeder guard, which is excluded by scope rather than by spelling', function (): void {
+    // The exclusion is the directory, not a hole in the rule. If someone moves a
+    // seeder-style environment guard into app/, this proves the rule sees it.
+    expect(ledgerflowEnvironmentBranches(token_get_all(
+        '<?php if (! app()->environment(["local", "testing"])) { throw new RuntimeException("no"); }'
+    )))->toBe(['environment() call']);
+});
