@@ -17,13 +17,13 @@ The consumer applies one deterministic projection transaction. A durable project
 idempotency boundary. The query API reads only `PaymentDetails` and the merchant-owned idempotency
 receipt.
 
-**T8 and T9 are implemented; T11's traffic gating landed in Slice 2, its rebuild has not.** The
+**T8 and T9 are implemented; T11 adds traffic gating, bounded rebuild, and recovery.** The
 consumer, its two tables, the projection failure fence, the failure recorder, and
 `payments:outbox:retry` all exist, and so does the merchant-scoped query endpoint; both carry the
 evidence recorded below. **The shared projection gate now guards both**: the consumer's transaction
 checks it before the envelope row lock, and the query's transaction checks it before either table
 lookup - see [verification and rebuild](verification-and-rebuild.md#t11-slice-2-implementation-evidence).
-The bounded batch rebuild that would ever close the gate is still T11's. [The roadmap](../../roadmap.md)
+The bounded batch rebuild and recovery are documented in the [T11 evidence](verification-and-rebuild.md#t11-implementation-evidence). [The roadmap](../../roadmap.md)
 owns task state.
 
 ## Consumer transaction
@@ -132,9 +132,9 @@ same transaction**, before either read, without relocating either one:
   the query adapter's existing transaction, before the `payment_details` lookup, so the two reads and
   the gate stay on one connection and neither read moves. The adapter raises a typed
   `Modules\Payments\Application\Query\ProjectionRebuilding` and the Problem Details mapper renders it,
-  keeping the controller's "decides nothing about the answer" property. Today the gate can only be
-  closed by manually setting the control row - the rebuild that would close it for real is still
-  T11's. Recorded in [ADR 0005](../../adr/0005-payments-projection-gate-and-rebuild-ownership.md).
+  keeping the controller's "decides nothing about the answer" property.
+  The bounded rebuild closes the gate, and an abandoned run's durable row keeps it closed until recovery.
+  Recorded in [ADR 0005](../../adr/0005-payments-projection-gate-and-rebuild-ownership.md).
 
 A projected lookup short-circuits the receipt fallback, so an owned projection is never followed by
 a receipt read. Another merchant's payment returns the same not-found shape as a missing one. The

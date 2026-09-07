@@ -30,6 +30,9 @@ enum RepairReason: string
     /** `--delivery-quiesced` was not supplied. Refused before any database work. */
     case DeliveryNotQuiesced = 'delivery_not_quiesced';
 
+    /** The projection gate is closed; no canonical or envelope row was locked. */
+    case RebuildInProgress = 'rebuild_in_progress';
+
     /** No canonical Payments event carries that durable event id. */
     case CanonicalEventAbsent = 'canonical_event_absent';
 
@@ -96,6 +99,7 @@ enum RepairReason: string
     {
         return match ($this) {
             self::DeliveryNotQuiesced,
+            self::RebuildInProgress,
             self::CanonicalEventAbsent,
             self::CanonicalEventAmbiguous,
             self::CanonicalAliasUnsupported,

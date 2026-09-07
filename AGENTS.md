@@ -53,7 +53,8 @@ compatibility evidence live in
 - T11 gates POST, GET, relay, and consumer traffic during a bounded batch rebuild.
   POST and GET return `503 projection_rebuilding`; relay and consumer defer without consuming failure budgets.
   Rebuild ownership and guarded recovery follow [ADR 0005](docs/adr/0005-payments-projection-gate-and-rebuild-ownership.md).
-  T10 command participation remains pending; the [roadmap](docs/roadmap.md) owns delivery order and task status.
+  Verify reports incomplete and repair refuses while the gate is closed, before scanning or canonical locking.
+  The [roadmap](docs/roadmap.md) owns delivery order and task status.
 
 ## Architecture and boundaries
 

@@ -15,6 +15,8 @@ use Modules\Payments\Infrastructure\Persistence\RetryingAtomicTransaction;
 use Modules\Payments\Infrastructure\Projection\PaymentInitiatedEnvelope;
 use Modules\Payments\Infrastructure\Projection\PaymentProjectionConsumer;
 use Modules\Payments\Infrastructure\Projection\ProjectionEnvelopeRejected;
+use Modules\Payments\Infrastructure\Projection\ProjectionGate;
+use Modules\Payments\Infrastructure\Projection\ProjectionGateState;
 use Modules\Payments\Infrastructure\Verification\VerificationEnvelope;
 use Override;
 use Psr\Log\LoggerInterface;
@@ -27,6 +29,7 @@ use Throwable;
  *     <log operator intent; a failure here means the mutation never begins>
  *     BEGIN  (READ COMMITTED)
  *     SET LOCAL statement_timeout / transaction_timeout
+ *     <shared gate; refuse before canonical lookup when rebuilding>
  *     SELECT ... FROM stored_events WHERE event_properties->>'eventId' = ? LIMIT 2 FOR UPDATE
  *     <refuse on zero, two, or undecodable canonical history>
  *     SELECT ... FROM payment_outbox WHERE event_id = ? FOR UPDATE
@@ -156,6 +159,10 @@ final readonly class DatabaseOutboxRepair implements OutboxRepair
             $this->connection->statement('set transaction isolation level read committed, read write');
             $this->connection->statement('set local statement_timeout = '.self::STATEMENT_TIMEOUT_MS);
             $this->connection->statement('set local transaction_timeout = '.self::TRANSACTION_TIMEOUT_MS);
+
+            if (new ProjectionGate($this->connection)->inspectPaymentDetails() !== ProjectionGateState::Open) {
+                return $this->refuseInTransaction(RepairReason::RebuildInProgress, $eventId);
+            }
 
             $canonicalRows = $this->lockCanonicalEvent($eventId);
 

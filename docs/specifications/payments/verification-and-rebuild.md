@@ -30,7 +30,7 @@ The control row, the gate primitive, traffic acquisition on all four paths (`POS
 implemented, per the Slice 1 through Slice 3 evidence below.
 Slice 4 adds guarded recovery and takeover with preserved clear evidence.
 `503 projection_rebuilding` can be observed during a real rebuild or after an abandoned run leaves the durable gate closed.
-T10 verify/repair gate participation and the final operator handoff remain Slice 5 work.
+Slice 5 adds T10 verify/repair gate participation and the [operator handoff](../../operations/runtime-contract.md#manual-rebuild-and-recovery).
 
 ## Verification
 
@@ -145,7 +145,7 @@ classification.
 |---|---|
 | `0` | Audit completed; all state is consistent or only normal in-flight delivery remains. |
 | `1` | Audit completed and found at least one inconsistency. |
-| `2` | Audit did not complete, or the invocation or configuration is invalid, including timeout and database errors. |
+| `2` | Audit did not complete, including `rebuild_in_progress` when the gate is closed, timeout, database errors, or invalid invocation/configuration. |
 | `3` | Audit completed with no inconsistency, but overdue delivery, exhaustion, or the event-time anomaly needs operator attention. |
 
 Precedence is `2 > 1 > 3 > 0`, not numerical ordering. A run that fails part way keeps its
@@ -197,11 +197,15 @@ Tests inspect the first observed bindings for both the inclusive first-page and 
 Each command emits exactly one JSON object on stdout, with human-oriented diagnostics on stderr.
 Common fields are `schema_version: 1`, `operation_id`, `command`, `outcome`, `reason`, and
 `duration_ms`, using stable outcome and reason categories rather than raw exception text. The verifier
-adds `complete`, `high_watermark`, `audit_at`, `scanned` counts by pass, `classification_counts`,
+adds `complete`, `projection_control_state`, `high_watermark`, `audit_at`, `scanned` counts by pass, `classification_counts`,
 `finding_counts`, and the capped `examples` with `examples_truncated`. Pass, check, and example
 ordering is deterministic.
 
-Before a snapshot is captured, `high_watermark` and `audit_at` are null, not invented values.
+Before the audit watermark is captured, `high_watermark` and `audit_at` are null, not invented values.
+`projection_control_state` is the control row's `ready` or `rebuilding` value observed in the audit's read-only snapshot, or null if the row is absent or its state could not be read.
+The verifier reads it even when the exclusive lock denied gate entry: `ready` can coexist with `rebuild_in_progress` during lock-first acquisition, and never overrides that refusal.
+A closed or missing gate produces exit `2`, `complete: false`, reason `rebuild_in_progress`, empty `scanned`/findings/examples, and null watermark/audit timestamp.
+It neither scans partial projections nor reports their temporary incompleteness as corruption.
 Invalid configuration returns `invalid_configuration`; invalid command arguments/options return `invalid_invocation`, with exit `2` and no scan.
 `event_time_in_future` is counted as an operational finding, not ordinary `in_flight`, so classification counts alone need not sum to all scanned events.
 
@@ -228,12 +232,12 @@ again, a value a delayed failure recorder from the deleted incarnation can still
 alone cannot tell the two incarnations apart. Online-safe resurrection would need a wider durable
 fencing design. **T10 adds no provisional gate, fence table, or control row.**
 
-**T11 revisits participation, and the acknowledgement stays.** When the gate lands, verification and
-repair both acquire the shared gate as the first statement inside their own transactions. Verification
+**T11 implements participation, and the acknowledgement stays.** After declaring isolation and bounds, verification and
+repair both acquire the shared gate before business-table access inside their own transactions. Verification
 under a closed gate produces an **incomplete** report with a `rebuild_in_progress` reason and exit `2`,
 never exit `1`: a partially rebuilt projection is not a corruption finding, and reporting it as one
-would train an operator to ignore exit `1`. Repair under a closed gate is a refusal with exit `1` and
-no mutation. `--delivery-quiesced` is **not** removed by the gate: the gate makes gated processes
+would train an operator to ignore exit `1`. Repair under a closed gate is a refusal with exit `1`, reason `rebuild_in_progress`,
+`mutation_state: none`, and no canonical or envelope row locked or changed. `--delivery-quiesced` is **not** removed by the gate: the gate makes gated processes
 quiesce, while the acknowledgement exists for the `projection_failure_generation` fence problem above,
 which the gate does not solve.
 
@@ -354,7 +358,7 @@ supplied event ID is never echoed into logs.
 | Exit code | Meaning |
 |---|---|
 | `0` | `created`, `repaired`, or `unchanged`, with the final audit write reported successfully. |
-| `1` | Expected refusal: absent or ambiguous canonical history, identity conflict, or missing quiescence acknowledgement. |
+| `1` | Expected refusal: closed gate (`rebuild_in_progress`), absent or ambiguous canonical history, identity conflict, or missing quiescence acknowledgement. |
 | `2` | Invalid input or configuration, database or runtime failure, audit failure, or unknown commit outcome. |
 
 The audit is **structured application logs, not a new table**. Operator intent is recorded before any
@@ -442,7 +446,7 @@ That is one more test and nine more assertions than the checkpoint above records
 ## Projection gate
 
 **T11's. Slices 1-4 implement the control row, shared gate, traffic integration, rebuild, and recovery.**
-T10 command participation remains pending in Slice 5.
+T10 verification and repair also acquire the shared gate inside their own transactions.
 [ADR 0005](../../adr/0005-payments-projection-gate-and-rebuild-ownership.md) is the decision record; [the roadmap](../../roadmap.md) owns task state.
 
 `payment_projection_controls` stores one row per projection with `ready` or `rebuilding`, owner
@@ -856,7 +860,45 @@ After recording this evidence, a separate `make agent-check` also exited `0`.
 A separate local, sequential review covered the actual runtime, test, and documentation diff.
 The initial test run reproduced three failures caused by the stale Artisan command instance; the final run passes those same scenarios.
 No `make ci`, `make projection-contract`, or `make image-contract` was run for this checkpoint.
-Slice 5's T10 command participation and operator handoff remain pending.
+Slice 5's T10 command participation and operator handoff were still pending at this checkpoint.
+
+### T11 implementation evidence
+
+The table maps the complete T11 contract to named tests; suite names refer to `Modules/Payments/tests/Integration/` unless marked Feature.
+Earlier slice checkpoints retain their original validation counts and scope.
+
+| Contract | Owning test and scope |
+|---|---|
+| Rebuild waits for in-flight consumers before clear; timeout changes nothing | `ProjectionRebuildTest`: `waits for a traffic-shaped shared holder, refuses on lock timeout, and clears nothing`; `PaymentProjectionConsumerTest`: `holds the gate lock on its own connection while a delivery is deferred by the control row`. These compose the shared-holder protocol; they are not an OS-process scheduling matrix. |
+| Failed or killed rebuild never exposes partial state as ready | `ProjectionRebuildTest`: `preserves cleared_at across a chain of clear, kill, takeover, kill, takeover, until a replay completes`, including observer evidence of closed traffic after lock release. |
+| Bounded replay recreates equal canonical business columns | `ProjectionRebuildTest`: `replays bounded batches across an ID gap and reproduces the columns the consumer would have written`. |
+| Stale queued duplicates remain harmless | `ProjectionRebuildTest`: `takes the duplicate path harmlessly when a stale delivery arrives after a successful rebuild`. |
+| Ownership requires the token and actual session lock | `ProjectionRebuildTest`: `the lock half of the fence catches a live, un-taken-over session that has lost the lock`; `checkpoint 2: a pinned session terminated between batches aborts the run with no further write`; `checkpoint 3: ownership lost before the ready transition never reopens the gate`. |
+| Takeover preserves inherited clear evidence, including early failure | `ProjectionRebuildTest`: `a takeover that fails before its own clear leaves the inherited cleared_at intact, and a third run is still refused the shortcut`; `refuses a second rebuild against a live owner, never reaching phase 2, and the live owners token survives`. |
+| Guarded recovery is restricted to an abandoned pre-clear run | `ProjectionRebuildTest`: `guarded recovery sets ready without replay when a takeover finds cleared_at still null`; `never takes the guarded-recovery shortcut when cleared_at is non-null, even if the read model looks complete`; `guarded recovery keeps the ready fence and cannot reopen traffic after losing its lock`. |
+| Uncertain commits preserve durable recovery evidence | `ProjectionRebuildTest`: `reports an uncertain commit without discarding durable recovery evidence`, at claim, clear, batch, ready, and guarded-recovery ready commits. Injection occurs after a real commit; it establishes the committed side of uncertainty, not a network acknowledgement failure. |
+| Rebuild ownership stays within derived state and marker reconciliation | `ProjectionRebuildTest`: `reconciles the completion marker and touches no other outbox column, row, or unrelated table`. |
+| POST/GET refuse and relay/consumer defer without charging failure budgets | `InitiationCommitBoundaryTest`: `holds the gate lock on its own connection while initiation is refused by the control row`; Feature `QueryPaymentTest`: `answers 503 projection_rebuilding with Retry-After: 1 while the gate is closed`; `OutboxRelayTest`: `reports a closed gate without selecting a row, publishing or writing anything`; `PaymentProjectionConsumerTest`: `leaves every column the recorder and the relay own untouched by a deferral`. |
+| Deferred work returns through existing reconciliation | `OutboxRelayTest`: `republishes the deferred event once the gate reopens, on the ordinary reconciliation path`; `PaymentProjectionConsumerTest`: `defers a delivery without locking the envelope, throwing or writing anything`. |
+| Verify/repair refuse a closed gate before business-table access | `PaymentProjectionVerifierTest`: `reports a closed maintenance gate as incomplete before scanning and preserves the observed control state`; `PaymentOutboxRepairTest`: `refuses a closed maintenance gate before canonical locking without changing any durable state`. Each covers exclusive lock, abandoned row, and missing row, then a successful reopening control. |
+| Maintenance locks share the audit/write backend and last through the transaction | `PaymentProjectionVerifierTest`: `holds the shared gate on the audit snapshot backend until verification finishes`; `PaymentOutboxRepairTest`: `holds the shared gate on the repair write backend until its commit`. Observer locks and competing exclusive attempts prove affinity and lifetime. |
+| Corruption is fixed by rebuild and maintenance observes real rebuild exclusion | `ProjectionRebuildTest`: `gates verification and repair during a real rebuild and verifies the rebuilt canonical state`. |
+| Audit failures and connection lifecycle retain truthful outcomes | `ProjectionRebuildTest`: `never begins the mutation when operator intent cannot be recorded, and still releases the lock`; `reports completed guarded recovery accurately when its completion audit fails`; `restores the original reconnector after an aborted run`. Additional exit-family cases are recorded in Slice 3 evidence. |
+
+Slice 5 adds `rebuild_in_progress` before the verifier watermark/scans and before repair's canonical lock.
+The verifier reports the observed control state separately and keeps its `REPEATABLE READ, READ ONLY` snapshot; repair retains `READ COMMITTED` and the explicit delivery-quiescence acknowledgement.
+Both hold the shared transaction lock through their work, so rebuild cannot clear state between a maintenance check and its protected reads or writes.
+The [operator procedure](../../operations/runtime-contract.md#manual-rebuild-and-recovery) covers result interpretation, lock/control inspection, replay versus guarded recovery, and unresolved commit outcomes.
+
+These are bounded local fixtures and deterministic database-session/failure injections.
+They establish no production-scale SLA, throughput figure, zero-downtime guarantee, multi-process kill matrix, or rehearsal against a real incident.
+The barrier-coordinated OS-process matrix remains T12; online staging swaps and resumable replay remain deferred below.
+
+On 2026-09-07, the final continuous `make ci` run exited `0`: **693 tests, 4116 assertions**;
+the development database remained untouched, the projection contract passed in 127 seconds, and
+the API and web CI images both built successfully.
+This validates the current Slice 5 source, tests, instructions, and canonical documentation in one
+repository-defined run.
 
 ## Deferred evolution
 
@@ -886,7 +928,7 @@ T10 - verification and targeted repair (**delivered**):
 - Repair leaves every idempotency receipt, projector receipt, read row, canonical event, and
   unrelated envelope untouched.
 
-T11 - gate, rebuild, and recovery:
+T11 - gate, rebuild, and recovery (**implemented; owning tests in the table above**):
 
 - Rebuild waits for already-running consumers before clearing.
 - Failed or killed rebuild never exposes partial state as ready.

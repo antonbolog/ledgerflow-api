@@ -3,8 +3,8 @@
 - **Status** — Accepted.
 - **Date** — 2026-09-03.
 - **Decision owner** — AB.
-- **Implemented by** - T11 Slices 1-4: control row, traffic gate, rebuild ownership, replay, and recovery.
-  T10 command participation and the final operator handoff remain pending in Slice 5.
+- **Implemented by** - T11 Slices 1-5: control row, traffic gate, rebuild ownership, replay, recovery, and T10 command participation.
+  The [operator procedure](../operations/runtime-contract.md#manual-rebuild-and-recovery) and [evidence table](../specifications/payments/verification-and-rebuild.md#t11-implementation-evidence) record the handoff and measured limits.
 
 ## Context
 

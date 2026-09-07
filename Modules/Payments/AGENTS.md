@@ -32,6 +32,9 @@ smallest relevant document under `docs/specifications/payments/` and any linked 
 - The rebuild owns one pinned connection and exclusive session lock across bounded replay batches.
   Preserve inherited `cleared_at` across takeover and failure; guarded recovery requires a previously `rebuilding` row with a null marker.
   Ownership is rechecked before clear, before each batch, and before ready, including guarded recovery.
+- Verification and targeted repair hold the same shared gate through their owned transactions.
+  A closed gate yields `rebuild_in_progress`: incomplete exit `2` for verification, refusal exit `1` without mutation for repair.
+  The gate never replaces repair's `--delivery-quiesced` acknowledgement.
 - Never log raw idempotency keys, credentials, exception text in health JSON, or sensitive payloads.
 
 ## Evidence

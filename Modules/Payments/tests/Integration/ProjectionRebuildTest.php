@@ -14,6 +14,8 @@ use Modules\Merchant\Infrastructure\Persistence\Eloquent\Merchant;
 use Modules\Payments\Application\Rebuild\ProjectionRebuild;
 use Modules\Payments\Application\Rebuild\RebuildOutcome;
 use Modules\Payments\Application\Rebuild\RebuildReason;
+use Modules\Payments\Application\Repair\RepairOutcome;
+use Modules\Payments\Application\Verification\VerificationReport;
 use Modules\Payments\Domain\Payment\Events\PaymentInitiated;
 use Modules\Payments\Infrastructure\Console\RebuildPaymentProjectionsCommand;
 use Modules\Payments\Infrastructure\Projection\PaymentProjectionConsumer;
@@ -21,6 +23,9 @@ use Modules\Payments\Infrastructure\Projection\ProjectionGate;
 use Modules\Payments\Infrastructure\Projection\ProjectionGateState;
 use Modules\Payments\Infrastructure\Rebuild\DatabaseProjectionRebuild;
 use Modules\Payments\Infrastructure\Rebuild\RebuildConfiguration;
+use Modules\Payments\Infrastructure\Repair\DatabaseOutboxRepair;
+use Modules\Payments\Infrastructure\Verification\DatabaseProjectionVerifier;
+use Modules\Payments\Infrastructure\Verification\VerificationConfiguration;
 use Modules\Payments\Tests\Integration\IntegrationDatabase;
 use Modules\Payments\Tests\Integration\ProjectionGateLocks;
 use Modules\Payments\Tests\Support\FailingLogger;
@@ -1287,3 +1292,105 @@ it('reports completed guarded recovery accurately when its completion audit fail
         ->and(rebuildReadRow($seeded['payment_id']))->toBe($before)
         ->and(rebuildLockHeld())->toBeFalse();
 });
+
+it('gates verification and repair during a real rebuild and verifies the rebuilt canonical state', function (): void {
+    $seeded = rebuildSeed();
+    resolve(PaymentProjectionConsumer::class)->project($seeded['event_id']);
+    DB::table('payment_details')->where('payment_id', $seeded['payment_id'])->update(['amount_minor' => 9_999]);
+    expect(Artisan::call('payments:projections:verify'))->toBe(VerificationReport::EXIT_INCONSISTENT);
+
+    $observed = [];
+    $commits = 0;
+    Event::listen(TransactionCommitted::class, function (TransactionCommitted $event) use (&$commits, &$observed, $seeded): void {
+        if ($event->connection !== DB::connection()) {
+            return;
+        }
+
+        $commits++;
+
+        if ($commits !== 2) {
+            return;
+        }
+
+        // The actual rebuild has committed its clear and still holds its lock.
+        // These maintenance adapters run on a distinct backend, as separate CLI
+        // processes would. Command formatting is covered by their owning suites.
+        $connection = DB::connection(IntegrationDatabase::LOCK);
+        $observed['verify'] = new DatabaseProjectionVerifier(
+            $connection, resolve(VerificationConfiguration::class), static fn (): int => (int) hrtime(true),
+        )->verify();
+        $observed['repair'] = new DatabaseOutboxRepair($connection, resolve(LoggerInterface::class))
+            ->repair($seeded['event_id'], true, (string) Str::uuid7());
+        $observed['row'] = rebuildReadRow($seeded['payment_id']);
+    });
+
+    [$exitCode] = rebuildRun();
+    Event::forget(TransactionCommitted::class);
+    expect($exitCode)->toBe(RebuildOutcome::EXIT_DONE)
+        ->and($observed['row'])->toBeNull()
+        ->and($observed['verify']->exitCode())->toBe(VerificationReport::EXIT_INCOMPLETE)
+        ->and($observed['verify']->reason)->toBe('rebuild_in_progress')
+        ->and($observed['verify']->projectionControlState)->toBe('rebuilding')
+        ->and($observed['verify']->scanned)->toBe([])
+        ->and($observed['repair']->exitCode())->toBe(RepairOutcome::EXIT_REFUSED)
+        ->and($observed['repair']->reason->value)->toBe('rebuild_in_progress')
+        ->and($observed['repair']->changedFields)->toBe([])
+        ->and(Artisan::call('payments:projections:verify'))->toBe(VerificationReport::EXIT_CONSISTENT);
+});
+
+it('reports an uncertain commit without discarding durable recovery evidence', function (int $failedCommit, bool $guarded): void {
+    $seeded = rebuildSeed();
+    resolve(PaymentProjectionConsumer::class)->project($seeded['event_id']);
+
+    if ($guarded) {
+        markDeadRebuildWithClearedAt(null);
+    }
+
+    $commits = 0;
+    Event::listen(TransactionCommitted::class, function (TransactionCommitted $event) use (&$commits, $failedCommit): void {
+        if ($event->connection !== DB::connection()) {
+            return;
+        }
+
+        $commits++;
+
+        if ($commits === $failedCommit) {
+            // A deterministic failure after a real server commit. This proves
+            // classification and recovery for the committed side of uncertainty,
+            // not a network-level lost acknowledgement or an OS-process kill.
+            throw new RuntimeException('Simulated missing commit reply: private diagnostic');
+        }
+    });
+
+    [$exitCode, $result] = rebuildRun();
+    Event::forget(TransactionCommitted::class);
+    $control = rebuildControlRow();
+    $readyCommitted = $guarded || $failedCommit === 4;
+
+    expect($exitCode)->toBe(RebuildOutcome::EXIT_FAILED)
+        ->and($result['reason'])->toBe(RebuildReason::CommitOutcomeUnknown->value)
+        ->and(json_encode($result))->not->toContain('private diagnostic')
+        ->and($control['state'])->toBe($readyCommitted ? 'ready' : 'rebuilding')
+        ->and($control['cleared_at'] === null)->toBe($readyCommitted || $failedCommit === 1)
+        ->and(rebuildLockHeld())->toBeFalse();
+
+    if (! $readyCommitted) {
+        expectAbandonedRebuildGateClosed();
+    }
+
+    // A separately authorized attempt decides from durable state, not from the
+    // failed attempt's JSON or its unconfirmed progress counters.
+    rebuildWithConfig();
+    [$recovered, $recovery] = rebuildRun();
+    expect($recovered)->toBe(RebuildOutcome::EXIT_DONE)
+        ->and($recovery['guarded_recovery'])->toBe(! $guarded && $failedCommit === 1)
+        ->and(rebuildControlRow()['state'])->toBe('ready')
+        ->and(rebuildControlRow()['cleared_at'])->toBeNull()
+        ->and(rebuildReadRow($seeded['payment_id']))->not->toBeNull();
+})->with([
+    'claim commit' => [1, false],
+    'clear commit' => [2, false],
+    'batch commit' => [3, false],
+    'ready commit' => [4, false],
+    'guarded recovery ready commit' => [2, true],
+]);

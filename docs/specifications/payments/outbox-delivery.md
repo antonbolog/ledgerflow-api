@@ -178,8 +178,8 @@ construction. That deferral is `RelayOutcome::GateClosed`, reported distinctly f
 (a drained backlog), so a closed gate is never read as an empty queue. See
 [verification and rebuild](verification-and-rebuild.md#t7s-reciprocal-obligation-discharged-by-t11-slice-2)
 for the reciprocal side and its
-[Slice 2 evidence](verification-and-rebuild.md#t11-slice-2-implementation-evidence). The bounded batch
-rebuild that would ever close this gate for real remains unimplemented.
+[Slice 2 evidence](verification-and-rebuild.md#t11-slice-2-implementation-evidence).
+The implemented bounded rebuild and recovery are covered by the [T11 evidence](verification-and-rebuild.md#t11-implementation-evidence).
 
 ## State transitions
 

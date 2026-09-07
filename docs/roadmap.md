@@ -31,11 +31,11 @@ reconciled in
 [operator procedure](operations/runtime-contract.md#manual-verification-and-targeted-repair) and
 [executable evidence](specifications/payments/verification-and-rebuild.md#t10-implementation-evidence).
 The final validation checkpoint records the split CI execution and successful image-stage retry.
-**T11 is in progress: the control-row migration, shared gate primitive, traffic acquisition on all
-four paths (`POST`, `GET`, the relay, and the consumer), and the bounded batch rebuild with its
-ownership fence are implemented.**
-Guarded recovery and takeover are implemented locally under [ADR 0005](adr/0005-payments-projection-gate-and-rebuild-ownership.md).
-T10 verify/repair gate participation and the final operator handoff remain Slice 5 work.
+**T11 is complete locally and shipping is pending.**
+The control row, connection-affine gate on all four traffic paths, bounded batch rebuild, ownership
+fence, guarded recovery, takeover, T10 verify/repair participation, and operator procedure are
+implemented under [ADR 0005](adr/0005-payments-projection-gate-and-rebuild-ownership.md).
+The final continuous `make ci` checkpoint passed before shipping.
 
 ## Outcome
 
@@ -203,10 +203,10 @@ Detect and repair derived-state corruption while keeping partial rebuilds invisi
   Four read-only snapshot passes plus duplicate detection, and quiesced single-envelope repair preserving existing exhaustion and failure history.
   Contracts and measured limits live in [verification and rebuild](specifications/payments/verification-and-rebuild.md#t10-implementation-evidence); the [runtime contract](operations/runtime-contract.md#manual-verification-and-targeted-repair) owns the operator procedure.
   No new migration, index, dependency, recurring schedule, worker, projection gate, or read-model rebuild.
-- T11 - Implement connection-affine gated batch rebuild and recovery. **In progress: Slices 1-3 implemented
-  the control-row migration, gate primitive, traffic acquisition on all four paths, and the bounded
-  batch rebuild with its ownership fence; Slice 4 adds guarded recovery and takeover locally.**
-  Slice 5's T10 command participation, operator handoff, and final validation remain pending.
+- T11 - Implement connection-affine gated batch rebuild and recovery. **Complete locally; shipping pending.**
+  All five slices are implemented: the control-row migration, gate primitive, traffic acquisition
+  on all four paths, bounded batch rebuild, ownership fence, guarded recovery, takeover, T10 command
+  participation, and operator handoff.
   [ADR 0005](adr/0005-payments-projection-gate-and-rebuild-ownership.md) owns the gate key, the
   fail-closed control row plus advisory lock, the non-blocking traffic acquisition, the budget-free
   deferral, the lock-first acquisition order, and the ownership fence that rests on lock possession

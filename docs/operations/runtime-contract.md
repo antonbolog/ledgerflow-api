@@ -98,7 +98,7 @@ message, and correlation identifiers. At minimum expose:
 - Redis queue lag, duplicate deliveries, failed jobs, and worker restarts;
 - SQS queue age, DLQ depth, redrive results, and worker failures when SQS is introduced;
 - Reverb connection and broadcast health when realtime is introduced;
-- rebuild state, owner, high watermark, batch progress, and final result.
+- rebuild state and owner from `payment_projection_controls`, plus high watermark, confirmed batch progress, and final result from rebuild JSON and correlated logs (implemented by T11).
 
 The verifier reports corruption; it does not repair or rebuild automatically. Repair and rebuild
 remain explicit developer/operator procedures with audit evidence.
@@ -129,7 +129,7 @@ They are operational actions, not substitutes for `make check` or `make ci`.
    Verification may run while delivery is active and does not stop workers or mutate data.
 2. Interpret the verification exit code before choosing an action:
    `0` means consistent or ordinary in-flight delivery; `1` means confirmed inconsistency;
-   `2` means an incomplete audit or invalid configuration; `3` means operational attention for overdue delivery, exhaustion, or future event time.
+   `2` means an incomplete audit (including `rebuild_in_progress`) or invalid configuration; `3` means operational attention for overdue delivery, exhaustion, or future event time.
    An incomplete report never establishes that the remaining history is clean.
 3. If a finding requires correction of one outbox envelope, run `make projection-stop`.
    Independently confirm every scheduler, consumer, manual delivery command and delayed failure recorder has finished, including other hosts.
@@ -139,12 +139,12 @@ They are operational actions, not substitutes for `make check` or `make ci`.
 5. Run a fresh verification and assess all remaining findings before resuming the pair with `make projection-start`.
    A corrected but unprojected envelope can remain overdue while workers are stopped; that alone does not mean repair failed.
    Repair does not clear exhaustion: only an explicitly chosen `payments:outbox:retry <event-id>` reactivates an exhausted envelope after its cause is corrected.
-   A receipt without its read row still requires T11 recovery, not repeated envelope repair or manual replay.
+   A receipt without its read row requires the controlled rebuild procedure below.
 6. When resumption is appropriate, verify again after delivery has had an opportunity to converge.
-   Keep unresolved read-model corruption visible; T10 provides no shared gate or rebuild command.
+   Keep unresolved read-model corruption visible until controlled rebuild and fresh verification establish its correction.
 
 Repair exit `0` means `created`, `repaired`, or `unchanged`, with the final log call succeeding.
-Exit `1` is an expected refusal; exit `2` is invalid input, runtime/timeout failure, audit failure, or commit uncertainty.
+Exit `1` is an expected refusal, including `rebuild_in_progress` before canonical or envelope locking; exit `2` is invalid input, runtime/timeout failure, audit failure, or commit uncertainty.
 Always inspect `mutation_state`: `committed` with `audit_failed` must not be described as rollback, and `unknown` must not be treated as no mutation.
 A failed final audit preserves an already known `rolled_back`, `unknown`, or `no_changes` state.
 Do not automatically repeat repair after a failed or missing result; inspect durable state and obtain a fresh verification first.
@@ -159,6 +159,65 @@ Invalid task-specific arguments/options return exit `2` and `invalid_invocation`
 
 Executable evidence and the limits of the concurrency and query-plan claims live in the
 [T10 evidence table](../specifications/payments/verification-and-rebuild.md#t10-implementation-evidence).
+
+### Manual rebuild and recovery
+
+Run rebuild only against the intended environment through its running application container.
+It clears `payment_details` and the named projector's receipts and reconstructs them from canonical `stored_events`.
+It reconciles missing outbox completion markers but never recreates envelopes or changes idempotency receipts, canonical events, failure history, or exhaustion.
+This is an availability interruption: POST and GET return `503 projection_rebuilding`; relay and consumer defer, and verify/repair decline while the gate is closed.
+Existing in-flight shared transactions must finish before the exclusive rebuild lock is acquired.
+There is no queue flush and no requirement to stop the pair for rebuild itself; outbox reconciliation redelivers deferred work after the gate reopens.
+Targeted envelope repair still requires the separate `--delivery-quiesced` procedure above.
+
+1. Retain the current verification JSON and identify whether the problem belongs to read-model rebuild, envelope repair, or canonical-history investigation.
+   If verification returns `rebuild_in_progress`, inspect the gate before starting another run.
+2. Inspect committed control state and actual lock holders.
+   For the repository's local Compose environment, these read-only operator commands show both:
+
+   ```sh
+   docker compose exec -T postgres psql -U ledgerflow -d ledgerflow -c 'SELECT projection, state, owner_token, owner_pid, started_at, cleared_at FROM payment_projection_controls;'
+   docker compose exec -T postgres psql -U ledgerflow -d ledgerflow -c "SELECT pid, mode, granted FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) AND classid = 7011 AND objid = 1 AND objsubid = 2;"
+   ```
+
+   Use the corresponding approved database connection outside this local environment.
+   The recorded PID is diagnostic; it does not prove that its process or session still owns the gate.
+   Acquiring the exclusive lock proves only that no other session holds it, not that a predecessor process died.
+3. When a rebuild or recovery is explicitly intended, run:
+
+   ```sh
+   docker compose exec -T app php artisan payments:projections:rebuild --confirm-rebuild
+   ```
+
+   Preserve stdout JSON, exit status, and `operation_id`; use that ID to correlate intent, completion, or abort logs and the run's owner token.
+   The command decides recovery from durable state; there is no `--recover` override.
+4. Follow the result table, then run fresh verification once the gate is ready.
+   Guarded recovery only establishes that no destructive clear committed; it is not an audit of pre-existing correctness.
+   A rebuilt read model does not repair a missing or corrupted outbox envelope, so verification can legitimately still require targeted repair.
+
+| Result | Operator action |
+|---|---|
+| Exit `0`, `rebuild_complete`, `guarded_recovery: false` | Full replay completed and set ready; verify the result. |
+| Exit `0`, `rebuild_complete`, `guarded_recovery: true` | An abandoned pre-clear run was recovered without replay; verify existing state. |
+| Exit `1`, `confirmation_missing` | No mutation started; supply confirmation only if a rebuild is intended. |
+| Exit `1`, `lock_timeout` | No claim or clear occurred; inspect active shared transactions or an exclusive owner and coordinate a later attempt. |
+| Exit `2`, `ownership_lost` | This run stopped writing; inspect the current owner and durable state before any new attempt. |
+| Exit `2`, `canonical_event_undecodable` | Investigate canonical corruption; repeating the same replay does not correct it, and manually setting ready would expose partial state. |
+| Exit `2`, `database_error` or `statement_timeout` | Resolve the underlying failure, inspect control state and locks, then choose a new authorized attempt if needed. |
+| Exit `2`, `commit_outcome_unknown`, or missing final JSON | Do not infer rollback or automatically retry; inspect durable state because the last commit may have landed. |
+| Exit `2`, `intent_audit_failed` | This run made no ownership claim; repair the logging sink before another attempt. |
+| Exit `2`, `audit_failed` | Ready already committed; preserve the reported progress, fix the audit sink, and verify instead of assuming replay failed. |
+
+With `state = rebuilding` and no exclusive owner, a new authorized run takes ownership under a fresh token.
+If inherited `cleared_at` is null, it may set ready without replay; if non-null, it must clear partial state and replay from zero, even when rows look complete.
+Never reset the marker or owner fields manually to force the shortcut.
+The gate remains closed after an aborted destructive run until a successful replay commits ready.
+
+`PAYMENTS_REBUILD_BATCH_SIZE` defaults to 500 (1-1000); `PAYMENTS_REBUILD_LOCK_TIMEOUT_MS` and `PAYMENTS_REBUILD_STATEMENT_TIMEOUT_MS` each default to 5000 (1-600000), through `config/payments.php`.
+Final JSON and completion/abort logs report `high_watermark`, `events_replayed`, and `batches_committed` as far as confirmed; they are not live per-batch telemetry or proof about an unacknowledged commit.
+`guarded_recovery` indicates path selection and can also be true on a failed recovery attempt.
+No production-scale SLA, throughput, zero-downtime behavior, OS-process kill matrix, or real-incident runbook rehearsal is claimed.
+See the [T11 evidence table](../specifications/payments/verification-and-rebuild.md#t11-implementation-evidence).
 
 ## Messaging ownership
 
