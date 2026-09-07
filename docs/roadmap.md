@@ -218,9 +218,9 @@ Detect and repair derived-state corruption while keeping partial rebuilds invisi
   push followed by an injected commit-boundary exception, `pg_locks` barriers, and backend
   termination.
   The process half is `make resilience-contract` - a disposable isolated Compose project that drives
-  the critical HTTP path, a real Redis outage, a concurrent identical `POST`, and `SIGKILL`/`SIGTERM`
-  of the real relay, consumer and rebuild processes under synchronization barriers, wired into
-  `make ci`.
+  the critical HTTP path, a real Redis outage, a concurrent identical `POST`, `SIGKILL` of the real
+  relay, consumer and rebuild processes, and `SIGTERM` of a real worker that must commit its
+  projection and exit by itself - all under synchronization barriers, wired into `make ci`.
   Both disposable-project contracts share one bounded-deadline, scoped-teardown harness,
   `scripts/ci/lib/contract.sh`; `projection-contract` moved onto it in the same change.
   Evidence and claim boundaries in the
