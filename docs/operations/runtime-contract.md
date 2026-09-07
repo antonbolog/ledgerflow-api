@@ -72,6 +72,17 @@ including the deadline path, and runs as part of `make ci`. It proves paired sta
 budget, restart convergence, duplicate delivery converging to one receipt and one read row, and that
 the paired stop reaches both processes.
 
+`make resilience-contract` proves the process half of the Payments resilience plan in a second
+disposable Compose project built on the shared `scripts/ci/lib/contract.sh` harness - bounded work
+deadline, scoped teardown, failure-only diagnostics, `RESILIENCE_CONTRACT_SELF_TEST=1` hang - and
+also runs as part of `make ci`.
+It drives the critical `POST -> GET` HTTP path, a real Redis-daemon outage and recovery, a concurrent
+identical `POST`, barrier-coordinated `SIGKILL` of the real relay, consumer and rebuild processes,
+and a `SIGTERM` of a real worker from the same barrier position that must commit its projection and
+exit by itself. Each signal is gated on an observed PostgreSQL lock wait or control-row state rather
+than a timer. Its claim boundaries against the integration evidence live in the
+[resilience test plan](../testing/payments-resilience.md#process-level-resilience).
+
 That consumer gets **one Horizon execution per published job**; outbox reconciliation, not Horizon,
 owns republication after grace. Accepted starting values: one process, a 15-second Horizon worker
 timeout, the existing 90-second queue reservation, and a new 2-second projection-local PostgreSQL
@@ -216,7 +227,8 @@ The gate remains closed after an aborted destructive run until a successful repl
 `PAYMENTS_REBUILD_BATCH_SIZE` defaults to 500 (1-1000); `PAYMENTS_REBUILD_LOCK_TIMEOUT_MS` and `PAYMENTS_REBUILD_STATEMENT_TIMEOUT_MS` each default to 5000 (1-600000), through `config/payments.php`.
 Final JSON and completion/abort logs report `high_watermark`, `events_replayed`, and `batches_committed` as far as confirmed; they are not live per-batch telemetry or proof about an unacknowledged commit.
 `guarded_recovery` indicates path selection and can also be true on a failed recovery attempt.
-No production-scale SLA, throughput, zero-downtime behavior, OS-process kill matrix, or real-incident runbook rehearsal is claimed.
+`make resilience-contract` additionally kills a real `payments:projections:rebuild` process with `SIGKILL` while it holds the `rebuilding` state, and proves the gate stays closed, defers traffic without budget, and reopens after an authorized recovery run.
+No production-scale SLA, throughput figure, zero-downtime behavior, exhaustive kill matrix, or real-incident runbook rehearsal is claimed.
 See the [T11 evidence table](../specifications/payments/verification-and-rebuild.md#t11-implementation-evidence).
 
 ## Messaging ownership

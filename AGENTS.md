@@ -50,11 +50,17 @@ compatibility evidence live in
   `payments:outbox:repair {eventId} --delivery-quiesced` repairs one envelope, preserves existing
   exhaustion and failure history, and never rebuilds read rows. See the
   [operator procedure](docs/operations/runtime-contract.md#manual-verification-and-targeted-repair).
-- T11 gates POST, GET, relay, and consumer traffic during a bounded batch rebuild.
-  POST and GET return `503 projection_rebuilding`; relay and consumer defer without consuming failure budgets.
-  Rebuild ownership and guarded recovery follow [ADR 0005](docs/adr/0005-payments-projection-gate-and-rebuild-ownership.md).
-  Verify reports incomplete and repair refuses while the gate is closed, before scanning or canonical locking.
-  The [roadmap](docs/roadmap.md) owns delivery order and task status.
+- A bounded batch rebuild gates POST, GET, relay, and consumer traffic. POST and GET return
+  `503 projection_rebuilding`; relay and consumer defer without consuming failure budgets. Verify
+  reports incomplete and repair refuses while the gate is closed, before scanning or canonical
+  locking. Rebuild ownership and guarded recovery follow
+  [ADR 0005](docs/adr/0005-payments-projection-gate-and-rebuild-ownership.md).
+- Resilience is proved end to end. The integration suites inject every persistence and delivery
+  failpoint in process; `make resilience-contract` drives the critical HTTP path, a real Redis
+  outage, a concurrent identical POST, SIGKILL of the real relay, consumer and rebuild processes,
+  and SIGTERM of a real worker that must commit its projection and exit by itself - all
+  barrier-coordinated in a disposable Compose project, inside `make ci`. See the
+  [resilience test plan](docs/testing/payments-resilience.md#process-level-resilience).
 
 ## Architecture and boundaries
 
@@ -107,6 +113,7 @@ environment lifecycle, database lifecycle, validation, and CI contracts.
 | `make test` | Run Pest against `ledgerflow_test`; leaves PostgreSQL and Redis running |
 | `make check` | Run the normal local validation contract: `quality` then `test` |
 | `make projection-contract` | Prove the scheduler+Horizon pair in a disposable Compose project |
+| `make resilience-contract` | Prove Payments resilience under real OS-process signals in a disposable Compose project |
 | `make ci` | After `make install`, run the full CI guard, isolation, validation, and image contract |
 
 Use only these repository-defined validation commands. `make check` must not mutate source or the

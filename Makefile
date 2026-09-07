@@ -5,7 +5,7 @@
 #   environment lifecycle   install  start  stop  destroy
 #   database lifecycle      db-migrate  db-seed  db-reset
 #   projection runtime      projection-start  projection-stop
-#   validation              agent-check  quality  test  check  projection-contract  ci
+#   validation              agent-check  quality  test  check  projection-contract  resilience-contract  ci
 #
 # CI derives all validation from these targets. Ad-hoc `artisan`, `tinker` and
 # `psql` access is ordinary developer work and is not a violation of that rule.
@@ -333,5 +333,9 @@ image-contract: ## Build the production and web image targets
 projection-contract: ## Prove the scheduler+Horizon pair end to end in a disposable Compose project
 	@./scripts/ci/projection-contract.sh
 
+.PHONY: resilience-contract
+resilience-contract: ## Prove Payments resilience with real OS-process SIGKILL in a disposable Compose project
+	@./scripts/ci/resilience-contract.sh
+
 .PHONY: ci
-ci: ci-contract projection-contract image-contract ## Run the full CI-equivalent contract after install
+ci: ci-contract projection-contract resilience-contract image-contract ## Run the full CI-equivalent contract after install

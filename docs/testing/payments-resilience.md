@@ -182,15 +182,45 @@ A green suite on small fixtures is not a scale claim; any index justified by lat
 4. Corrupt `PaymentDetails` -> verifier fails -> controlled rebuild -> verifier passes.
 5. Corrupt one outbox envelope -> verifier fails -> targeted repair -> delivery converges.
 
+Paths 1-4 are exercised end to end by `make resilience-contract` (see **Process-level resilience**).
+Path 5 - targeted outbox repair - stays with the T10 integration suite.
+
 ## Failure injection
 
 - Integration tests inject failures at named persistence and delivery checkpoints.
 - A real transport push followed by an injected exception proves the publish-before-commit path.
-- Process tests use synchronization barriers, then SIGTERM/SIGKILL real relay, consumer, and
-  rebuild processes. Arbitrary sleeps are not accepted as coordination. That process suite is T12's;
-  T8's crash evidence is the deterministic failpoint and live Horizon restart smoke named under
-  **Projection consumer**.
+- Process tests use synchronization barriers, then SIGTERM/SIGKILL real relay, consumer, and rebuild
+  processes. Arbitrary sleeps are not accepted as coordination. **Delivered by
+  `make resilience-contract`** - see **Process-level resilience** below. T8's crash evidence stays
+  the deterministic failpoint and live Horizon restart smoke named under **Projection consumer**.
 - Production logic contains no environment-conditioned fault flags.
+
+## Process-level resilience
+
+`make resilience-contract` is T12's process half. It runs a disposable, isolated Compose project
+(`ledgerflow-resilience-contract`) with its own PostgreSQL, Redis, nginx and PHP-FPM, a bounded work
+deadline, failure diagnostics, and a guaranteed scoped teardown, and it is part of `make ci`. It
+proves only what an in-process test cannot - a real `php artisan` process signalled mid-transaction,
+with `SIGKILL` and with `SIGTERM` - and names its boundary against the integration evidence rather
+than repeating it.
+
+| Acceptance criterion (ANT-14) | Evidence | Boundary of the claim |
+|---|---|---|
+| Critical `POST -> outbox -> Redis -> consumer -> GET` passes | Real bearer token, real `POST` (`202`), a one-shot relay pass, the Horizon consumer, real `GET` (`202 -> 200` with the exact projected fields). | One payment through the real HTTP endpoints and the real transport, not a load or cadence claim - `make projection-contract` owns the live per-second scheduler. |
+| Redis outage/recovery converges pending -> projected | `compose stop redis`; `POST` still commits; the relay cannot publish and consumes no transport or poison budget; `GET` is `202`. `compose start redis`; the relay republishes; `GET` is `200`. | A real transport-daemon outage, not an injected `RedisException`. |
+| Concurrent identical `POST` produces one logical payment | Two real concurrent HTTP clients on one idempotency key -> one `payment_id`, one stored event, one outbox envelope. | Complements T6's PostgreSQL-arbitration evidence with two real request processes. |
+| Publish-before-commit is deterministic | A `SHARE`-lock barrier on `payment_outbox`; a real relay process; a real Redis `push()`; `SIGKILL` while the relay is blocked on its post-push acceptance `UPDATE` -> the envelope rolls back to eligible and a later pass converges to exactly one read row and one receipt. | The kill is gated on an observed `pg_stat_activity` lock wait; no sleep. `OutboxRelayTest` owns the same boundary in-process. |
+| Worker crash is deterministic | An envelope-row-lock barrier; a real `queue:work` process; `SIGKILL` inside the projection transaction -> no receipt, no read row, no marker, no poison budget; redelivery then converges to one read row. | A real process kill, not T8's in-process commit-boundary failpoint. The interruption rolls the transaction back either way. |
+| Graceful worker shutdown finishes its work | The same envelope-row-lock barrier and a real `queue:work` process run without `--once`; `SIGTERM` while it is blocked inside the projection transaction, then the barrier is released -> the job commits, one read row and one receipt, no poison budget, `GET` is `200`, and the worker exits by itself within a bounded reap. | The opposite outcome to the row above from the same barrier position, so the pair measures signal semantics rather than timing. Running without `--once` is what makes the exit evidence of the signal rather than of the command ending. A control run substituting `SIGKILL` leaves the marker unset and fails this row. |
+| Rebuild crash is deterministic | A `SHARE`-lock barrier on `payment_details` holds a real `payments:projections:rebuild` process at the destructive clear with the `rebuilding` state already committed; `SIGKILL` while its backend is in that observed lock wait -> the `rebuilding` state survives; `POST` and `GET` are `503 projection_rebuilding`; the relay declines to publish an eligible row and the consumer defers, with no poison budget change and no `failed_jobs`; authorized recovery run(s) reopen the gate. | A real process kill, gated on an observed lock wait, not T11's `pg_terminate_backend` on a pinned backend. |
+| A killed process leaks no advisory lock | While the rebuild is blocked at the destructive clear, `pg_locks` shows exactly one granted `ExclusiveLock` on the gate key (`classid` 7011, `objid` 1, `objsubid` 2); after `SIGKILL` the count returns to zero within a bounded wait, asserted **before** the recovery loop runs. | The pre-kill count is the non-vacuous control and pins the hardcoded key: a control run against a wrong `classid` fails there rather than letting the post-kill count pass against nothing. Placement matters - the recovery loop's three attempts would otherwise mask a slow release, and a container kill has to propagate a socket close before PostgreSQL drops the session lock. |
+| Corrupt projection is detected and rebuilt | A deleted `payment_details` row fails `payments:projections:verify` (exit `!= 0`); the recovery rebuild restores the read model and verification then passes (exit `0`); `GET` is `200` again. | End-to-end restatement; T10 and T11 own the read-only corruption matrix and the rebuild algorithm. |
+| No arbitrary sleep coordinates a crash | Every `SIGKILL` is gated on an observed `pg_stat_activity` lock wait or an observed control-row state. `sleep` appears only as a poll interval and the `SIGTERM -> SIGKILL` escalation gap. | - |
+| Teardown leaves no orphan process or corrupted fixture | The `EXIT` trap force-removes the three named crash containers and runs `down --volumes --remove-orphans`; the suite then asserts no crash container survived and the scheduler is not running. | Scoped to the disposable project; it never touches the development database. |
+
+Two documented operational dials are set for single spawned processes so a `SIGKILL` lands inside the
+intended window: the relay's `statement_timeout` for the relay-crash step and the rebuild's
+`batch_size` for the rebuild-crash step. Production code branches on neither.
 
 ## Architecture rules
 

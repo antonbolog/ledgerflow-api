@@ -203,7 +203,7 @@ Detect and repair derived-state corruption while keeping partial rebuilds invisi
   Four read-only snapshot passes plus duplicate detection, and quiesced single-envelope repair preserving existing exhaustion and failure history.
   Contracts and measured limits live in [verification and rebuild](specifications/payments/verification-and-rebuild.md#t10-implementation-evidence); the [runtime contract](operations/runtime-contract.md#manual-verification-and-targeted-repair) owns the operator procedure.
   No new migration, index, dependency, recurring schedule, worker, projection gate, or read-model rebuild.
-- T11 - Implement connection-affine gated batch rebuild and recovery. **Complete locally; shipping pending.**
+- T11 - Implement connection-affine gated batch rebuild and recovery. **Complete**, shipped in pull request #12.
   All five slices are implemented: the control-row migration, gate primitive, traffic acquisition
   on all four paths, bounded batch rebuild, ownership fence, guarded recovery, takeover, T10 command
   participation, and operator handoff.
@@ -213,7 +213,19 @@ Detect and repair derived-state corruption while keeping partial rebuilds invisi
   rather than on a token, a stored pid, or a successful query. Contracts are reconciled in
   [verification and rebuild](specifications/payments/verification-and-rebuild.md#projection-gate) and
   its [rebuild algorithm](specifications/payments/verification-and-rebuild.md#rebuild-algorithm).
-- T12 — Prove end-to-end and process-level resilience failures.
+- T12 — Prove end-to-end and process-level resilience failures. **Complete locally; shipping pending.**
+  The integration half was delivered across T6-T11: transaction-lifecycle failpoints, a real Redis
+  push followed by an injected commit-boundary exception, `pg_locks` barriers, and backend
+  termination.
+  The process half is `make resilience-contract` - a disposable isolated Compose project that drives
+  the critical HTTP path, a real Redis outage, a concurrent identical `POST`, `SIGKILL` of the real
+  relay, consumer and rebuild processes, and `SIGTERM` of a real worker that must commit its
+  projection and exit by itself - all under synchronization barriers, wired into `make ci`.
+  Both disposable-project contracts share one bounded-deadline, scoped-teardown harness,
+  `scripts/ci/lib/contract.sh`; `projection-contract` moved onto it in the same change.
+  Evidence and claim boundaries in the
+  [resilience test plan](testing/payments-resilience.md#process-level-resilience).
+  No production-code change; no new dependency, migration, or process.
 - T13 — Publish the five-minute resilience demo and operational guide.
 
 Exit: the complete [resilience test plan](testing/payments-resilience.md) passes through

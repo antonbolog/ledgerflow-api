@@ -14,57 +14,36 @@ use Throwable;
  * One delivered event id, one deterministic projection transaction.
  *
  *     BEGIN
- *     SELECT pg_try_advisory_xact_lock_shared(...); SELECT state FROM ...   <- T11's gate
+ *     SELECT pg_try_advisory_xact_lock_shared(...); SELECT state FROM ...   <- the gate
  *     SELECT ... FROM payment_outbox WHERE event_id = ? FOR UPDATE
  *     INSERT INTO payment_projector_receipts ... ON CONFLICT DO NOTHING
  *     INSERT INTO payment_details ...            <- first delivery only
  *     UPDATE payment_outbox SET projection_completed_at = now()
  *     COMMIT
  *
- * T11'S GATE IS PREPENDED TO THIS SAME TRANSACTION, on this same connection,
- * before the envelope lock below - never a provisional key or control table of
- * its own. See ADR 0004 and ProjectionGate.
+ * The gate runs inside this same transaction on this same connection, before the
+ * envelope lock. See ADR 0005 and ProjectionGate.
  *
- * THE RECEIPT IS THE IDEMPOTENCY BOUNDARY, not the read row and not the marker.
- * `INSERT ... ON CONFLICT DO NOTHING` returns 1 for a first delivery and 0 for a
- * duplicate, and that single number is what the two paths branch on. Asking
- * "does a payment_details row already exist?" instead would be a different question
- * with a different answer under a concurrent duplicate, because two transactions
- * can both read "no" before either writes.
+ * The receipt is the idempotency boundary, not the read row and not the marker:
+ * `ON CONFLICT DO NOTHING` returns 1 for a first delivery and 0 for a duplicate.
+ * Asking whether a `payment_details` row exists would let two concurrent
+ * deliveries both read "no" before either writes.
  *
- * ONE APPLICATION ATTEMPT. RetryingAtomicTransaction is deliberately NOT reused: it
- * belongs to the write path, which owns an idempotency receipt and can safely
- * rebuild an aggregate per attempt. Here recovery is owned by redelivery and by the
- * relay's reconciliation grace, and a second retry policy would be a second owner
- * of the SQLSTATE allowlist.
+ * RetryingAtomicTransaction is deliberately not reused: redelivery and the relay's
+ * reconciliation grace own recovery here, and a second retry policy would be a
+ * second owner of the SQLSTATE allowlist. Connection::transaction() is avoided for
+ * the reason OutboxRelay records - its commit-exception path can leave the server
+ * transaction open while transactionLevel() reports 0.
  *
- * NOT Connection::transaction(), for the reason OutboxRelay records: that helper's
- * commit-exception path can leave the SERVER transaction open while
- * transactionLevel() reports 0. The lifecycle here is explicit so the two phases
- * below are known rather than reconstructed from an end state that cannot
- * distinguish "never started" from "already durable".
- *
- * ONE BOUND ON THE WHOLE TRANSACTION, set as SET LOCAL immediately after BEGIN and
- * read from ProjectionConfiguration rather than hardcoded here. It is the shortest
- * link of the ordering chain
- * `statement_timeout < worker timeout < retry_after`, which is what makes "one
- * Horizon execution per published job" true; that class owns the chain and refuses
- * a configuration that breaks it.
- *
- * WHAT THIS CLASS DOES NOT DO: it does not count failures, write
- * `last_projection_error`, or set `exhausted_at`. A deterministic refusal escapes
- * as ProjectionEnvelopeRejected and the separate failure-metadata transaction is
- * the recorder's, in its own slice. The generation captured under the lock below is
- * logged now and is what that recorder will be handed.
+ * Failure counting, `last_projection_error` and `exhausted_at` belong to
+ * ProjectionFailureRecorder, in its own transaction.
  */
 final readonly class PaymentProjectionConsumer
 {
     /**
-     * The projector this consumer is, as stored in every receipt it writes.
-     *
-     * PART OF THE PRIMARY KEY, so it is a durable identifier rather than a label:
-     * changing it makes every existing receipt invisible and every delivered event
-     * project a second time. It names the read model this projector maintains.
+     * Part of the receipt primary key, so it is a durable identifier rather than a
+     * label: changing it makes every existing receipt invisible and every delivered
+     * event project a second time.
      */
     public const string PROJECTOR_NAME = 'payment_details';
 
@@ -81,46 +60,32 @@ final readonly class PaymentProjectionConsumer
 
     public function project(string $eventId): ProjectionOutcome
     {
-        // THE TWO PHASES, AS LOCALS RATHER THAN QUESTIONS ASKED OF THE CONNECTION
-        // AFTERWARDS. A failure before BEGIN and a failure after a successful COMMIT
-        // leave identical end states — transactionLevel() 0 and an idle PDO — so a
-        // classification read from the connection would report a durable projection
-        // for work that never started, or a rollback for work already on disk.
+        // Locals, not questions asked of the connection afterwards: a failure before
+        // BEGIN and one after a successful COMMIT leave identical end states, so a
+        // classification read from the connection cannot tell them apart.
         $transactionStarted = false;
         $commitAttempted = false;
 
-        // CAPTURED UNDER THE LOCK, and null until then. The failure recorder may
-        // only write metadata while the row is still on this generation: an operator
-        // retry that ran in between increments it, and a recorder carrying the old
-        // value must then decline rather than charge the fresh cycle. Reading it
-        // afterwards would read whatever the row holds by then, which is precisely
-        // the value that cannot be trusted.
+        // Captured under the lock, and null until then. An operator retry in between
+        // increments the generation, and the recorder must decline rather than charge
+        // the fresh cycle; a value read afterwards could not detect that.
         $failureGeneration = null;
 
         try {
             $this->connection->beginTransaction();
             $transactionStarted = true;
 
-            // BOUNDS EVERY STATEMENT BELOW, INCLUDING THE ENVELOPE LOCK'S WAIT.
-            // SET LOCAL, so it dies with this transaction rather than leaking into
-            // whatever the worker's connection does next.
-            //
-            // It must fire BEFORE the lock is taken: a concurrent duplicate holding
-            // the row is the one wait that can be arbitrarily long, and it is
-            // precisely the wait this bound exists to cut short. PostgreSQL then
-            // cancels the statement as 57014 — a classifiable, non-countable
-            // failure on a connection this process still owns — rather than the
-            // worker's own alarm killing the process mid-transaction thirteen
-            // seconds later.
+            // SET LOCAL, before the lock is taken: a concurrent duplicate holding the
+            // row is the one arbitrarily long wait, and this bound is what cuts it
+            // short as a classifiable 57014 instead of the worker's alarm killing the
+            // process mid-transaction. ProjectionConfiguration owns the ordering chain
+            // statement_timeout < worker timeout < retry_after.
             $this->connection->statement($this->config->statementTimeoutStatement());
 
-            // T11'S GATE, FIRST, BEFORE THE ENVELOPE LOCK. A closed gate commits this
-            // (empty) transaction and returns rather than throwing (F5:
-            // ProjectPaymentEvent has tries = 1 and no try/catch, so an exception
-            // here would land the message in failed_jobs instead of being
-            // redelivered). No row is locked, so projection_failure_count,
-            // projection_failure_generation, exhausted_at and every transport column
-            // are untouched by construction. See ProjectionGate and D5 in ADR 0005.
+            // A closed gate commits this empty transaction and returns rather than
+            // throwing: ProjectPaymentEvent has tries = 1 and no try/catch, so an
+            // exception here would reach failed_jobs instead of being redelivered. No
+            // row is locked, so no counter or transport column can move. ADR 0005, D5.
             if (! $this->gate->inspectPaymentDetails()->isOpen()) {
                 $commitAttempted = true;
                 $this->connection->commit();
@@ -130,11 +95,9 @@ final readonly class PaymentProjectionConsumer
 
             $row = $this->connection->table('payment_outbox')
                 ->where('event_id', $eventId)
-                // A bare FOR UPDATE, never SKIP LOCKED. The relay skips a locked row
-                // because another relay is already handling it; here a locked row
-                // means a concurrent duplicate of THIS event is mid-flight, and
-                // skipping would return "nothing to do" for work that has not
-                // happened yet. Waiting is what serialises the two deliveries.
+                // Never SKIP LOCKED: here a locked row means a concurrent duplicate of
+                // THIS event is mid-flight, and skipping would report "nothing to do"
+                // for work that has not happened. Waiting serialises the two.
                 ->lock('for update')
                 ->first();
 
@@ -144,20 +107,15 @@ final readonly class PaymentProjectionConsumer
                 throw new ProjectionEnvelopeMissing($eventId);
             }
 
-            // The builder returns stdClass, so every column is `mixed` from here on.
-            // Casting once and annotating the shape is what lets the envelope read
-            // columns by name and refuse them honestly, rather than each read being
-            // an unchecked property access.
             /** @var array<string, mixed> $envelopeRow */
             $envelopeRow = (array) $row;
 
             $failureGeneration = $this->generationOf($envelopeRow);
 
             if ($envelopeRow['exhausted_at'] !== null) {
-                // OBSERVABILITY ONLY. No projection, no counter, no marker: an
-                // exhausted row is out of the delivery budget and operator retry is
-                // the sole reactivation path. Committing rather than rolling back
-                // because nothing was written and the lock should be released now.
+                // No projection, no counter, no marker: operator retry is the sole
+                // reactivation path for an exhausted row. Committed rather than rolled
+                // back because nothing was written and the lock should be released.
                 $this->logger->info('Payments projection: skipped an exhausted envelope.', [
                     'category' => 'projection_skipped_exhausted',
                     'event_id' => $eventId,
@@ -171,9 +129,9 @@ final readonly class PaymentProjectionConsumer
                 return ProjectionOutcome::SkippedExhausted;
             }
 
-            // DECODED BEFORE ANY WRITE. A refusal here must leave the receipt
-            // uninserted, or a redelivery would take the duplicate path and find no
-            // read row — turning a malformed payload into reported corruption.
+            // Decoded before any write: a refusal must leave the receipt uninserted,
+            // or redelivery takes the duplicate path, finds no read row, and a
+            // malformed payload is reported as corruption.
             $envelope = PaymentInitiatedEnvelope::fromOutboxRow($envelopeRow);
 
             $outcome = $this->claim($envelope) === 1
@@ -185,17 +143,13 @@ final readonly class PaymentProjectionConsumer
 
             return $outcome;
         } catch (Throwable $failure) {
-            // ROLLED BACK FIRST, ALWAYS. abort() closes the projection transaction
-            // and returns what is known about it; only then may a second, separate
-            // transaction be opened for the metadata. Recording inside the failed
-            // transaction would write metadata that the rollback then discards.
+            // Rolled back first, always: metadata recorded inside the failed
+            // transaction would be discarded by the rollback.
             $ambiguous = $this->abort($failure, $transactionStarted, $commitAttempted, $eventId, $failureGeneration);
 
             $this->chargeIfConfirmed($failure, $ambiguous, $eventId, $failureGeneration);
 
-            // THE ORIGINAL EXCEPTION, unwrapped, for the reason the relay records:
-            // replacing it would delete the only information that explains the
-            // incident — including when the recorder above could not persist.
+            // Unwrapped, so the incident keeps the only information that explains it.
             throw $failure;
         }
     }
@@ -203,15 +157,9 @@ final readonly class PaymentProjectionConsumer
     /**
      * Claim this (projector, event) pair, and say whether the claim was ours.
      *
-     * `ON CONFLICT DO NOTHING` rather than a read-then-write: two concurrent
-     * deliveries can both read "no receipt" before either inserts, so a check-first
-     * version would let both proceed to insert `payment_details` and one would die
-     * on its primary key. Here PostgreSQL arbitrates, and the LOSER is told it lost
-     * by an affected-row count of zero rather than by an exception.
-     *
-     * now(), not a PHP clock: `created_at` is an operational timestamp saying when
-     * this projector consumed the event, and transaction_timestamp() ties it to the
-     * transaction that did.
+     * `ON CONFLICT DO NOTHING` rather than read-then-write: two concurrent deliveries
+     * can both read "no receipt" before either inserts. PostgreSQL arbitrates and the
+     * loser learns it lost from an affected-row count of zero, not an exception.
      */
     private function claim(PaymentInitiatedEnvelope $envelope): int
     {
@@ -228,15 +176,12 @@ final readonly class PaymentProjectionConsumer
     /**
      * First delivery: the read row and the completion marker, in this transaction.
      *
-     * NO UPSERT, AND THAT IS THE CONTRACT. `payment_id` and `source_event_id` are
-     * both unique, so a second, disagreeing event claiming either one raises 23505
-     * and the whole transaction rolls back. An upsert would silently overwrite a
-     * projected payment with contradictory history, which is the one outcome an
-     * event-sourced read model must never produce.
+     * No upsert, deliberately: `payment_id` and `source_event_id` are both unique, so
+     * a disagreeing event raises 23505 and rolls the transaction back. An upsert would
+     * silently overwrite a projected payment with contradictory history.
      *
-     * `initiated_at` COMES FROM THE ENVELOPE, every other timestamp from now(). The
-     * read row must be a function of the event alone, so that a rebuild reproduces
-     * it byte for byte; processing time belongs only on the operational marker.
+     * `initiated_at` comes from the envelope, every other timestamp from now(), so a
+     * rebuild reproduces the read row byte for byte.
      */
     private function projectFirstDelivery(PaymentInitiatedEnvelope $envelope): ProjectionOutcome
     {
@@ -250,13 +195,9 @@ final readonly class PaymentProjectionConsumer
             // Retained so a later lifecycle event can detect out-of-order delivery
             // without re-reading the outbox.
             'aggregate_version' => $envelope->aggregateVersion,
-            // FORMATTED EXPLICITLY, NEVER BOUND AS A DateTimeInterface. MEASURED:
-            // Connection::prepareBindings() converts a DateTimeInterface with
-            // $grammar->getDateFormat(), which is 'Y-m-d H:i:s' for PostgreSQL — no
-            // sub-second component at all. Binding the object silently TRUNCATED
-            // business time to whole seconds into a timestamptz(6) column, and the
-            // only symptom was a read row that looked entirely plausible. The
-            // durable format carries microseconds and the offset.
+            // Never bound as a DateTimeInterface. Measured: prepareBindings() formats
+            // it with the PostgreSQL grammar's 'Y-m-d H:i:s', silently truncating
+            // business time to whole seconds in a timestamptz(6) column.
             'initiated_at' => $envelope->occurredAt->format(PaymentInitiated::OCCURRED_AT_FORMAT),
         ]);
 
@@ -268,16 +209,12 @@ final readonly class PaymentProjectionConsumer
     /**
      * Duplicate delivery: verify, repair only a missing marker, write nothing else.
      *
-     * THE READ ROW IS VERIFIED BY source_event_id, not by payment_id. The receipt
-     * says THIS EVENT was projected, and the row it wrote is the one whose
-     * `source_event_id` is this event; a row found by payment id could have been
-     * written by a different event for the same payment, and would satisfy the check
-     * while proving nothing about this receipt.
+     * Verified by `source_event_id`, not `payment_id`: a row found by payment id could
+     * have been written by a different event for the same payment, satisfying the
+     * check while proving nothing about this receipt.
      *
-     * BUSINESS FIELDS ARE NEVER TOUCHED — there is no statement here that could,
-     * and `payment_details` deliberately carries no mutable column for one to write
-     * to. The only permitted repair is the outbox completion marker, which lives on
-     * a different table and describes delivery rather than the payment.
+     * The only permitted repair is the outbox completion marker, which describes
+     * delivery rather than the payment.
      */
     private function reconcileDuplicate(PaymentInitiatedEnvelope $envelope): ProjectionOutcome
     {
@@ -289,27 +226,18 @@ final readonly class PaymentProjectionConsumer
             throw ProjectionEnvelopeRejected::readRowMissing($envelope->eventId, $envelope->paymentId);
         }
 
-        // THE VALUE IS CHECKED, NOT MERELY PROBED FOR NULL. A read row carrying this
-        // event id but a DIFFERENT payment id is reachable by exactly the routes the
-        // missing-row case is — an external repair, a partial rebuild — and it is
-        // strictly worse: without this the delivery would report AlreadyProjected
-        // and stamp the completion marker over a row describing a different payment,
-        // permanently retiring the envelope against work that was never done.
+        // Checked, not merely probed for null. Without this, a row carrying this event
+        // id but a different payment id would be reported AlreadyProjected and stamped
+        // complete, retiring the envelope against work that was never done.
         if ($projectedPaymentId !== $envelope->paymentId) {
             throw ProjectionEnvelopeRejected::readRowMismatch($envelope->eventId, $envelope->paymentId);
         }
 
-        // THE MARKER STATEMENT DECIDES, rather than a branch on the value read
-        // earlier. It writes only where the marker is still null, so its affected-row
-        // count IS the answer to "was there a marker to repair?" — one statement
-        // instead of a read plus a conditional write, and the `is null` predicate
-        // becomes load-bearing rather than defensive.
-        //
-        // THE ONE STATE A DUPLICATE MAY REPAIR: receipt and read row committed, and
-        // the marker missing. It is not hypothetical — it is what a crash between
-        // this transaction's COMMIT and the relay's next read would leave, and
-        // without the repair the row stays eligible forever and is redelivered on
-        // every reconciliation pass.
+        // The statement decides, not a branch on an earlier read: it writes only where
+        // the marker is still null, so its affected-row count answers "was there a
+        // marker to repair?". That state is what a crash between this transaction's
+        // COMMIT and the relay's next read leaves; unrepaired, the row is redelivered
+        // on every reconciliation pass forever.
         return $this->markCompleted($envelope->eventId) === 1
             ? ProjectionOutcome::MarkerRepaired
             : ProjectionOutcome::AlreadyProjected;
@@ -318,10 +246,8 @@ final readonly class PaymentProjectionConsumer
     /**
      * The completion marker, written only while it is still missing.
      *
-     * The `is null` predicate makes the statement idempotent AT THE DATABASE, so no
-     * caller can move an existing marker forward and rewrite when the projection
-     * actually completed. It returns the affected-row count because the duplicate
-     * path reads that count as its outcome.
+     * The `is null` predicate makes the statement idempotent at the database, so no
+     * caller can move an existing marker forward.
      */
     private function markCompleted(string $eventId): int
     {
@@ -340,23 +266,12 @@ final readonly class PaymentProjectionConsumer
     /**
      * Charge this failure against the envelope's poison budget, if it may be.
      *
-     * THREE CONDITIONS, AND ALL THREE ARE REFUSALS OF THE SAME KIND: charge only
-     * what is provably attributable to this envelope.
-     *
-     * AN UNKNOWN COMMIT OUTCOME WRITES NOTHING AT ALL. The projection may already
-     * be on disk; counting it would poison a row that succeeded, and five such
-     * failures would exhaust an envelope whose work is complete. The next delivery
-     * rereads canonical receipt, read-row and marker state and decides — which it
-     * can do correctly, and this cannot.
-     *
-     * A NULL GENERATION means the lock never returned a row, so there is no
-     * envelope to charge and no generation to charge it on. In practice that is the
-     * missing-envelope case, which the classification also refuses by type; both
-     * guards exist because they are true for different reasons.
-     *
-     * A NULL CATEGORY is the classification declining, which is the ordinary
-     * non-countable path: a lock timeout, a lost connection, a serialisation
-     * failure.
+     * All three guards refuse the same thing: charge only what is provably
+     * attributable to this envelope. An unknown commit outcome writes nothing, because
+     * the projection may already be on disk and five such failures would exhaust an
+     * envelope whose work is complete. A null generation means the lock never returned
+     * a row. A null category is the classification declining - a lock timeout, a lost
+     * connection, a serialisation failure.
      */
     private function chargeIfConfirmed(
         Throwable $failure,
@@ -380,12 +295,9 @@ final readonly class PaymentProjectionConsumer
     /**
      * Whether PostgreSQL still has a transaction open on this connection.
      *
-     * Wrapped, because getPdo() is exactly the call that fails when the connection
-     * is the thing that broke — and it may also RECONNECT, which correctly reports
-     * no open transaction because the new backend has none. Either way an
-     * unanswerable question is `false`: this method is only ever used to look for
-     * PROOF that the commit did not land, and the absence of proof is what "unknown"
-     * is made of.
+     * Wrapped because getPdo() is the call that fails when the connection is what
+     * broke, and it may also reconnect. An unanswerable question is `false`: this is
+     * only ever used to look for proof that the commit did not land.
      */
     private function serverTransactionOpen(): bool
     {
@@ -399,9 +311,9 @@ final readonly class PaymentProjectionConsumer
     /**
      * The generation fence from the locked row.
      *
-     * A type conversion made honest, not validation: the column is NOT NULL with a
-     * zero default and a non-negative CHECK, so this is unreachable from a row the
-     * query above can return.
+     * A type conversion, not validation: the column is NOT NULL with a zero default
+     * and a non-negative CHECK, so the throw is unreachable from a row the query above
+     * can return.
      *
      * @param  array<string, mixed>  $row
      */
@@ -419,23 +331,13 @@ final readonly class PaymentProjectionConsumer
     /**
      * Close the transaction, if one is still open, and say what is known about it.
      *
-     * The rollback is attempted ONLY while the connection still reports an active
-     * level; calling it unconditionally would, after a successful commit, roll back
-     * whatever transaction happened to be open next. A cleanup failure never
-     * replaces the primary one.
+     * The rollback is attempted only while the connection reports an active level;
+     * unconditionally it would, after a successful commit, roll back whatever
+     * transaction happened to be open next. A cleanup failure never replaces the
+     * primary one.
      *
-     * THE CLASSIFICATION COMES FROM THE PHASES, and it is what decides whether a
-     * failure may be counted at all. Connection::commit() fires `committed` AFTER
-     * getPdo()->commit() has already succeeded, so a failure with the commit
-     * attempted and no transaction left can sit on either side of a durable write.
-     * The consumer says so instead of guessing — and an unknown COMMIT outcome must
-     * write NO failure metadata, because the projection may already be on disk and
-     * charging it would poison a row that succeeded. The next delivery rereads
-     * canonical receipt, read-row and marker state and decides.
-     *
-     * RETURNS whether the outcome is ambiguous, so the caller decides about the
-     * failure budget from the same value that was logged. Recomputing it there
-     * would be a second copy of this reasoning, free to drift from this one.
+     * Returns whether the outcome is ambiguous, so the caller decides the failure
+     * budget from the same value that was logged rather than recomputing it.
      */
     private function abort(
         Throwable $failure,
@@ -444,26 +346,17 @@ final readonly class PaymentProjectionConsumer
         string $eventId,
         ?int $failureGeneration,
     ): bool {
-        // ASKED OF THE PDO, AND ASKED BEFORE THE ROLLBACK. Both halves matter.
+        // Asked of the PDO, and before the rollback. Before, because a rollback closes
+        // the server transaction and every failure would then look like a commit that
+        // may have landed. The PDO rather than transactionLevel() because, measured
+        // against the installed framework, Connection::commit() decrements
+        // $this->transactions only after getPdo()->commit() succeeds
+        // (ManagesTransactions.php:203-219) - so a throwing COMMIT still reports level
+        // 1, and a classification built on it would count a non-countable failure and
+        // eventually exhaust a row whose projection is already on disk.
         //
-        // BEFORE, because a successful rollback closes the server transaction and
-        // every failure would then look identical to a commit that may have landed.
-        //
-        // THE PDO RATHER THAN transactionLevel(), because MEASURED against the
-        // installed framework the two disagree exactly where it counts:
-        // Connection::commit() calls getPdo()->commit() and only THEN decrements
-        // $this->transactions (ManagesTransactions.php:203-219). So when the COMMIT
-        // itself throws — a connection lost while the client was reading the
-        // response — transactionLevel() still reports 1. A classification built on
-        // it alone calls that "failed before commit", which is a COUNTABLE
-        // deterministic outcome, for the one condition the specification names as
-        // explicitly non-countable and requires to write no failure metadata at all.
-        // The recorder would then charge, and eventually exhaust, a row whose
-        // projection is already on disk.
-        //
-        // An OPEN SERVER TRANSACTION is the only thing that PROVES the commit did
-        // not land. Its absence after an attempted commit is not proof of success —
-        // it is the absence of proof either way, which is what "unknown" means.
+        // An open server transaction is the only proof the commit did not land; its
+        // absence is not proof of success.
         $serverTransactionOpen = $this->serverTransactionOpen();
 
         $stillOpen = $transactionStarted
@@ -483,27 +376,22 @@ final readonly class PaymentProjectionConsumer
 
         $ambiguous = $commitAttempted && ! $serverTransactionOpen;
 
-        // THE EXCEPTION CLASS AND ITS CATEGORY, NEVER ITS MESSAGE. A driver fills
-        // the message with arbitrary server text, which can carry a DSN, a
-        // credential or an echoed payload; the class name and the module's own fixed
-        // category are safe by construction.
+        // The class and category, never the message: a driver fills the message with
+        // server text that can carry a DSN, a credential or an echoed payload.
         $this->logger->error('Payments projection: the delivery failed and was aborted.', [
             'category' => $ambiguous ? 'projection_commit_outcome_unknown' : 'projection_failed_before_commit',
-            // BOTH typed failures, not just the countable one. The missing-envelope
-            // category was declared and never read, so its abort line logged a null
-            // where the one fact an operator needs — that PostgreSQL does not know
-            // this event id — was already in hand.
+            // Both typed failures, not just the countable one: the missing-envelope
+            // category would otherwise log a null where the fact an operator needs is
+            // already in hand.
             'failure_category' => match (true) {
                 $failure instanceof ProjectionEnvelopeRejected => $failure->category,
                 $failure instanceof ProjectionEnvelopeMissing => ProjectionEnvelopeMissing::CATEGORY,
                 default => null,
             },
             'exception_class' => $failure::class,
-            // THE SQLSTATE, read with the same classifier the write path uses. The
-            // classification rules require database failures to be told apart by
-            // SQLSTATE and owned constraint identity rather than by exception text,
-            // so an operator triaging this line must be able to distinguish 23503
-            // from 40001 from 55P03 — a class name alone cannot.
+            // The same classifier the write path uses. Database failures are told
+            // apart by SQLSTATE, never by exception text, and a class name alone
+            // cannot separate 23503 from 40001 from 55P03.
             'sql_state' => RetryingAtomicTransaction::sqlStateOf($failure),
             'event_id' => $eventId,
             'projector_name' => self::PROJECTOR_NAME,
