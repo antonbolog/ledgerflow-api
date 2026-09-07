@@ -1,16 +1,16 @@
 # Graph Report - ledgerflow-api  (2026-09-07)
 
 ## Corpus Check
-- 261 files · ~225,041 words
+- 261 files · ~226,220 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1575 nodes · 2904 edges · 138 communities (116 shown, 22 thin omitted)
+- 1576 nodes · 2907 edges · 147 communities (123 shown, 24 thin omitted)
 - Extraction: 97% EXTRACTED · 3% INFERRED · 0% AMBIGUOUS · INFERRED: 78 edges (avg confidence: 0.86)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `aaeb93a0`
+- Built from commit: `3c91e298`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -25,20 +25,19 @@
 - InvalidPaymentInitiation
 - IntegrationDatabase
 - PaymentAggregate
-- SpikeProbeLog
+- Illuminate\Support\Facades\DB
 - PDOException
 - ADR 0003 — PostgreSQL idempotency arbitration
 - projection-contract.sh
 - Payments Projection Gate
 - ADR 0004 — Lock-Through-Push Outbox Relay
 - Initial Relay Algorithm
-- PaymentsServiceProvider.php
+- Illuminate\Database\QueryException
 - Modules\Merchant\Application\Identity\MerchantContext
 - Merchant
-- ProblemDetailsMapper.php
+- Illuminate\Support\ServiceProvider
 - devDependencies
-- DatabaseProjectionVerifier.php
-- Illuminate\Support\Facades\DB
+- VerifyPaymentProjectionsCommand.php
 - Spike Database Harness
 - Payments Module Instructions
 - Docker Compose Local Stack
@@ -47,11 +46,11 @@
 - QueryPaymentTest.php
 - ModuleBoundaryTest.php
 - Throwable
-- ProjectionConfiguration
+- HorizonSupervisionTest.php
 - User
 - GET /api/payments/{paymentId} Contract
-- Illuminate\Support\Facades\Artisan
 - RelayConfiguration
+- RelayHeartbeat
 - contract.sh
 - PaymentOutboxRetryTest.php
 - DatabaseProjectionRebuild
@@ -65,7 +64,7 @@
 - Decision
 - One Job, One Transport Rule
 - RelayPaymentOutboxCommandTest.php
-- SpikePaymentInitiated
+- Spatie\EventSourcing\StoredEvents\ShouldBeStored
 - ProjectionFailureRecorderTest.php
 - Paired Scheduler+Horizon Activation
 - RuntimeException
@@ -78,7 +77,7 @@
 - Ledgerflow System Overview
 - T8 — Horizon-Supervised Projection Consumer
 - ProjectionRebuildTest.php
-- IdentityRecorder
+- InitiationCommitBoundaryTest.php
 - keywords
 - MerchantDatabaseSeeder.php
 - Atomic Idempotent Write
@@ -110,23 +109,31 @@
 - First Vertical Slice Scenario
 - Permissive robots.txt Crawl Policy
 - PaymentsSchemaTest.php
-- PaymentInitiationPersistenceTest.php
+- PaymentInitiated
 - Illuminate\Support\Str
 - PaymentProjectionVerifierTest.php
 - OutboxEnvelopeNotDerivable
-- T10 — Verification and Targeted Repair
-- RepairOutcome
+- PaymentProjectionConsumer
+- DatabaseOutboxRepair
 - ProjectionGate
-- VerifyPaymentProjectionsCommand
+- RepairOutcome
 - MerchantIdentityTest.php
 - PaymentProjectionConsumerTest.php
 - OutboxRelay
 - PaymentOutboxRetryCommand
 - SpikeDatabase.php
 - PaymentOutboxRepairTest.php
+- SpikeAdvisoryLock
+- VerificationEnvelope
 - sanctum.php
-- PaymentInitiated
-- InitiationCommitBoundaryTest.php
+- ProblemDetails
+- ProjectionConfiguration
+- AdvisoryExclusiveWaiter
+- MerchantServiceProvider
+- RepairIntent
+- .resolve
+- FailingLogger
+- ProjectionGateLocks
 
 ## God Nodes (most connected - your core abstractions)
 1. `Merchant` - 42 edges
@@ -163,23 +170,23 @@
 - **Deferred Projection Gate and Its Reciprocal Obligations** — docs_adr_0004_lock_through_push_outbox_relay_hs_1, docs_specifications_payments_verification_and_rebuild_projection_gate, docs_specifications_payments_outbox_delivery_initial_relay_algorithm, docs_specifications_payments_projection_and_query_consumer_transaction, docs_specifications_payments_projection_and_query_query_contract, docs_roadmap_t11 [EXTRACTED 1.00]
 - **Path-Scoped Agent Instruction System with CLAUDE.md Parity** — agents_repository_instructions, _github_agents_github_automation_instructions, modules_payments_agents_payments_module_instructions, docs_agents_documentation_instructions, tests_agents_test_instructions, agents_make_agent_check [EXTRACTED 1.00]
 
-## Communities (138 total, 22 thin omitted)
+## Communities (147 total, 24 thin omitted)
 
 ### Community 0 - "PaymentInitiatedEnvelope"
-Cohesion: 0.06
-Nodes (20): Carbon\CarbonImmutable, Illuminate\Contracts\Queue\ShouldQueueAfterCommit, PaymentInitiatedEnvelope, CarbonImmutable, self, PaymentProjectionConsumer, self, ProjectionEnvelopeRejected (+12 more)
+Cohesion: 0.15
+Nodes (5): PaymentInitiatedEnvelope, CarbonImmutable, self, self, ProjectionEnvelopeRejected
 
 ### Community 1 - "Illuminate\Support\Facades\Schema"
-Cohesion: 0.08
+Cohesion: 0.07
 Nodes (3): Illuminate\Database\Migrations\Migration, Illuminate\Database\Schema\Blueprint, Illuminate\Support\Facades\Schema
 
 ### Community 2 - "RecordingConnection"
-Cohesion: 0.13
+Cohesion: 0.14
 Nodes (3): LogicException, IncompleteVerificationScope, RecordingConnection
 
 ### Community 3 - "RelayTransport"
 Cohesion: 0.06
-Nodes (17): Illuminate\Cache\ArrayStore, Illuminate\Cache\RedisStore, Illuminate\Console\Scheduling\Schedule, Illuminate\Queue\Jobs\InspectedJob, Illuminate\Queue\SyncQueue, Illuminate\Support\Carbon, Illuminate\Support\Collection, Illuminate\Support\ConfigurationUrlParser (+9 more)
+Nodes (18): Illuminate\Cache\ArrayStore, Illuminate\Cache\RedisStore, Illuminate\Console\Scheduling\Schedule, Illuminate\Queue\Jobs\InspectedJob, Illuminate\Queue\RedisQueue, Illuminate\Queue\SyncQueue, Illuminate\Support\Carbon, Illuminate\Support\Collection (+10 more)
 
 ### Community 4 - "PaymentInitiationContext"
 Cohesion: 0.06
@@ -190,16 +197,20 @@ Cohesion: 0.12
 Nodes (23): APP_BIND, APP_PORT, assert_budget_untouched(), assert_converged_once(), await_backend_lock_wait(), await_projected(), body_contains(), CONTRACT_NAME (+15 more)
 
 ### Community 6 - "PaymentQueryTest.php"
-Cohesion: 0.10
-Nodes (14): Illuminate\Database\Events\TransactionBeginning, Illuminate\Database\Events\TransactionCommitted, PaymentNotFound, self, findOwned(), PendingPayment, ProjectedPayment, DatabasePaymentQuery (+6 more)
+Cohesion: 0.08
+Nodes (16): Illuminate\Database\Events\TransactionBeginning, Illuminate\Database\Events\TransactionCommitted, PaymentNotFound, self, findOwned(), PendingPayment, ProjectedPayment, self (+8 more)
+
+### Community 7 - "InvalidPaymentInitiation"
+Cohesion: 0.15
+Nodes (4): DateTimeImmutable, InvalidArgumentException, InvalidPaymentInitiation, self
 
 ### Community 9 - "PaymentAggregate"
 Cohesion: 0.21
 Nodes (7): DomainException, PaymentAlreadyInitiated, self, PaymentAggregate, static, persistOnePayment(), initiateOn()
 
-### Community 10 - "SpikeProbeLog"
+### Community 10 - "Illuminate\Support\Facades\DB"
 Cohesion: 0.11
-Nodes (10): self, SpikeCommandContext, SpikeInitiationHandler, SpikeInjectedFailure, SpikeOutboxWriter, SpikeProbeLog, SpikeStoredEvent, Spatie\EventSourcing\EventHandlers\Projectors\Projector (+2 more)
+Nodes (11): Illuminate\Support\Facades\DB, Illuminate\Support\Facades\Queue, Closure, spikeContention(), self, SpikeCommandContext, SpikeOutboxWriter, SpikeProbeLog (+3 more)
 
 ### Community 11 - "PDOException"
 Cohesion: 0.19
@@ -214,20 +225,20 @@ Cohesion: 0.33
 Nodes (4): CONTRACT_NAME, DEADLINE_CEILING, PROJECT, projection-contract.sh script
 
 ### Community 14 - "Payments Projection Gate"
-Cohesion: 0.15
-Nodes (16): Ledgerflow architecture index, Payments vertical slice, HS-1 — Deliberately Omitted Projection Gate, Lightweight ADR Format, Architecture Decision Records Index, Rebuild Path, T11 — Connection-Affine Gated Rebuild, T7 — Scheduler-Driven Outbox Relay (+8 more)
+Cohesion: 0.12
+Nodes (20): Ledgerflow architecture index, Payments vertical slice, Ambiguous Commit Outcome, HS-1 — Deliberately Omitted Projection Gate, Lightweight ADR Format, Architecture Decision Records Index, Rebuild Path, T11 — Connection-Affine Gated Rebuild (+12 more)
 
 ### Community 15 - "ADR 0004 — Lock-Through-Push Outbox Relay"
 Cohesion: 0.24
 Nodes (20): ADR 0004 — Lock-Through-Push Outbox Relay, Messaging and Queues, Payments Flow, Runtime Contract, Documentation Ownership Rules, Ledgerflow Documentation Index, Sequential Delivery Order, External Trackers (Linear and Asana) (+12 more)
 
 ### Community 16 - "Initial Relay Algorithm"
-Cohesion: 0.14
-Nodes (17): Ambiguous Commit Outcome, OutboxRelay::relayOne(), RelayPaymentOutboxCommand, SKIP LOCKED Relay Concurrency, Event and Delivery Path, Payments Minimal Data Model, T4 Blocking Compatibility Evidence (Q6–Q10), Evolution Gate — Claim/Lease Publishing (+9 more)
+Cohesion: 0.12
+Nodes (20): Lock-Through-Push Publication, OutboxRelay::relayOne(), RelayPaymentOutboxCommand, Safe Duplicate Over Lost Message, SKIP LOCKED Relay Concurrency, Event and Delivery Path, Payments Minimal Data Model, T10 — Verification and Targeted Repair (+12 more)
 
-### Community 17 - "PaymentsServiceProvider.php"
-Cohesion: 0.19
-Nodes (7): Illuminate\Database\ConnectionInterface, Illuminate\Database\QueryException, DatabaseIdempotencyReceipts, RetryingAtomicTransaction, Modules\Payments\Application\Initiation\IdempotencyReceipts, ContentionProbe, retryingAtomicTransaction()
+### Community 17 - "Illuminate\Database\QueryException"
+Cohesion: 0.29
+Nodes (3): Illuminate\Contracts\Database\LostConnectionDetector, Illuminate\Database\QueryException, ContentionProbe
 
 ### Community 18 - "Modules\Merchant\Application\Identity\MerchantContext"
 Cohesion: 0.13
@@ -237,17 +248,17 @@ Nodes (10): Illuminate\Contracts\Auth\Factory, Illuminate\Contracts\Foundation\A
 Cohesion: 0.17
 Nodes (9): Illuminate\Database\Eloquent\Factories\Factory, Illuminate\Database\Eloquent\Factories\HasFactory, Illuminate\Database\Eloquent\Model, Illuminate\Database\Eloquent\Relations\HasMany, Illuminate\Support\Facades\Hash, Merchant, MerchantFactory, static (+1 more)
 
-### Community 20 - "ProblemDetailsMapper.php"
-Cohesion: 0.08
-Nodes (16): ProblemType, ProblemDetailsMapper, AppServiceProvider, HorizonServiceProvider, Illuminate\Auth\AuthenticationException, Illuminate\Foundation\Application, Illuminate\Foundation\Configuration\Exceptions, Illuminate\Foundation\Configuration\Middleware (+8 more)
+### Community 20 - "Illuminate\Support\ServiceProvider"
+Cohesion: 0.25
+Nodes (4): AppServiceProvider, HorizonServiceProvider, Illuminate\Support\ServiceProvider, Laravel\Horizon\Horizon
 
 ### Community 21 - "devDependencies"
 Cohesion: 0.11
 Nodes (17): concurrently, laravel-vite-plugin, devDependencies, concurrently, laravel-vite-plugin, tailwindcss, @tailwindcss/vite, vite (+9 more)
 
-### Community 22 - "DatabaseProjectionVerifier.php"
-Cohesion: 0.20
-Nodes (9): RepairPaymentOutboxCommand, Modules\Payments\Application\Repair\OutboxRepair, Modules\Payments\Application\Repair\RepairMutationState, Modules\Payments\Application\Verification\ProjectionVerifier, Modules\Payments\Infrastructure\Projection\ProjectionGateState, Override, Symfony\Component\Console\Exception\ExceptionInterface, Symfony\Component\Console\Input\InputInterface (+1 more)
+### Community 22 - "VerifyPaymentProjectionsCommand.php"
+Cohesion: 0.15
+Nodes (8): VerificationFinding, VerificationExample, RepairPaymentOutboxCommand, VerifyPaymentProjectionsCommand, Modules\Payments\Application\Repair\OutboxRepair, Symfony\Component\Console\Exception\ExceptionInterface, Symfony\Component\Console\Input\InputInterface, Symfony\Component\Console\Output\OutputInterface
 
 ### Community 25 - "Payments Module Instructions"
 Cohesion: 0.12
@@ -271,15 +282,15 @@ Nodes (5): Illuminate\Contracts\Debug\ExceptionHandler, Illuminate\Support\Facad
 
 ### Community 30 - "ModuleBoundaryTest.php"
 Cohesion: 0.24
-Nodes (9): Illuminate\Database\ConcurrencyErrorDetector, Illuminate\Database\DetectsConcurrencyErrors, Spatie\EventSourcing\Attributes\EventVersion, ledgerflowAfterCommitOptIns(), ledgerflowHelperCalls(), ledgerflowNextSymbol(), ledgerflowPreviousToken(), ledgerflowReferences() (+1 more)
+Nodes (10): Illuminate\Database\ConcurrencyErrorDetector, Illuminate\Database\DetectsConcurrencyErrors, Spatie\EventSourcing\Attributes\EventVersion, ledgerflowAfterCommitOptIns(), ledgerflowEnvironmentBranches(), ledgerflowHelperCalls(), ledgerflowNextSymbol(), ledgerflowPreviousToken() (+2 more)
 
 ### Community 31 - "Throwable"
 Cohesion: 0.17
-Nodes (6): Illuminate\Contracts\Queue\Factory, ProjectionFailureClassification, relayWithRejectingTransport(), self, RejectingQueue, Throwable
+Nodes (5): ProjectionFailureClassification, relayWithRejectingTransport(), self, RejectingQueue, Throwable
 
-### Community 32 - "ProjectionConfiguration"
-Cohesion: 0.05
-Nodes (12): ProblemType, ProblemDetails, Illuminate\Http\JsonResponse, Illuminate\Support\Facades\Route, InvalidArgumentException, Laravel\Horizon\ProvisioningPlan, Laravel\Horizon\SupervisorOptions, QueryPaymentController (+4 more)
+### Community 32 - "HorizonSupervisionTest.php"
+Cohesion: 0.18
+Nodes (4): Illuminate\Support\Facades\Route, Laravel\Horizon\ProvisioningPlan, Laravel\Horizon\SupervisorOptions, Symfony\Component\HttpKernel\Exception\HttpException
 
 ### Community 33 - "User"
 Cohesion: 0.21
@@ -289,21 +300,21 @@ Nodes (7): Illuminate\Database\Eloquent\Attributes\Fillable, Illuminate\Database
 Cohesion: 0.18
 Nodes (12): Eight Production Types Budget, Query a Payment Endpoint, Delivery Status Summary, M4 — Relay, Projection, and Query, T9 — Merchant-Scoped Payment Query, No Dependency Without a Consumer, Merchant-Scoped Idempotency Receipt, POST /api/payments Contract (+4 more)
 
-### Community 35 - "Illuminate\Support\Facades\Artisan"
-Cohesion: 0.40
-Nodes (3): Illuminate\Foundation\Inspiring, Illuminate\Support\Facades\Artisan, Illuminate\Support\Facades\Schedule
+### Community 35 - "RelayConfiguration"
+Cohesion: 0.15
+Nodes (3): self, RelayConfiguration, TransportBackoff
 
-### Community 36 - "RelayConfiguration"
-Cohesion: 0.13
-Nodes (9): Illuminate\Console\Command, Illuminate\Contracts\Cache\Factory, PaymentOutboxStatusCommand, RelayPaymentOutboxCommand, self, RelayConfiguration, RelayHeartbeat, Modules\Payments\Infrastructure\Relay\RelayOutcome (+1 more)
+### Community 36 - "RelayHeartbeat"
+Cohesion: 0.16
+Nodes (7): Illuminate\Console\Command, Illuminate\Contracts\Cache\Factory, PaymentOutboxStatusCommand, RelayPaymentOutboxCommand, RelayHeartbeat, Modules\Payments\Infrastructure\Relay\RelayOutcome, stdClass
 
 ### Community 37 - "contract.sh"
 Cohesion: 0.18
 Nodes (18): artisan_disposable(), assert_query(), await(), await_query(), check_deadline(), cleanup(), CLEANUP_BUDGET_SECONDS, COMPOSE_PROJECT_NAME (+10 more)
 
 ### Community 38 - "PaymentOutboxRetryTest.php"
-Cohesion: 0.29
-Nodes (4): operatorCapturedLogs(), operatorEnvelope(), operatorLogsOfCategory(), ArrayObject
+Cohesion: 0.17
+Nodes (7): Illuminate\Foundation\Inspiring, Illuminate\Support\Facades\Artisan, Illuminate\Support\Facades\Schedule, operatorCapturedLogs(), operatorEnvelope(), operatorLogsOfCategory(), ArrayObject
 
 ### Community 39 - "DatabaseProjectionRebuild"
 Cohesion: 0.13
@@ -326,8 +337,8 @@ Cohesion: 0.18
 Nodes (10): autoload, autoload-dev, psr-4, psr-4, description, name, Modules\\Merchant\\, Modules\\Merchant\\Database\\Factories\\ (+2 more)
 
 ### Community 44 - "SpikeFailureSwitch"
-Cohesion: 0.13
-Nodes (6): Illuminate\Queue\Events\JobQueued, Illuminate\Queue\RedisQueue, Illuminate\Support\Facades\Queue, SpikeFailureSwitch, SpikeRelayAttempt, SpikeRelayJob
+Cohesion: 0.14
+Nodes (5): Illuminate\Queue\Events\JobQueued, Illuminate\Support\Facades\Event, SpikeFailureSwitch, SpikeRelayAttempt, SpikeRelayJob
 
 ### Community 45 - "Canonical Repository Instructions (root AGENTS.md)"
 Cohesion: 0.25
@@ -346,12 +357,12 @@ Cohesion: 0.22
 Nodes (10): ADR Candidate Backlog, OpenSearch Adoption Gate, Planned AWS Topology, One Image, Independently Supervised Processes, Redis/SQS Capability Map, SQS Adoption Boundary, One Job, One Transport Rule, Source-of-Truth Hierarchy (+2 more)
 
 ### Community 49 - "RelayPaymentOutboxCommandTest.php"
-Cohesion: 0.20
-Nodes (7): Factory, bindRelayCommand(), passContexts(), passLogs(), ArrayObject, Closure, steppingClock()
+Cohesion: 0.24
+Nodes (6): bindRelayCommand(), passContexts(), passLogs(), ArrayObject, Closure, steppingClock()
 
-### Community 50 - "SpikePaymentInitiated"
-Cohesion: 0.25
-Nodes (3): SpikePaymentAggregate, SpikePaymentInitiated, Spatie\EventSourcing\AggregateRoots\AggregateRoot
+### Community 50 - "Spatie\EventSourcing\StoredEvents\ShouldBeStored"
+Cohesion: 0.24
+Nodes (4): SpikePaymentAggregate, SpikePaymentInitiated, Spatie\EventSourcing\AggregateRoots\AggregateRoot, Spatie\EventSourcing\StoredEvents\ShouldBeStored
 
 ### Community 51 - "ProjectionFailureRecorderTest.php"
 Cohesion: 0.31
@@ -363,11 +374,11 @@ Nodes (9): payments-projection Logical Queue, Application Process Topology, Repo
 
 ### Community 53 - "RuntimeException"
 Cohesion: 0.06
-Nodes (14): IdempotencyPayloadMismatch, self, self, ProjectionRebuilding, self, ProjectionRebuilding, ProjectionEnvelopeMissing, RebuildFenceFailed (+6 more)
+Nodes (25): ProblemType, ProblemDetailsMapper, Illuminate\Auth\AuthenticationException, Illuminate\Foundation\Application, Illuminate\Foundation\Configuration\Exceptions, Illuminate\Foundation\Configuration\Middleware, Illuminate\Http\Request, Illuminate\Validation\ValidationException (+17 more)
 
 ### Community 54 - "Psr\Log\LoggerInterface"
-Cohesion: 0.24
-Nodes (3): Illuminate\Database\Connection, ProjectionFailureRecorder, Psr\Log\LoggerInterface
+Cohesion: 0.21
+Nodes (4): Factory, Illuminate\Database\Connection, ProjectionFailureRecorder, Psr\Log\LoggerInterface
 
 ### Community 55 - "OutboxRelayTest.php"
 Cohesion: 0.20
@@ -398,8 +409,12 @@ Cohesion: 0.32
 Nodes (8): Queue Failure Ownership, Required Operational Evidence, T8 — Horizon-Supervised Projection Consumer, Outbox State Transitions, Outbox Writer Ownership Split, Projection Failure Classification, payments:outbox:retry, projection_failure_generation Fence
 
 ### Community 62 - "ProjectionRebuildTest.php"
-Cohesion: 0.07
-Nodes (13): Illuminate\Support\Sleep, self, RebuildConfiguration, AdvisoryExclusiveWaiter, ProjectionGateLocks, expectAbandonedRebuildGateClosed(), rebuildLockHeld(), rebuildSeed() (+5 more)
+Cohesion: 0.12
+Nodes (7): self, RebuildConfiguration, expectAbandonedRebuildGateClosed(), rebuildLockHeld(), rebuildSeed(), rebuildWithConfig(), rebuildWithFailingLogger()
+
+### Community 63 - "InitiationCommitBoundaryTest.php"
+Cohesion: 0.18
+Nodes (5): Illuminate\Database\Events\TransactionCommitting, IdentityRecorder, ThrowingProjector, Spatie\EventSourcing\EventHandlers\Projectors\Projector, SplObjectStorage
 
 ### Community 64 - "keywords"
 Cohesion: 0.29
@@ -410,8 +425,8 @@ Cohesion: 0.39
 Nodes (4): DatabaseSeeder, Illuminate\Database\Console\Seeds\WithoutModelEvents, Illuminate\Database\Seeder, MerchantDatabaseSeeder
 
 ### Community 66 - "Atomic Idempotent Write"
-Cohesion: 0.20
-Nodes (10): Lock-Through-Push Publication, Safe Duplicate Over Lost Message, Payments Write Path, Payments Tracer Bullet, T6 — Atomic Idempotent Payment Initiation, Atomic Idempotent Write, T3 Blocking Compatibility Evidence (Q1–Q5), SQLSTATE Retry Allowlist (+2 more)
+Cohesion: 0.29
+Nodes (7): Payments Write Path, Payments Tracer Bullet, T6 — Atomic Idempotent Payment Initiation, Atomic Idempotent Write, T3 Blocking Compatibility Evidence (Q1–Q5), SQLSTATE Retry Allowlist, Transport Exception Classification
 
 ### Community 67 - "extra"
 Cohesion: 0.33
@@ -462,36 +477,36 @@ Cohesion: 0.67
 Nodes (3): Public Makefile Interface, PHPStan Level 10 Without Baseline, Resilience Test Environment Rules
 
 ### Community 90 - "Closure"
-Cohesion: 0.15
-Nodes (7): Closure, Illuminate\Database\DeadlockException, run(), Modules\Payments\Application\Initiation\AtomicTransaction, Closure, spikeContention(), SpikeTransactionRetry
+Cohesion: 0.14
+Nodes (8): Closure, Command, Illuminate\Database\DeadlockException, run(), RebuildPaymentProjectionsCommand, Modules\Payments\Application\Rebuild\ProjectionRebuild, SpikeInitiationHandler, SpikeTransactionRetry
 
-### Community 115 - "PaymentInitiationPersistenceTest.php"
-Cohesion: 0.36
-Nodes (5): PaymentOutboxWriter, t5StoredEvent(), Spatie\EventSourcing\Projectionist, Spatie\EventSourcing\StoredEvents\StoredEvent, Symfony\Component\Finder\Finder
+### Community 115 - "PaymentInitiated"
+Cohesion: 0.23
+Nodes (9): Illuminate\Database\Events\QueryExecuted, PaymentInitiated, PaymentOutboxWriter, t5StoredEvent(), handWrittenPaymentInitiated(), runOutboxWriter(), Spatie\EventSourcing\Projectionist, Spatie\EventSourcing\StoredEvents\StoredEvent (+1 more)
 
 ### Community 116 - "Illuminate\Support\Str"
-Cohesion: 0.16
-Nodes (7): Command, Illuminate\Contracts\Database\LostConnectionDetector, Illuminate\Support\Str, RebuildPaymentProjectionsCommand, Modules\Payments\Application\Rebuild\ProjectionRebuild, Pdo\Mysql, ReflectionProperty
+Cohesion: 0.19
+Nodes (6): Carbon\CarbonImmutable, Illuminate\Support\Str, Modules\Payments\Application\Repair\RepairMutationState, Modules\Payments\Application\Verification\ProjectionVerifier, Modules\Payments\Infrastructure\Projection\ProjectionGateState, Pdo\Mysql
 
 ### Community 117 - "PaymentProjectionVerifierTest.php"
 Cohesion: 0.20
 Nodes (5): verifierBulkSeed(), verifierCounts(), verifierPlans(), verifierRun(), verifierSeed()
 
-### Community 119 - "T10 — Verification and Targeted Repair"
-Cohesion: 0.50
-Nodes (4): T10 — Verification and Targeted Repair, payments:projections:verify, payments:projections:verify command, Scheduled projection verification and corruption alerting
+### Community 119 - "PaymentProjectionConsumer"
+Cohesion: 0.23
+Nodes (4): Illuminate\Contracts\Queue\ShouldQueueAfterCommit, PaymentProjectionConsumer, ProjectPaymentEvent, ProjectionOutcome
 
-### Community 124 - "RepairOutcome"
-Cohesion: 0.11
-Nodes (11): repair(), RepairMutationState, RepairReason, self, RepairOutcome, DatabaseOutboxRepair, RepairMutationState, RepairReason (+3 more)
+### Community 124 - "DatabaseOutboxRepair"
+Cohesion: 0.24
+Nodes (4): DatabaseOutboxRepair, RepairMutationState, RepairReason, Modules\Payments\Application\Repair\RepairReason
 
 ### Community 125 - "ProjectionGate"
-Cohesion: 0.24
-Nodes (6): ProjectionGate, controlRowViolation(), gate(), markRebuilding(), resetProjectionControls(), ProjectionGateState
+Cohesion: 0.15
+Nodes (14): Illuminate\Database\ConnectionInterface, DatabaseIdempotencyReceipts, RetryingAtomicTransaction, ProjectionGate, Modules\Payments\Application\Initiation\AtomicTransaction, Modules\Payments\Application\Initiation\IdempotencyReceipts, controlRowViolation(), gate() (+6 more)
 
-### Community 126 - "VerifyPaymentProjectionsCommand"
-Cohesion: 0.24
-Nodes (3): VerificationFinding, VerificationExample, VerifyPaymentProjectionsCommand
+### Community 126 - "RepairOutcome"
+Cohesion: 0.29
+Nodes (5): repair(), RepairMutationState, RepairReason, self, RepairOutcome
 
 ### Community 127 - "MerchantIdentityTest.php"
 Cohesion: 0.28
@@ -502,48 +517,60 @@ Cohesion: 0.17
 Nodes (5): Modules\Payments\Infrastructure\Projection\ProjectionOutcome, ArrayObject, projectionCapturedLogs(), projectionEnvelope(), projectionLogContexts()
 
 ### Community 129 - "OutboxRelay"
-Cohesion: 0.33
-Nodes (3): OutboxRelay, RedisException, RelayOutcome
+Cohesion: 0.27
+Nodes (4): Illuminate\Contracts\Queue\Factory, OutboxRelay, RedisException, RelayOutcome
 
 ### Community 131 - "SpikeDatabase.php"
 Cohesion: 0.50
 Nodes (3): SpikeSnapshot, Spatie\EventSourcing\Snapshots\EloquentSnapshot, Spatie\EventSourcing\StoredEvents\Repositories\StoredEventRepository
 
 ### Community 132 - "PaymentOutboxRepairTest.php"
-Cohesion: 0.25
-Nodes (5): Illuminate\Database\DatabaseManager, Illuminate\Database\Events\QueryExecuted, repairCanonicalLookupPlan(), repairRun(), repairSeed()
+Cohesion: 0.29
+Nodes (4): Illuminate\Database\DatabaseManager, repairCanonicalLookupPlan(), repairRun(), repairSeed()
+
+### Community 134 - "VerificationEnvelope"
+Cohesion: 0.27
+Nodes (5): self, VerificationEnvelope, verificationCanonicalEvent(), verificationCanonicalPayload(), verificationEnvelope()
 
 ### Community 135 - "sanctum.php"
 Cohesion: 0.40
 Nodes (4): Illuminate\Cookie\Middleware\EncryptCookies, Illuminate\Foundation\Http\Middleware\ValidateCsrfToken, Laravel\Sanctum\Http\Middleware\AuthenticateSession, Laravel\Sanctum\Sanctum
 
-### Community 136 - "PaymentInitiated"
-Cohesion: 0.20
-Nodes (6): DateTimeImmutable, PaymentInitiated, handWrittenPaymentInitiated(), runOutboxWriter(), ThrowingProjector, Spatie\EventSourcing\StoredEvents\ShouldBeStored
+### Community 136 - "ProblemDetails"
+Cohesion: 0.29
+Nodes (4): ProblemType, ProblemDetails, Illuminate\Http\JsonResponse, QueryPaymentController
 
-### Community 137 - "InitiationCommitBoundaryTest.php"
-Cohesion: 0.19
-Nodes (6): Illuminate\Database\Events\TransactionCommitting, Illuminate\Support\Facades\Event, IdempotencyContention, self, Closure, run()
+### Community 139 - "MerchantServiceProvider"
+Cohesion: 0.25
+Nodes (3): MerchantServiceProvider, PaymentsServiceProvider, Nwidart\Modules\Facades\Module
+
+### Community 143 - ".resolve"
+Cohesion: 0.33
+Nodes (5): self, installContentionRig(), relay(), projectionConsumer(), recorder()
+
+### Community 144 - "FailingLogger"
+Cohesion: 0.47
+Nodes (3): FailingLogger, Psr\Log\AbstractLogger, Stringable
 
 ## Knowledge Gaps
 - **155 isolated node(s):** `name`, `description`, `Modules\\Merchant\\`, `Modules\\Merchant\\Database\\Factories\\`, `Modules\\Merchant\\Database\\Seeders\\` (+150 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **22 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **24 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `Merchant` connect `Merchant` to `PaymentInitiatedEnvelope`, `MerchantDatabaseSeeder.php`, `PaymentProjectionConsumerTest.php`, `User`, `PaymentOutboxRepairTest.php`, `PaymentOutboxRetryTest.php`, `PaymentQueryTest.php`, `InitiationCommitBoundaryTest.php`, `PaymentAggregate`, `Modules\Merchant\Application\Identity\MerchantContext`, `PaymentInitiationPersistenceTest.php`, `PaymentsSchemaTest.php`, `PaymentProjectionVerifierTest.php`, `ProjectionFailureRecorderTest.php`, `QueryPaymentTest.php`, `ProjectionRebuildTest.php`, `MerchantIdentityTest.php`?**
-  _High betweenness centrality (0.046) - this node is a cross-community bridge._
-- **Why does `PaymentInitiated` connect `PaymentInitiated` to `PaymentInitiatedEnvelope`, `PaymentInitiationContext`, `PaymentOutboxRepairTest.php`, `InvalidPaymentInitiation`, `PaymentAggregate`, `InitiationCommitBoundaryTest.php`, `PaymentsServiceProvider.php`, `PaymentInitiationPersistenceTest.php`, `Illuminate\Support\Str`, `PaymentProjectionVerifierTest.php`, `Psr\Log\LoggerInterface`, `OutboxEnvelopeNotDerivable`, `DatabaseProjectionVerifier.php`, `ModuleBoundaryTest.php`, `ProjectionRebuildTest.php`, `IdentityRecorder`?**
-  _High betweenness centrality (0.045) - this node is a cross-community bridge._
-- **Why does `DatabaseProjectionVerifier` connect `DatabaseProjectionVerifier` to `PaymentInitiatedEnvelope`, `PaymentsServiceProvider.php`, `PaymentProjectionVerifierTest.php`, `Psr\Log\LoggerInterface`, `DatabaseProjectionVerifier.php`, `Closure`, `ProjectionRebuildTest.php`?**
-  _High betweenness centrality (0.031) - this node is a cross-community bridge._
+- **Why does `Merchant` connect `Merchant` to `PaymentProjectionConsumerTest.php`, `MerchantDatabaseSeeder.php`, `User`, `PaymentOutboxRepairTest.php`, `PaymentOutboxRetryTest.php`, `PaymentQueryTest.php`, `PaymentAggregate`, `.resolve`, `Modules\Merchant\Application\Identity\MerchantContext`, `PaymentInitiated`, `Illuminate\Support\Str`, `PaymentsSchemaTest.php`, `InitiationCommitBoundaryTest.php`, `PaymentProjectionVerifierTest.php`, `ProjectionFailureRecorderTest.php`, `QueryPaymentTest.php`, `ProjectionRebuildTest.php`, `MerchantIdentityTest.php`?**
+  _High betweenness centrality (0.044) - this node is a cross-community bridge._
+- **Why does `PaymentInitiated` connect `PaymentInitiated` to `PaymentInitiatedEnvelope`, `PaymentInitiationContext`, `PaymentOutboxRepairTest.php`, `VerificationEnvelope`, `InvalidPaymentInitiation`, `PaymentAggregate`, `Illuminate\Database\QueryException`, `Spatie\EventSourcing\StoredEvents\ShouldBeStored`, `InitiationCommitBoundaryTest.php`, `Illuminate\Support\Str`, `PaymentProjectionVerifierTest.php`, `Psr\Log\LoggerInterface`, `OutboxEnvelopeNotDerivable`, `ModuleBoundaryTest.php`, `ProjectionGate`, `ProjectionRebuildTest.php`, `Throwable`?**
+  _High betweenness centrality (0.039) - this node is a cross-community bridge._
+- **Why does `DatabaseProjectionVerifier` connect `DatabaseProjectionVerifier` to `Illuminate\Support\Str`, `PaymentProjectionVerifierTest.php`, `Psr\Log\LoggerInterface`, `Closure`, `ProjectionGate`, `ProjectionRebuildTest.php`?**
+  _High betweenness centrality (0.032) - this node is a cross-community bridge._
 - **What connects `name`, `description`, `Modules\\Merchant\\` to the rest of the system?**
   _155 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `PaymentInitiatedEnvelope` be split into smaller, more focused modules?**
-  _Cohesion score 0.06312098188194039 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.14624505928853754 - nodes in this community are weakly interconnected._
 - **Should `Illuminate\Support\Facades\Schema` be split into smaller, more focused modules?**
-  _Cohesion score 0.08392603129445235 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.07293868921775898 - nodes in this community are weakly interconnected._
 - **Should `RecordingConnection` be split into smaller, more focused modules?**
-  _Cohesion score 0.13230769230769232 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.13538461538461538 - nodes in this community are weakly interconnected._
