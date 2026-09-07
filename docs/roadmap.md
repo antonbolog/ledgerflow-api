@@ -203,7 +203,7 @@ Detect and repair derived-state corruption while keeping partial rebuilds invisi
   Four read-only snapshot passes plus duplicate detection, and quiesced single-envelope repair preserving existing exhaustion and failure history.
   Contracts and measured limits live in [verification and rebuild](specifications/payments/verification-and-rebuild.md#t10-implementation-evidence); the [runtime contract](operations/runtime-contract.md#manual-verification-and-targeted-repair) owns the operator procedure.
   No new migration, index, dependency, recurring schedule, worker, projection gate, or read-model rebuild.
-- T11 - Implement connection-affine gated batch rebuild and recovery. **Complete locally; shipping pending.**
+- T11 - Implement connection-affine gated batch rebuild and recovery. **Complete**, shipped in pull request #12.
   All five slices are implemented: the control-row migration, gate primitive, traffic acquisition
   on all four paths, bounded batch rebuild, ownership fence, guarded recovery, takeover, T10 command
   participation, and operator handoff.
@@ -220,6 +220,8 @@ Detect and repair derived-state corruption while keeping partial rebuilds invisi
   The process half is `make resilience-contract` - a disposable isolated Compose project that drives
   the critical HTTP path, a real Redis outage, a concurrent identical `POST`, and `SIGKILL` of the
   real relay, consumer and rebuild processes under synchronization barriers, wired into `make ci`.
+  Both disposable-project contracts share one bounded-deadline, scoped-teardown harness,
+  `scripts/ci/lib/contract.sh`; `projection-contract` moved onto it in the same change.
   Evidence and claim boundaries in the
   [resilience test plan](testing/payments-resilience.md#process-level-resilience).
   No production-code change; no new dependency, migration, or process.
