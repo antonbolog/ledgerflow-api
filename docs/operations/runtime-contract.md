@@ -62,6 +62,12 @@ once the work stops the obligatory teardown adds a **separately bounded tail**: 
 10-second diagnostics plus one 60-second `down --volumes`. Total wall clock on a terminated run is
 therefore the work deadline plus that bounded tail, never unbounded.
 
+**Teardown is mandatory, so a teardown failure is a contract failure.** Every stage is attempted even
+after an earlier one fails and each stays bounded; a run whose work passed but whose teardown left a
+crash container, a Compose service, a volume or its fixture directory behind exits non-zero, while a
+run that already failed keeps its first cause. Diagnostics are best-effort and never skip the
+teardown they precede.
+
 `PROJECTION_CONTRACT_DEADLINE_SECONDS` may shorten the work deadline but never lengthen it past 180;
 a non-numeric or out-of-range value falls back to 180. `PROJECTION_CONTRACT_SELF_TEST=1` runs one
 deliberate hang before anything is created, which is how the enforcement itself is evidenced without
@@ -76,11 +82,12 @@ the paired stop reaches both processes.
 disposable Compose project built on the shared `scripts/ci/lib/contract.sh` harness - bounded work
 deadline, scoped teardown, failure-only diagnostics, `RESILIENCE_CONTRACT_SELF_TEST=1` hang - and
 also runs as part of `make ci`.
-It drives the critical `POST -> GET` HTTP path, a real Redis-daemon outage and recovery, a concurrent
-identical `POST`, barrier-coordinated `SIGKILL` of the real relay, consumer and rebuild processes,
-and a `SIGTERM` of a real worker from the same barrier position that must commit its projection and
-exit by itself. Each signal is gated on an observed PostgreSQL lock wait or control-row state rather
-than a timer. Its claim boundaries against the integration evidence live in the
+It drives the critical `POST -> GET` HTTP path, a real Redis-daemon outage and recovery, two identical
+`POST`s held in overlapping write transactions, barrier-coordinated `SIGKILL` of the real relay,
+consumer and rebuild processes, and a `SIGTERM` of a real worker from the same barrier position that
+must commit its projection and exit by itself. Each signal is gated on an observed PostgreSQL lock
+wait or control-row state rather than a timer, and the concurrent `POST` is released only after
+`pg_blocking_pids()` names the first request's backend as the second's blocker. Its claim boundaries against the integration evidence live in the
 [resilience test plan](../testing/payments-resilience.md#process-level-resilience).
 
 That consumer gets **one Horizon execution per published job**; outbox reconciliation, not Horizon,

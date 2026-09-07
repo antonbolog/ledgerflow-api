@@ -204,26 +204,50 @@ assert_query() {
 # Always, including a failed step, an interrupt and the deadline: a disposable
 # project that survived would hold its containers and volumes until someone
 # noticed, and the next run would start against state it did not create.
+#
+# Every stage is attempted even after an earlier one fails, and a teardown that
+# did not complete fails a passing suite while leaving a failing one its cause.
 cleanup() {
     local status=$?
+    local teardown=0
 
     trap - EXIT
 
     if [ "$status" -ne 0 ] && declare -F diagnose >/dev/null; then
-        diagnose
+        # A failing diagnostic must not skip the teardown it precedes.
+        diagnose || true
     fi
 
     # `compose down` does not know about `run` containers, and a leaked one holds
-    # the name the next run needs.
+    # the name the next run needs; only one that still exists is owed a removal.
     for name in ${CRASH_CONTAINERS[@]+"${CRASH_CONTAINERS[@]}"}; do
-        run_bounded "$DIAGNOSTIC_BUDGET_SECONDS" docker rm -f "$name" >/dev/null 2>&1 || true
+        if ! run_bounded "$DIAGNOSTIC_BUDGET_SECONDS" \
+            docker inspect --type container "$name" >/dev/null 2>&1; then
+            continue
+        fi
+
+        if ! run_bounded "$DIAGNOSTIC_BUDGET_SECONDS" docker rm -f "$name" >/dev/null 2>&1; then
+            printf 'ERROR: teardown failed to remove crash container %s\n' "$name" >&2
+            teardown=1
+        fi
     done
 
     printf '==> removing the disposable project\n'
-    run_bounded "$CLEANUP_BUDGET_SECONDS" \
-        "${DC[@]}" down --volumes --remove-orphans --timeout 20 >/dev/null 2>&1 || true
+    if ! run_bounded "$CLEANUP_BUDGET_SECONDS" \
+        "${DC[@]}" down --volumes --remove-orphans --timeout 20 >/dev/null 2>&1; then
+        printf 'ERROR: teardown failed to remove the disposable project %s\n' "$PROJECT" >&2
+        teardown=1
+    fi
 
-    rm -rf "$workdir" 2>/dev/null || true
+    if ! rm -rf "$workdir" 2>/dev/null; then
+        printf 'ERROR: teardown failed to remove the fixture directory %s\n' "$workdir" >&2
+        teardown=1
+    fi
+
+    if [ "$status" -eq 0 ] && [ "$teardown" -ne 0 ]; then
+        printf 'ERROR: %s passed but its mandatory teardown did not complete\n' "$CONTRACT_NAME" >&2
+        status=1
+    fi
 
     exit "$status"
 }
