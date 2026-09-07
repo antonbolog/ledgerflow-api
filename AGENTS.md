@@ -57,9 +57,10 @@ compatibility evidence live in
   [ADR 0005](docs/adr/0005-payments-projection-gate-and-rebuild-ownership.md).
 - Resilience is proved end to end. The integration suites inject every persistence and delivery
   failpoint in process; `make resilience-contract` drives the critical HTTP path, a real Redis
-  outage, a concurrent identical POST, SIGKILL of the real relay, consumer and rebuild processes,
-  and SIGTERM of a real worker that must commit its projection and exit by itself - all
-  barrier-coordinated in a disposable Compose project, inside `make ci`. See the
+  outage, two identical POSTs held in overlapping write transactions, SIGKILL of the real relay,
+  consumer and rebuild processes, and SIGTERM of a real worker that must commit its projection and
+  exit by itself - all barrier-coordinated in a disposable Compose project whose mandatory teardown
+  fails the contract when it does not complete, inside `make ci`. See the
   [resilience test plan](docs/testing/payments-resilience.md#process-level-resilience).
 
 ## Architecture and boundaries

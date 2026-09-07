@@ -231,6 +231,91 @@ function ledgerflowPreviousToken(array $tokens, int $index): int|string|null
     return null;
 }
 
+/**
+ * First argument of the call opening at $index, when it is a string literal.
+ *
+ * @param  list<array{0: int, 1: string, 2: int}|string>  $tokens
+ */
+function ledgerflowFirstStringArgument(array $tokens, int $index): ?string
+{
+    $opened = false;
+
+    for ($i = $index + 1, $count = count($tokens); $i < $count; $i++) {
+        $token = $tokens[$i];
+
+        if (is_array($token) && in_array($token[0], [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)) {
+            continue;
+        }
+
+        if (! $opened) {
+            if ($token !== '(') {
+                return null;
+            }
+
+            $opened = true;
+
+            continue;
+        }
+
+        return is_array($token) && $token[0] === T_CONSTANT_ENCAPSED_STRING
+            ? trim($token[1], '\'"')
+            : null;
+    }
+
+    return null;
+}
+
+/** @param list<array{0: int, 1: string, 2: int}|string> $tokens */
+function ledgerflowCallReceiver(array $tokens, int $index): ?string
+{
+    $afterOperator = false;
+    $depth = 0;
+
+    for ($i = $index - 1; $i >= 0; $i--) {
+        $token = $tokens[$i];
+
+        if (is_array($token) && in_array($token[0], [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)) {
+            continue;
+        }
+
+        if ($depth > 0) {
+            $depth += $token === ')' ? 1 : ($token === '(' ? -1 : 0);
+
+            continue;
+        }
+
+        if (! $afterOperator) {
+            if (! is_array($token)
+                || ! in_array($token[0], [T_OBJECT_OPERATOR, T_NULLSAFE_OBJECT_OPERATOR, T_DOUBLE_COLON], true)
+            ) {
+                return '';
+            }
+
+            $afterOperator = true;
+
+            continue;
+        }
+
+        // `app()->environment()`: step back over the argument list to the callee.
+        if ($token === ')') {
+            $depth = 1;
+
+            continue;
+        }
+
+        if (! is_array($token)) {
+            return null;
+        }
+
+        $name = ltrim($token[1], '$');
+        $separator = strrpos($name, '\\');
+
+        return strtolower($separator === false ? $name : substr($name, $separator + 1));
+    }
+
+    return null;
+}
+
 /** @param list<array{0: int, 1: string, 2: int}|string> $tokens */
 function ledgerflowNextSymbol(array $tokens, int $index): ?string
 {
@@ -694,8 +779,17 @@ it('does not mistake a comment or an unrelated name for an opt-in', function ():
  */
 function ledgerflowEnvironmentBranches(array $tokens): array
 {
-    $methods = ['environment', 'runningunittests'];
+    $methods = ['environment', 'runningunittests', 'isproduction', 'islocal'];
     $functions = ['env', 'getenv'];
+
+    // Receiver => call => the argument that makes it an environment read. Both
+    // halves are required: `$collection->get('app.env')` is not a config read.
+    $keyed = [
+        '' => ['config' => 'app.env', 'app' => 'env', 'resolve' => 'env'],
+        'app' => ['make' => 'env', 'get' => 'env'],
+        'config' => ['get' => 'app.env'],
+    ];
+
     $found = [];
 
     foreach ($tokens as $index => $token) {
@@ -725,9 +819,21 @@ function ledgerflowEnvironmentBranches(array $tokens): array
 
         $previous = ledgerflowPreviousToken($tokens, $index);
         $lowered = strtolower($text);
-        $isMethod = in_array($previous, [T_OBJECT_OPERATOR, T_NULLSAFE_OBJECT_OPERATOR, T_DOUBLE_COLON], true);
 
-        if ($isMethod ? in_array($lowered, $methods, true) : in_array($lowered, $functions, true) && $previous !== T_FUNCTION) {
+        // '' is a plain function call, null an unattributable or declared name.
+        $receiver = $previous === T_FUNCTION ? null : ledgerflowCallReceiver($tokens, $index);
+        $key = $keyed[$receiver ?? '#'][$lowered] ?? null;
+
+        if ($key !== null && ledgerflowFirstStringArgument($tokens, $index) === $key) {
+            $found[] = sprintf("%s('%s') call", $text, $key);
+
+            continue;
+        }
+
+        if ($receiver === 'app'
+            ? in_array($lowered, $methods, true)
+            : $receiver === '' && in_array($lowered, $functions, true)
+        ) {
             $found[] = $text.'() call';
         }
     }
@@ -761,6 +867,18 @@ it('detects each environment-conditioned spelling in fabricated source', functio
     ['<?php if (app()->environment("testing")) { throw new RuntimeException("boom"); }', 'environment() call'],
     ['<?php if (App::environment("local")) {}', 'environment() call'],
     ['<?php if ($this->app->runningUnitTests()) {}', 'runningUnitTests() call'],
+    ['<?php if ($app->environment("testing")) {}', 'environment() call'],
+    ['<?php if (app()->isProduction()) {}', 'isProduction() call'],
+    ['<?php if ($this->app->isLocal()) {}', 'isLocal() call'],
+    ['<?php if (App::runningUnitTests()) {}', 'runningUnitTests() call'],
+    ['<?php if (config("app.env") === "testing") {}', "config('app.env') call"],
+    ['<?php if (\Illuminate\Support\Facades\Config::get("app.env") === "testing") {}', "get('app.env') call"],
+    ['<?php if ($this->config->get("app.env") === "testing") {}', "get('app.env') call"],
+    ['<?php if (app("env") === "testing") {}', "app('env') call"],
+    ['<?php if (resolve("env") === "testing") {}', "resolve('env') call"],
+    ['<?php if ($this->app->make("env") === "testing") {}', "make('env') call"],
+    ['<?php if ($app->get("env") === "testing") {}', "get('env') call"],
+    ['<?php if (App::make("env") === "testing") {}', "make('env') call"],
     ['<?php if (env("PAYMENTS_FAIL_AFTER_PUSH")) {}', 'env() call'],
     ['<?php if (getenv("PAYMENTS_FAIL_AFTER_PUSH")) {}', 'getenv() call'],
     ['<?php $flag = $_ENV["PAYMENTS_FAIL_AFTER_PUSH"];', '$_ENV'],
@@ -778,6 +896,32 @@ it('does not mistake a comment or console detection for an environment branch', 
     // The one environment-adjacent call production code legitimately makes.
     expect(ledgerflowEnvironmentBranches(token_get_all(
         '<?php if ($this->app->runningInConsole()) { $this->commands([]); }'
+    )))->toBeEmpty();
+
+    // Declaring the method is not calling it.
+    expect(ledgerflowEnvironmentBranches(token_get_all(
+        '<?php final class M { public function isProduction(): bool { return true; } }'
+    )))->toBeEmpty();
+
+    // Only the environment key makes an ordinary config or container read one.
+    expect(ledgerflowEnvironmentBranches(token_get_all(
+        '<?php $ms = config("payments.relay.statement_timeout_ms"); $c = app("db.connection");'
+    )))->toBeEmpty();
+
+    // Receiver, not spelling: these carry the exact literals the rule looks for.
+    expect(ledgerflowEnvironmentBranches(token_get_all(
+        '<?php $a = $collection->get("app.env"); $b = $factory->make("env"); $c = $resolver->resolve("env");'
+    )))->toBeEmpty();
+
+    // Same method names on a domain receiver, which is not the application.
+    expect(ledgerflowEnvironmentBranches(token_get_all(
+        '<?php $a = $warehouse->isLocal(); $b = $release->isProduction();'
+        .' $c = $deployment->environment(); $d = $runner->runningUnitTests();'
+    )))->toBeEmpty();
+
+    // A dynamic key escapes the rule, per the limits declared at the top.
+    expect(ledgerflowEnvironmentBranches(token_get_all(
+        '<?php $rows = $collection->get($key);'
     )))->toBeEmpty();
 });
 

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
 # Payments resilience contract, process half: the critical POST -> GET path, a
-# real Redis outage, a concurrent identical POST, and SIGKILL of the real relay,
-# consumer and rebuild processes, barrier-coordinated against real PostgreSQL and
-# Redis in a disposable Compose project. Part of `make ci`.
+# real Redis outage, two identical POSTs held in overlapping write transactions,
+# and SIGKILL of the real relay, consumer and rebuild processes,
+# barrier-coordinated against real PostgreSQL and Redis in a disposable Compose
+# project. Part of `make ci`.
 #
 # Acceptance criteria, claim boundaries against the in-process suites, and the
 # barrier lock rationale:
@@ -48,9 +49,11 @@ HTTP_CODE=''
 HTTP_BODY=''
 HTTP_LOCATION=''
 HTTP_RETRY_AFTER=''
-# Host-side client pids of the most recent spawn_process() / start_barrier().
+# Host-side client pids of the most recent spawn_process() / spawn_post() /
+# start_barrier(), and the PostgreSQL backend pid await_backend_lock_wait() saw.
 SPAWN_PID=''
 BARRIER_PID=''
+LOCK_WAIT_PID=''
 
 # --------------------------------------------------------------------------
 # Diagnostics and helpers
@@ -172,6 +175,44 @@ body_contains() {
     esac
 }
 
+# Unguarded and given a generous -m: this request is meant to sit blocked inside
+# its transaction until a barrier releases it.
+spawn_post() {
+    local slot="$1" key="$2"
+
+    rm -f "${workdir}/post_${slot}.log"
+
+    "${DC[@]}" exec -T app curl -sS -m 90 -i --http1.1 -H 'Expect:' \
+        -H "Authorization: Bearer ${TOKEN}" -H 'Accept: application/json' \
+        -H 'Content-Type: application/json' -H "Idempotency-Key: ${key}" \
+        --data '{"amount_minor":1250,"currency":"USD"}' \
+        -X POST http://web/api/payments >"${workdir}/post_${slot}.log" 2>&1 &
+    SPAWN_PID=$!
+}
+
+# Bounded like reap_process: a released request that never returns is the defect.
+reap_post() {
+    local slot="$1" client_pid="$2" timeout="${3:-60}"
+    local deadline
+    deadline=$(( $(date +%s) + timeout ))
+
+    while kill -0 "$client_pid" 2>/dev/null; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            fail "the ${slot} POST did not return within ${timeout}s of the barrier release"
+        fi
+
+        check_deadline "reaping the ${slot} POST"
+        sleep 0.2
+    done
+
+    # The caller asserts on the saved response; a client that died leaves none.
+    wait "$client_pid" 2>/dev/null || true
+}
+
+spawned_post_code() {
+    awk '/^HTTP\//{c=$2} END{print c}' "${workdir}/post_${1}.log" | tr -d '\r'
+}
+
 # --------------------------------------------------------------------------
 # Payment-flow shorthands
 # --------------------------------------------------------------------------
@@ -291,6 +332,7 @@ release_barrier() {
 # Block until PostgreSQL reports a backend waiting on a lock in a statement that
 # touches $1: the spawned worker has reached its write and the barrier holds a
 # conflicting lock. This observation, not a sleep, gates the kill.
+# Publishes the waiting backend's pid in LOCK_WAIT_PID.
 await_backend_lock_wait() {
     local needle="$1" description="$2" timeout="${3:-20}"
     local deadline waiting=''
@@ -298,15 +340,47 @@ await_backend_lock_wait() {
 
     while [ "$(date +%s)" -lt "$deadline" ]; do
         waiting=$(psql_disposable "
-            select count(*) from pg_stat_activity
+            select pid from pg_stat_activity
              where datname = 'ledgerflow'
                and wait_event_type = 'Lock'
                and state = 'active'
                and query ilike '%${needle}%'
                and coalesce(application_name, '') <> 't12_barrier'
-               and pid <> pg_backend_pid()" 2>/dev/null | tr -d '[:space:]' || true)
+               and pid <> pg_backend_pid()
+             order by pid limit 1" 2>/dev/null | tr -d '[:space:]' || true)
 
-        if [ "${waiting:-0}" -ge 1 ]; then
+        if [ -n "$waiting" ]; then
+            LOCK_WAIT_PID="$waiting"
+
+            return 0
+        fi
+
+        check_deadline "waiting for ${description}"
+        sleep 0.25
+    done
+
+    fail "timed out after ${timeout}s waiting for ${description}"
+}
+
+# Block until a backend whose statement touches $1 names $2 among its blockers.
+# pg_blocking_pids() resolves transaction-id, tuple and speculative-token waits,
+# so a sequential replay - with no uncommitted peer - can never satisfy this.
+await_blocked_by() {
+    local needle="$1" blocker_pid="$2" description="$3" timeout="${4:-20}"
+    local deadline blocked=''
+    deadline=$(( $(date +%s) + timeout ))
+
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        blocked=$(psql_disposable "
+            select count(*) from pg_stat_activity
+             where datname = 'ledgerflow'
+               and wait_event_type = 'Lock'
+               and state = 'active'
+               and query ilike '%${needle}%'
+               and pid <> pg_backend_pid()
+               and ${blocker_pid} = any(pg_blocking_pids(pid))" 2>/dev/null | tr -d '[:space:]' || true)
+
+        if [ "${blocked:-0}" -ge 1 ]; then
             return 0
         fi
 
@@ -451,29 +525,56 @@ assert_budget_untouched 'recovery from a transport outage' "$outage_event_id"
 # --------------------------------------------------------------------------
 # 4. Concurrent identical POST -> one logical payment
 # --------------------------------------------------------------------------
+#
+# Barrier: LOCK TABLE stored_events IN SHARE MODE. Compatible with the ACCESS
+# SHARE of the aggregate's replay read, conflicting with the ROW EXCLUSIVE its
+# insert needs, so the first POST blocks while holding its uncommitted
+# idempotency reservation. Both waits are observed before the release.
 
-step 'two identical POSTs race on one idempotency key'
+step 'draining the pipeline, then holding a SHARE lock on stored_events'
+drain_all
 before_events=$(query_scalar "select count(*) from stored_events")
 
 race_key='t12-concurrent-identical'
-for slot in a b; do
-    "${DC[@]}" exec -T app curl -sS -m 15 -i --http1.1 -H 'Expect:' \
-        -H "Authorization: Bearer ${TOKEN}" -H 'Accept: application/json' \
-        -H 'Content-Type: application/json' -H "Idempotency-Key: ${race_key}" \
-        --data '{"amount_minor":1250,"currency":"USD"}' \
-        -X POST http://web/api/payments >"${workdir}/race_${slot}.log" 2>&1 &
-done
-wait
+start_barrier 'lock table stored_events in share mode'
+
+# The first POST must find the lock already held, or it would sail past.
+await_query 'the barrier to hold the stored_events lock' \
+    "select count(*) from pg_locks l
+       join pg_stat_activity a using (pid)
+      where a.application_name = 't12_barrier'
+        and l.locktype = 'relation'
+        and l.relation = 'stored_events'::regclass
+        and l.mode = 'ShareLock'
+        and l.granted" '1' 20
+
+step 'the first POST reserves its idempotency key, then blocks before committing'
+spawn_post a "$race_key"
+first_client=$SPAWN_PID
+await_backend_lock_wait 'stored_events' \
+    'the first POST to block on its stored_events insert' 30
+first_backend="$LOCK_WAIT_PID"
+
+step 'the second identical POST blocks on that uncommitted reservation'
+spawn_post b "$race_key"
+second_client=$SPAWN_PID
+await_blocked_by 'payment_idempotency_receipts' "$first_backend" \
+    "the second POST to be blocked by backend ${first_backend}, the first POST's open transaction" 30
+
+step 'releasing the barrier; both overlapping requests must answer alike'
+release_barrier
+reap_post a "$first_client"
+reap_post b "$second_client"
 
 for slot in a b; do
-    code=$(awk '/^HTTP\//{c=$2} END{print c}' "${workdir}/race_${slot}.log" | tr -d '\r')
+    code=$(spawned_post_code "$slot")
     case "$code" in
         202|201|200) : ;;
         *) fail "concurrent POST slot ${slot} returned ${code}" ;;
     esac
 done
 
-race_ids=$(grep -hoE '"payment_id":"[0-9a-f-]{36}"' "${workdir}"/race_a.log "${workdir}"/race_b.log \
+race_ids=$(grep -hoE '"payment_id":"[0-9a-f-]{36}"' "${workdir}"/post_a.log "${workdir}"/post_b.log \
     | sed 's/.*:"//;s/"//' | sort -u)
 distinct_ids=$(printf '%s\n' "$race_ids" | grep -c .)
 [ "$distinct_ids" = '1' ] || fail "concurrent identical POSTs produced ${distinct_ids} distinct payment ids"
@@ -483,6 +584,8 @@ after_events=$(query_scalar "select count(*) from stored_events")
     || fail "concurrent identical POSTs created $((after_events - before_events)) stored events, expected 1"
 
 race_aggregate="$race_ids"
+assert_query 'concurrent identical POSTs created one idempotency receipt' \
+    "select count(*) from payment_idempotency_receipts where payment_id = '${race_aggregate}'" '1'
 assert_query 'concurrent identical POSTs created one outbox envelope' \
     "select count(*) from payment_outbox where aggregate_uuid = '${race_aggregate}'" '1'
 
