@@ -461,11 +461,11 @@ assert_query 'one outbox envelope' 'select count(*) from payment_outbox' '1'
 
 step 'GET is pending before the pipeline runs, then projected after it'
 http_request GET "/api/payments/${critical_payment_id}"
-if [ "$HTTP_CODE" = '202' ]; then
-    body_contains '"status":"projection_pending"' \
-        || fail "202 body is not projection_pending: ${HTTP_BODY}"
-    [ "$HTTP_RETRY_AFTER" = '1' ] || fail "202 is missing Retry-After: 1 (saw '${HTTP_RETRY_AFTER}')"
-fi
+[ "$HTTP_CODE" = '202' ] \
+    || fail "GET before the relay returned ${HTTP_CODE}, expected 202: ${HTTP_BODY}"
+body_contains '"status":"projection_pending"' \
+    || fail "202 body is not projection_pending: ${HTTP_BODY}"
+[ "$HTTP_RETRY_AFTER" = '1' ] || fail "202 is missing Retry-After: 1 (saw '${HTTP_RETRY_AFTER}')"
 
 artisan_disposable payments:outbox:relay >/dev/null
 await_query 'the projection to complete' \

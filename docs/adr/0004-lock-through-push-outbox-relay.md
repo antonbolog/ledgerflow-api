@@ -153,16 +153,15 @@ apart, so this margin is for the one cold first tick only.
 
 ## Consequences
 
-- The relay depends on nothing T11 has not yet built. Reverting T11 would leave T7's relay exactly as
-  it runs today; landing T11 requires editing exactly one method (`OutboxRelay::relayOne()`) to add
-  one statement before eligibility selection.
+- T7's relay shipped depending on nothing T11 had yet built. T11 then added exactly what this
+  predicted: one statement in one method (`OutboxRelay::relayOne()`) before eligibility selection.
 - No production code claims zero advisory locks are ever taken during relay — HS-1 records that as
   temporary, not permanent, so a later reader must not treat this ADR as forbidding T11's gate.
 - **HS-1 now has an approved design to point at.**
   [ADR 0005](0005-payments-projection-gate-and-rebuild-ownership.md) records the control row, the
-  advisory-key derivation, the non-blocking traffic acquisition, and the deferral semantics. It is
-  **not implemented**, so the relay still runs with no gate; HS-1 is discharged by T11's gate slice,
-  not by that ADR existing. The one-statement insertion point described above is unchanged.
+  advisory-key derivation, the non-blocking traffic acquisition, and the deferral semantics. **HS-1 is
+  discharged**: T11's gate slice landed the one statement described above, and `OutboxRelay::relayOne()`
+  now returns `RelayOutcome::GateClosed` without selecting a row when the gate is closed.
 - `redis-data` persistence across scheduler restarts is now a documented operational fact, not an
   edge case a future incident rediscovers: a restarted scheduler is briefly `stale`, never falsely
   `fresh`, before its own next tick.

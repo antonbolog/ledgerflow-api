@@ -622,7 +622,7 @@ allowlist.
 evidence that the pinned session, or the advisory lock it took, survived.** Both can be true while the
 lock is already held by somebody else. A rebuild that infers ownership from either is unsafe, and the
 abort path needs a positive check — re-reading the durable control row on a known-live connection, a
-fenced token, or a refusal to reconnect at all. T11 owns that choice; T4 only proves the naive
+fenced token, or a refusal to reconnect at all. T11 made that choice; T4 only proves the naive
 inference is wrong.
 
 ## Rebuild algorithm
@@ -853,7 +853,7 @@ Eight additional `ProjectionRebuildTest` cases prove these contracts against rea
 Backend kills target only the captured test backend, with the current database OID, two-integer gate key, and lock namespace checked from the observer connection.
 The tests wait for observed lock release, then verify that the durable row alone still closes the shared gate.
 Repeated command attempts resolve a fresh adapter after `DB::purge()` so Artisan does not retain a command attached to the killed connection.
-This is in-process database-session failure evidence; the barrier-coordinated OS-process kill matrix remains T12 work.
+This is in-process database-session failure evidence; the barrier-coordinated OS-process kill matrix was delivered by T12.
 
 On 2026-09-03, `make check` exited `0`: **679 tests, 3907 assertions**, including Composer validation, Pint, Rector, PHPStan, and instruction parity.
 After recording this evidence, a separate `make agent-check` also exited `0`.
@@ -892,11 +892,11 @@ The [operator procedure](../../operations/runtime-contract.md#manual-rebuild-and
 
 These are bounded local fixtures and deterministic database-session/failure injections.
 They establish no production-scale SLA, throughput figure, zero-downtime guarantee, multi-process kill matrix, or rehearsal against a real incident.
-The barrier-coordinated OS-process matrix remains T12; online staging swaps and resumable replay remain deferred below.
+The barrier-coordinated OS-process matrix was delivered by T12; online staging swaps and resumable replay remain deferred below.
 
 On 2026-09-07, the final continuous `make ci` run exited `0`: **693 tests, 4116 assertions**;
-the development database remained untouched, the projection contract passed in 127 seconds, and
-the API and web CI images both built successfully.
+the development-database marker row survived `make check` intact, the projection contract passed in
+127 seconds, and the API and web CI images both built successfully.
 This validates the current Slice 5 source, tests, instructions, and canonical documentation in one
 repository-defined run.
 

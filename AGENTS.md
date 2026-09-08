@@ -55,6 +55,11 @@ compatibility evidence live in
   reports incomplete and repair refuses while the gate is closed, before scanning or canonical
   locking. Rebuild ownership and guarded recovery follow
   [ADR 0005](docs/adr/0005-payments-projection-gate-and-rebuild-ownership.md).
+- [`docs/api/openapi.json`](docs/api/openapi.json) is the canonical wire contract for both routes;
+  `tests/Feature/OpenApiContractTest.php` asserts its parity against the real routes, real responses
+  and `ProblemType`. [The five-minute demo](docs/operations/five-minute-demo.md) walks the healthy
+  flow, a real Redis outage, deliberate corruption, read-only verification and an explicit rebuild
+  through project-defined commands.
 - Resilience is proved end to end. The integration suites inject every persistence and delivery
   failpoint in process; `make resilience-contract` drives the critical HTTP path, a real Redis
   outage, two identical POSTs held in overlapping write transactions, SIGKILL of the real relay,
@@ -109,6 +114,9 @@ environment lifecycle, database lifecycle, validation, and CI contracts.
 | `make db-migrate` / `make db-seed` | Mutate only the allowlisted local development database |
 | `make db-reset CONFIRM=db-reset` | Rebuild only the allowlisted development and test databases |
 | `make projection-start` / `make projection-stop` | Start or stop the scheduler and Horizon consumer together, never one alone |
+| `make demo-token [EMAIL=...]` | Print one Sanctum token for a seeded fixture merchant, on stdout only |
+| `make demo-status` | Show relay heartbeat and Horizon supervisor state, read-only |
+| `make demo-corrupt PAYMENT_ID=... CONFIRM=corrupt-projection` | Delete one named `payment_details` row for the demo |
 | `make agent-check` | Verify instruction adapters, scoping, and local-config exclusions |
 | `make quality` | Read-only Composer, Pint, Rector, and PHPStan checks |
 | `make test` | Run Pest against `ledgerflow_test`; leaves PostgreSQL and Redis running |
@@ -116,6 +124,12 @@ environment lifecycle, database lifecycle, validation, and CI contracts.
 | `make projection-contract` | Prove the scheduler+Horizon pair in a disposable Compose project |
 | `make resilience-contract` | Prove Payments resilience under real OS-process signals in a disposable Compose project |
 | `make ci` | After `make install`, run the full CI guard, isolation, validation, and image contract |
+
+The three `demo-` targets are local development tooling for
+[the five-minute demo](docs/operations/five-minute-demo.md). No validation target performs their
+destructive or token-minting effect: `make check` never invokes them at all, and `ci-contract`
+exercises only their refusal paths, exactly as it already does for `destroy` and `db-reset`. Their
+safety guards are therefore tested; their operations are not executed.
 
 Use only these repository-defined validation commands. `make check` must not mutate source or the
 development database. CI runs `make install` followed by `make ci`; it does not reproduce hidden

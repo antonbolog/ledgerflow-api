@@ -14,6 +14,7 @@ infrastructure and deployment topology.
 ## Payments vertical slice
 
 - [Payments flow](docs/architecture/payments-flow.md)
+- [OpenAPI artifact](docs/api/openapi.json)
 - [Payments specifications](docs/specifications/payments/README.md)
 - [Resilience test plan](docs/testing/payments-resilience.md)
 
@@ -21,6 +22,7 @@ infrastructure and deployment topology.
 
 - [Development environment](docs/specifications/foundation/development-environment.md)
 - [Runtime contract](docs/operations/runtime-contract.md)
+- [Five-minute demo](docs/operations/five-minute-demo.md)
 - [Roadmap](docs/roadmap.md)
 - [Architecture decisions](docs/adr/README.md)
 

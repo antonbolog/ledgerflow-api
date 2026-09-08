@@ -17,7 +17,8 @@ The consumer applies one deterministic projection transaction. A durable project
 idempotency boundary. The query API reads only `PaymentDetails` and the merchant-owned idempotency
 receipt.
 
-**T8 and T9 are implemented; T11 adds traffic gating, bounded rebuild, and recovery.** The
+**T8, T9 and T11 are implemented: the consumer, the query endpoint, traffic gating, the bounded
+rebuild, and recovery.** The
 consumer, its two tables, the projection failure fence, the failure recorder, and
 `payments:outbox:retry` all exist, and so does the merchant-scoped query endpoint; both carry the
 evidence recorded below. **The shared projection gate now guards both**: the consumer's transaction
@@ -181,7 +182,7 @@ Not countable:
 - PostgreSQL connection loss, and transaction begin, commit, or rollback uncertainty;
 - lock, serialization, deadlock, and statement-timeout errors;
 - failure of the failure-metadata write itself;
-- gate deferral, once T11 introduces it.
+- gate deferral.
 
 `last_projection_error` stores only a fixed safe category from a closed set. Logs carry the
 exception class, SQLSTATE, and safe identifiers, never raw exception text, payload, credentials, or

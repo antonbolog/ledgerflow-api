@@ -102,8 +102,9 @@ help: ## Show the public command surface
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## /{printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
 	@echo "Destructive targets require explicit confirmation:"
-	@echo "  make destroy  CONFIRM=destroy"
-	@echo "  make db-reset CONFIRM=db-reset"
+	@echo "  make destroy      CONFIRM=destroy"
+	@echo "  make db-reset     CONFIRM=db-reset"
+	@echo "  make demo-corrupt PAYMENT_ID=<uuid> CONFIRM=corrupt-projection"
 
 # ---------------------------------------------------------------------------
 # Environment lifecycle
@@ -200,6 +201,102 @@ projection-start: db-migrate ## Start the opt-in scheduler and Horizon consumer 
 projection-stop: ## Stop the scheduler and Horizon consumer together
 	@echo "==> stopping the projection pair"
 	$(DC) --profile projection stop scheduler horizon
+
+# ---------------------------------------------------------------------------
+# Demo support - local development only, for docs/operations/five-minute-demo.md.
+#
+# EMAIL, PAYMENT_ID and CONFIRM are caller-supplied: they are exported into the recipe
+# environment and read only through quoted shell expansions, never interpolated as
+# $(EMAIL) into recipe text, where a quote in the value would close it and run the rest.
+# ---------------------------------------------------------------------------
+
+# Hardcoded like DEV_DB and TEST_DB: an allowlist another file can widen is not one.
+DEMO_EMAILS := owner@northwind.test owner@atlantic.test
+EMAIL       ?= owner@northwind.test
+
+export DEMO_EMAILS
+export DEMO_EMAIL      := $(EMAIL)
+export DEMO_PAYMENT_ID := $(PAYMENT_ID)
+export DEMO_CONFIRM    := $(CONFIRM)
+
+.PHONY: demo-guard
+demo-guard:
+	$(call assert_local_db,$(DEV_DB),)
+
+# Stdout carries the token and nothing else, so `TOKEN=$$(make demo-token)` works.
+.PHONY: demo-token
+demo-token: ## Print one Sanctum token for a seeded fixture merchant (EMAIL=...)
+	@allowed=0; \
+	  for e in $$DEMO_EMAILS; do \
+	    [ "$$e" = "$$DEMO_EMAIL" ] && allowed=1; \
+	  done; \
+	  [ "$$allowed" = 1 ] || { \
+	    echo "REFUSING: EMAIL must name a seeded fixture identity." >&2; \
+	    echo "  allowed: $$DEMO_EMAILS" >&2; \
+	    echo "  given:   $$DEMO_EMAIL" >&2; \
+	    echo "  Run make db-seed if these identities do not exist yet." >&2; \
+	    exit 1; }
+	@$(MAKE) --no-print-directory demo-guard >&2
+	@token=$$($(EXEC) -e DEMO_EMAIL app php artisan tinker --execute \
+	  'echo \Modules\Merchant\Infrastructure\Persistence\Eloquent\User::query()->where("email", getenv("DEMO_EMAIL"))->firstOrFail()->createToken("ledgerflow-demo")->plainTextToken, PHP_EOL;' \
+	  | tr -d '\r' | grep -oE '[0-9]+\|[A-Za-z0-9]{40,}' | tail -1); \
+	  [ -n "$$token" ] || { \
+	    echo "REFUSING: no token was minted." >&2; \
+	    echo "  Run make db-seed if the fixture identities do not exist yet," >&2; \
+	    echo "  and check that the app container is running." >&2; \
+	    exit 1; }; \
+	  echo "$$token"
+
+# Non-fatal: both exit non-zero for states this target exists to show, and the codes
+# cannot separate those from a stopped container, so the code is printed not swallowed.
+.PHONY: demo-status
+demo-status: ## Show relay heartbeat and Horizon supervisor state (read-only)
+	@echo "==> payments:outbox:status"
+	@$(EXEC) app php artisan payments:outbox:status \
+	  || echo "    exit $$? - unhealthy, or it could not report at all"
+	@echo "==> horizon:status"
+	@$(EXEC) app php artisan horizon:status \
+	  || echo "    exit $$? - inactive, never run, or unreachable"
+
+# Deletes only while exactly one row matches, in one snapshot, so a zero or multiple
+# match removes nothing rather than being detected afterwards.
+.PHONY: demo-corrupt
+demo-corrupt: ## Delete one named payment_details row for the demo (PAYMENT_ID=... CONFIRM=corrupt-projection)
+	@[ -n "$$DEMO_PAYMENT_ID" ] || { \
+	  echo "REFUSING: demo-corrupt never picks a payment for you."; \
+	  echo "  Name the payment from the initiation response:"; \
+	  echo "  make demo-corrupt PAYMENT_ID=<uuid> CONFIRM=corrupt-projection"; \
+	  exit 1; }
+	@printf '%s' "$$DEMO_PAYMENT_ID" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$$' \
+	  || { echo "REFUSING: PAYMENT_ID is not a canonical UUID."; exit 1; }
+	@echo "==> demo-corrupt would delete one read-model row:"
+	@echo "      host:       postgres (compose service)"
+	@echo "      database:   $(DEV_DB)"
+	@echo "      table:      payment_details"
+	@echo "      payment_id: $$DEMO_PAYMENT_ID"
+	@[ "$$DEMO_CONFIRM" = "corrupt-projection" ] || { \
+	  echo "REFUSING: demo-corrupt breaks local development data on purpose."; \
+	  echo "  It removes one derived row and touches no canonical history."; \
+	  echo "  Re-run with: make demo-corrupt PAYMENT_ID=$$DEMO_PAYMENT_ID CONFIRM=corrupt-projection"; \
+	  exit 1; }
+	@$(MAKE) --no-print-directory demo-guard
+	@$(EXEC) -e DEMO_PAYMENT_ID postgres sh -c '\
+	  counts=$$(echo "with target as ( \
+	      select payment_id from payment_details where payment_id = :'"'"'pid'"'"' \
+	    ), deleted as ( \
+	      delete from payment_details \
+	      where payment_id = :'"'"'pid'"'"' and (select count(*) from target) = 1 \
+	      returning 1 \
+	    ) select (select count(*) from target), (select count(*) from deleted);" \
+	    | psql -U "$$POSTGRES_USER" -d $(DEV_DB) -v ON_ERROR_STOP=1 -qAt -F " " \
+	           -v pid="$$DEMO_PAYMENT_ID") || exit 1; \
+	  set -- $$counts; \
+	  if [ "$$1" != "1" ] || [ "$$2" != "1" ]; then \
+	    echo "REFUSING: expected exactly one matching payment_details row, matched $$1, removed $$2." >&2; \
+	    echo "  Nothing was deleted. An unprojected or already corrupted payment matches nothing." >&2; \
+	    exit 1; \
+	  fi; \
+	  echo "  deleted 1 payment_details row; canonical history is untouched"'
 
 # ---------------------------------------------------------------------------
 # Database lifecycle

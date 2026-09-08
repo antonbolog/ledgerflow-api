@@ -23,8 +23,7 @@ way, through `MerchantContext`. It returns:
 - `200` when the owned `PaymentDetails` projection exists;
 - `202 projection_pending` with `Retry-After: 1` when the owned receipt exists but projection lags;
 - `404 payment_not_found` when no owned receipt or projection exists;
-- `503 projection_rebuilding` while the Payments projection gate is closed. That gate, and therefore
-  this branch, is T11's; it is unreachable until T11 ships.
+- `503 projection_rebuilding` with `Retry-After: 1` while the Payments projection gate is closed.
 
 A malformed payment ID, an unknown one, and another merchant's all produce that same `404` document.
 For one requested ID, the unknown and foreign cases are byte-identical, so the endpoint never reveals
@@ -76,9 +75,8 @@ marker.
   exhaustion state.
 - `payment_projector_receipts` owns idempotent projector completion by `(projector_name, event_id)`.
 - `payment_details` owns queryable payment state.
-- `payment_projection_controls` is planned for T11, not present: it will own durable
-  `ready`/`rebuilding` state, an owner token, an owner backend pid, and `cleared_at`, with advisory
-  locks providing mutual exclusion. Designed in
+- `payment_projection_controls` owns durable `ready`/`rebuilding` state, an owner token, an owner
+  backend pid, and `cleared_at`, with advisory locks providing mutual exclusion. Decided in
   [ADR 0005](../adr/0005-payments-projection-gate-and-rebuild-ownership.md).
 
 ## Verification and targeted repair
@@ -90,9 +88,9 @@ See the [operator procedure](../operations/runtime-contract.md#manual-verificati
 
 ## Rebuild path
 
-T11's control-row migration and shared gate primitive are implemented.
-The traffic integration and rebuild path below remain planned; no Payments traffic path calls the gate yet.
-See [ADR 0005](../adr/0005-payments-projection-gate-and-rebuild-ownership.md).
+Implemented, under [ADR 0005](../adr/0005-payments-projection-gate-and-rebuild-ownership.md).
+All four traffic paths - the write path, the transactional read, the relay, and the consumer - check
+the gate.
 
 A controlled rebuild closes only Payments traffic and workers, acquires an exclusive
 connection-affine PostgreSQL advisory lock, clears derived projection state, and replays stored
@@ -109,6 +107,7 @@ replay operationally unacceptable.
 
 ## Detailed specifications
 
+- [OpenAPI artifact](../api/openapi.json)
 - [Initiation and idempotency](../specifications/payments/initiation-and-idempotency.md)
 - [Outbox delivery](../specifications/payments/outbox-delivery.md)
 - [Projection and query](../specifications/payments/projection-and-query.md)
