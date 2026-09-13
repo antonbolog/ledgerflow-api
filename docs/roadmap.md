@@ -1,6 +1,6 @@
 # Ledgerflow Roadmap
 
-Status: **Milestones 1, 2 and 3 complete.** T1 (Laravel foundation, Docker runtime, command contract,
+Status: **Milestones 1 through 5 complete.** T1 (Laravel foundation, Docker runtime, command contract,
 validation surface, CI) and T2 (module boundaries and merchant-user identity) are done. T3 proved the
 Spatie atomic-persistence and fresh-object retry invariants Q1–Q5; see the
 [initiation evidence](specifications/payments/initiation-and-idempotency.md#blocking-compatibility-evidence).
@@ -40,6 +40,9 @@ The final continuous `make ci` checkpoint passed before shipping.
 `make resilience-contract` proves the process half against real services, and its evidence and claim
 boundaries live in the
 [resilience test plan](testing/payments-resilience.md#process-level-resilience).
+**T13 is complete and shipped** in pull request #15, merged to `main` as `051bf08`, closing M5:
+the [five-minute demo](operations/five-minute-demo.md) and
+[`docs/api/openapi.json`](api/openapi.json) are published through project-defined commands.
 
 ## Outcome
 
@@ -236,7 +239,8 @@ Detect and repair derived-state corruption while keeping partial rebuilds invisi
   [resilience test plan](testing/payments-resilience.md#process-level-resilience).
   No production-code change; no new dependency, migration, or process.
 - T13 - Publish the five-minute resilience demo and operational guide.
-  **Complete locally; shipping pending.** The
+  **Complete and shipped** in pull request #15, merged to `main` as `051bf08`.
+  The
   [five-minute demo](operations/five-minute-demo.md) drives the healthy flow, a real Redis outage and
   recovery, deliberate read-model corruption, read-only verification and an explicit rebuild through
   project-defined commands, with three guarded local `demo-` Make targets replacing the previously
@@ -250,9 +254,15 @@ Detect and repair derived-state corruption while keeping partial rebuilds invisi
 Exit: the complete [resilience test plan](testing/payments-resilience.md) passes through
 project-defined commands; the README demo works from a clean checkout.
 
+**M5 exit satisfied.** T12 carries the resilience half through `make resilience-contract` inside
+`make ci`, with its evidence and claim boundaries in the
+[resilience test plan](testing/payments-resilience.md#process-level-resilience).
+T13 carries the demo half through the
+[five-minute demo](operations/five-minute-demo.md) and its guarded `demo-` Make targets.
+
 ## Planned system evolution after M5
 
-These directions begin only after the Payments resilience slice is complete. They are not yet
+The Payments resilience slice is complete, so these directions are now unblocked. They are not yet
 decomposed into the active Linear/Asana task set.
 
 ### Filament admin and realtime foundation
