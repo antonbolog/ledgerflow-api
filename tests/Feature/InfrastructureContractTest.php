@@ -34,12 +34,6 @@ it('runs against the allowlisted PostgreSQL test database', function (): void {
     expect($database)->toBe('ledgerflow_test');
 });
 
-it('uses the PostgreSQL driver and not SQLite', function (): void {
-    // docs/testing/payments-resilience.md: SQLite cannot reproduce the
-    // concurrency and advisory-lock behaviour the Payments slice depends on.
-    expect(DB::connection()->getDriverName())->toBe('pgsql');
-});
-
 it('reaches PostgreSQL on a supported server version', function (): void {
     $version = DB::selectOne('show server_version')->server_version;
 

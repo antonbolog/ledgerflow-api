@@ -18,11 +18,8 @@ use Illuminate\Support\Facades\Schema;
  * WHY IT LIVES IN THE PAYMENTS MODULE: AGENTS.md scopes event sourcing to this
  * bounded context, and ADR 0001 gives modules migration locality.
  *
- * DO NOT "IMPROVE" THE COLUMN SET. The T3 and T4 compatibility spikes create
- * this table only when it does not already exist, so from T5 onward they run
- * against this definition. A divergence here surfaces over there as an
- * unrelated-looking spike failure. If the vendor stub ever changes, reconcile
- * deliberately rather than drifting.
+ * DO NOT "IMPROVE" THE COLUMN SET. It stays identical to the vendor stub. If the
+ * vendor stub ever changes, reconcile deliberately rather than drifting.
  *
  * created_at keeps the stub's timestamp(0): business time lives in the event
  * payload at microsecond precision, and this column is the package's own.

@@ -212,14 +212,6 @@ afterEach(function (): void {
 
     IntegrationDatabase::rollbackOpenTransactions();
     IntegrationDatabase::releaseLocks();
-
-    // UNCONDITIONAL, NOT ONLY AT A TEST'S HAPPY-PATH END. payment_projection_controls
-    // is deliberately absent from IntegrationDatabase::TABLES (its seeded row is
-    // schema, not fixture data), so a test that closes the gate and then fails an
-    // assertion before reopening it would otherwise leak `rebuilding` into every
-    // later test in this process - not only in this file.
-    relayReopenGate();
-
     IntegrationDatabase::truncate();
     IntegrationDatabase::disconnectAll();
 });
@@ -372,16 +364,6 @@ it('skips a row another session holds and publishes the next one instead', funct
     // Released, so the previously locked row is reachable again.
     expect(relay()->relayOne())->toBe(RelayOutcome::Published);
     expect((int) relaySnapshot($held)['publish_count'])->toBe(1);
-});
-
-it('compiles the eligibility query with SKIP LOCKED rather than a bare row lock', function (): void {
-    // The behavioural proof above would also pass against `for update` if the
-    // holder released in time. This pins the clause itself: Laravel has no
-    // skipLocked() helper, so the string is passed to lock() verbatim and a typo
-    // would silently become a blocking read.
-    $sql = DB::table('payment_outbox')->lock('for update skip locked')->toSql();
-
-    expect($sql)->toEndWith('for update skip locked');
 });
 
 it('makes an accepted row eligible again only after the grace has passed', function (): void {

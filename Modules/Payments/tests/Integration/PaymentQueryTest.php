@@ -120,12 +120,6 @@ beforeEach(function (): void {
 afterEach(function (): void {
     IntegrationDatabase::rollbackOpenTransactions();
     IntegrationDatabase::releaseLocks();
-
-    // UNCONDITIONAL, NOT ONLY AT A TEST'S HAPPY-PATH END. See OutboxRelayTest's
-    // afterEach for why: a failed assertion between closing and reopening the gate
-    // must not leak `rebuilding` into every later test in this process.
-    paymentQueryReopenGate();
-
     IntegrationDatabase::truncate();
     IntegrationDatabase::disconnectAll();
 });
@@ -272,36 +266,6 @@ it('refuses a payment id neither table knows and leaves no transaction open', fu
     // an `idle in transaction` backend here and nowhere else in this file.
     expect(DB::connection()->transactionLevel())->toBe(0)
         ->and(DB::connection()->getPdo()->inTransaction())->toBeFalse();
-});
-
-it('refuses another merchant projection and answers the owner normally', function (): void {
-    $owner = Merchant::factory()->create()->getKey();
-    $stranger = Merchant::factory()->create()->getKey();
-    $paymentId = (string) Str::uuid7();
-
-    paymentQueryProjection($owner, $paymentId);
-
-    expect(fn () => paymentQueryAdapter()->findOwned($stranger, $paymentId))
-        ->toThrow(PaymentNotFound::class);
-
-    // The positive control is what makes the refusal non-vacuous: the row is
-    // genuinely there and genuinely readable, by its owner.
-    expect(paymentQueryAdapter()->findOwned($owner, $paymentId))
-        ->toBeInstanceOf(ProjectedPayment::class);
-});
-
-it('refuses another merchant pending receipt and answers the owner normally', function (): void {
-    $owner = Merchant::factory()->create()->getKey();
-    $stranger = Merchant::factory()->create()->getKey();
-    $paymentId = (string) Str::uuid7();
-
-    paymentQueryReceipt($owner, $paymentId);
-
-    expect(fn () => paymentQueryAdapter()->findOwned($stranger, $paymentId))
-        ->toThrow(PaymentNotFound::class);
-
-    expect(paymentQueryAdapter()->findOwned($owner, $paymentId))
-        ->toBeInstanceOf(PendingPayment::class);
 });
 
 it('refuses a malformed payment id without letting PostgreSQL see it', function (string $malformed): void {

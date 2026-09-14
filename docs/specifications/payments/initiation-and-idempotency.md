@@ -116,9 +116,10 @@ HTTP path means the handler skipped canonicalization.
 **Stable identity is the alias, not the class name.** `PaymentInitiated::ALIAS` is
 `payments.payment_initiated`, mapped in `config/event-sourcing.php`, and it is what
 `stored_events.event_class` and `payment_outbox.event_type` carry — so the namespace can move
-without rewriting history. `enforce_event_class_map` stays `false` because the T3/T4 spikes persist
-test-only fixtures that must never appear in production configuration; an exact-equality test on the
-map enforces completeness instead.
+without rewriting history. `enforce_event_class_map` stays `false`; a discovery test in
+`PaymentInitiationPersistenceTest` requires the map to name exactly the production storable events
+instead. It was originally kept off because the T3/T4 spikes, retired in ANT-19, persisted unmapped
+test-only fixtures.
 
 **Schema version is `1`, from an overridden `eventVersion()` method** rather than Spatie's
 `#[EventVersion]` attribute. The attribute would be a third vendor type in `Domain` and
@@ -154,6 +155,10 @@ Spatie `stored_events` retains its aggregate UUID/version concurrency constraint
 increasing global ID. Idempotency receipts are retained indefinitely in this slice.
 
 ## Blocking compatibility evidence
+
+> **Historical evidence, retired in ANT-19.** The T3 spike suites and fixtures named in this section
+> no longer exist or run. The same contracts are exercised against production code by the C2 and C6
+> rows under [Implementation evidence](#implementation-evidence) and by `TransactionRetryTest`.
 
 **Satisfied by T3.** Every invariant below was proved against the Composer-resolved stack — Laravel
 13.24.0, `spatie/laravel-event-sourcing` 7.15.1, PostgreSQL 18.4, PHP 8.4 — by a test-only spike under
@@ -246,7 +251,7 @@ provisions its own schema so it does not depend on having run after some other s
 | C6 | Exhaustion stops at three attempts with no partial state | `InitiationCommitBoundaryTest::it exhausts at three attempts and leaves no partial state` | Captured SQLSTATEs `55P03, 55P03, 55P03`; three distinct event objects by identity; `IdempotencyContention` thrown; all three tables empty from the observer | **PASS** |
 | C6 | Exhaustion is answered `503` with `Retry-After: 1` and no SQL vocabulary | `InitiatePaymentWriteTest::it answers exhausted contention with 503, Retry-After: 1 and problem details` | The HTTP shape against a bound double, so it dies if the mapper changes while the row above dies if the runner changes; `detail` asserted to contain neither lock vocabulary nor a table name | **PASS** |
 | C6 | Only the three allowlisted states retry, classified by this repository | `TransactionRetryTest` (17 cases), `ModuleBoundaryTest::it never delegates concurrency classification to laravel` | `errorInfo[0]` preferred over `getCode()`, `DeadlockException` unwrapped first, string comparison; a non-retryable failure attempted exactly once; Laravel's own detector mechanically forbidden anywhere under `Modules/` | **PASS** |
-| C7 | Every `/api/*` failure is Problem Details, and the web surface is untouched | `ProblemDetailsContractTest`, `InitiatePaymentRequestTest` | 404/405/401/422 all `application/problem+json` with the six members; Laravel's `{"message":"Unauthenticated."}` key proven absent; a non-API 404 proven *not* reshaped; malformed JSON pinned as `422`, since `Request::json()` decodes it to `[]` and throws nothing; a generic conflict proven **not** dressed as `idempotency_payload_mismatch`, and a generic 503 not as `idempotency_contention` | **PASS** |
+| C7 | Every `/api/*` failure is Problem Details, and the web surface is untouched | `ProblemDetailsContractTest`, `InitiatePaymentRequestTest`, `OpenApiContractTest` | 404/405/401/422 all `application/problem+json` with the six members; Laravel's `{"message":"Unauthenticated."}` key proven absent; a non-API 404 proven *not* reshaped; malformed JSON pinned as `422`, since `Request::json()` decodes it to `[]` and throws nothing; a generic conflict proven **not** dressed as `idempotency_payload_mismatch`, and a generic 503 not as `idempotency_contention` | **PASS** |
 | C1 | The envelope derives from the row just written, and leaves T7/T8 columns alone | `InitiatePaymentWriteTest::it derives every outbox column from the row the repository just wrote`, `…it leaves every T7 and T8 delivery column at its default` | `payload = stored_events.event_properties` compared as **jsonb**; `occurred_at` re-parsed and re-formatted rather than substring-matched; all three counters 0, both error columns and both completion timestamps null, `available_at` not null | **PASS** |
 | C1 | Nothing is enqueued while writing the envelope | `InitiatePaymentWriteTest::it enqueues nothing while writing the envelope` | `Queue::assertNothingPushed()` under an active `Queue::fake()` | **PASS** |
 

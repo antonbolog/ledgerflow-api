@@ -33,10 +33,6 @@ use Throwable;
  * flushdb or flushall. The server-reported database number is asserted before any
  * deletion, because deleting on the strength of a failed assumption is exactly the
  * class of mistake the PostgreSQL guard layers exist to prevent.
- *
- * The T4 spike owns `t4spike:relay*` on the same database. These key sets are
- * disjoint by name and both are enumerated explicitly, so neither can delete the
- * other's state.
  */
 final class RelayTransport
 {

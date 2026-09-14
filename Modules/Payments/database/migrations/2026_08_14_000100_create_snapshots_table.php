@@ -22,8 +22,7 @@ use Illuminate\Support\Facades\Schema;
  * [development environment](../../../../docs/specifications/foundation/development-environment.md),
  * "What T5 added".
  *
- * Same "do not improve the column set" rule as stored_events: the T3/T4 spikes
- * run against this definition from T5 onward.
+ * Same "do not improve the column set" rule as stored_events.
  */
 return new class extends Migration
 {

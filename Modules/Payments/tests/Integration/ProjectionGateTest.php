@@ -33,25 +33,7 @@ use Modules\Payments\Tests\Integration\ProjectionGateLocks;
 |   - Every assertion has a mutation that makes it fail. Where the mutation is
 |     not another test, it is stated in the test itself.
 |
-| NOTE ON THE CONTROL ROW: payment_projection_controls is deliberately absent
-| from IntegrationDatabase::TABLES, because its seeded row is schema rather than
-| fixture data and truncating it would leave the gate permanently closed for
-| every later test. This suite restores it by hand instead.
-|
 */
-
-/** The gate's seeded resting state, restored around every test. */
-function resetProjectionControls(): void
-{
-    DB::table('payment_projection_controls')->where('projection', ProjectionGate::PAYMENT_DETAILS)->update([
-        'state' => ProjectionGate::READY,
-        'owner_token' => null,
-        'owner_pid' => null,
-        'started_at' => null,
-        'cleared_at' => null,
-        'updated_at' => DB::raw('now()'),
-    ]);
-}
 
 /** The unit under test, on the same default connection every Payments adapter holds. */
 function gate(): ProjectionGate
@@ -82,8 +64,6 @@ beforeEach(function (): void {
     IntegrationDatabase::refuseIfWrapped();
     IntegrationDatabase::truncate();
 
-    resetProjectionControls();
-
     // THE GUARD THAT KEEPS COEXISTENCE ASSERTIONS HONEST. PostgreSQL advisory
     // locks never conflict with the session that already holds them, so two
     // connections collapsed onto one backend would make the shared-coexistence
@@ -103,8 +83,6 @@ afterEach(function (): void {
 
     ProjectionGateLocks::releaseAll(IntegrationDatabase::LOCK);
     ProjectionGateLocks::releaseAll(DB::getDefaultConnection());
-
-    resetProjectionControls();
 
     IntegrationDatabase::truncate();
     IntegrationDatabase::disconnectAll();

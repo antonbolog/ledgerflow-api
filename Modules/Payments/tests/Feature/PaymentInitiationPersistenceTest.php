@@ -2,7 +2,6 @@
 
 declare(strict_types=1);
 
-use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Modules\Merchant\Infrastructure\Persistence\Eloquent\Merchant;
@@ -10,11 +9,8 @@ use Modules\Payments\Domain\Payment\Events\PaymentInitiated;
 use Modules\Payments\Domain\Payment\Exceptions\InvalidPaymentInitiation;
 use Modules\Payments\Domain\Payment\Exceptions\PaymentAlreadyInitiated;
 use Modules\Payments\Domain\Payment\PaymentAggregate;
-use Modules\Payments\Infrastructure\Projectors\PaymentOutboxWriter;
-use Spatie\EventSourcing\Projectionist;
 use Spatie\EventSourcing\StoredEvents\Models\EloquentStoredEvent;
 use Spatie\EventSourcing\StoredEvents\ShouldBeStored;
-use Spatie\EventSourcing\StoredEvents\StoredEvent;
 use Symfony\Component\Finder\Finder;
 
 /*
@@ -26,19 +22,10 @@ use Symfony\Component\Finder\Finder;
 | schema. Everything above this file is either framework-free (the domain) or
 | catalog-only (the schema); this is where the two meet.
 |
-| WHAT THIS FILE DELIBERATELY DOES NOT DO. It ships no outbox writer, registers
-| no projector, enqueues nothing, and reserves no idempotency receipt. The outbox
-| derivation at the bottom runs INSIDE THE TEST, from values measured off a
-| really-persisted event, because what T5 owes is proof that payment_outbox is
-| satisfiable from a real PaymentInitiated — not a production writer. T6 lifts
-| that mapping into its projector.
-|
-| SCOPE EVERY stored_events READ BY event_class. The T3/T4 spikes commit real
-| rows into this same table in ledgerflow_test and delete them in
-| SpikeDatabase::teardown(). A bare sole() would couple these tests to another
-| suite's teardown hygiene and surface a leak as a confusing "multiple records"
-| failure here. Filtering on the production alias — which no spike fixture ever
-| writes — keeps them order-independent and exactly as strict.
+| The stored alias, identity, version, durable payload and derived envelope are
+| asserted through the HTTP write path in InitiatePaymentWriteTest. This file keeps
+| what that path cannot reach: the event-sourcing configuration literals, reading
+| the event back through the serializer, aggregate replay, and the uuid guard.
 |
 */
 
@@ -47,11 +34,10 @@ use Symfony\Component\Finder\Finder;
  *
  * IT CAPTURES THE EVENT BEFORE persist(). persistWithoutApplyingToEventHandlers()
  * calls getAndClearRecordedEvents(), so getRecordedEvents() returns [] once
- * persistence returns. Capturing afterwards yields an empty array and the
- * derivation test dies on an undefined index instead of asserting anything. The
- * captured object is the same instance the repository then stamps with
- * stored-event-id, so READING it after persist() is correct; only FINDING it
- * afterwards is not.
+ * persistence returns. Capturing afterwards yields an empty array and the caller
+ * dies on an undefined index instead of asserting anything. The captured object is
+ * the same instance the repository then stamps with stored-event-id, so READING it
+ * after persist() is correct; only FINDING it afterwards is not.
  */
 function persistOnePayment(
     ?string $paymentId = null,
@@ -76,19 +62,6 @@ function persistOnePayment(
 
     return $event;
 }
-
-/** Every stored_events read in this file goes through here. */
-function t5StoredEvent(): object
-{
-    return DB::table('stored_events')->where('event_class', PaymentInitiated::ALIAS)->sole();
-}
-
-it('declares exactly one event alias and keeps handler exceptions visible', function (): void {
-    expect(config('event-sourcing.event_class_map'))
-        ->toBe([PaymentInitiated::ALIAS => PaymentInitiated::class])
-        ->and(config('event-sourcing.catch_exceptions'))->toBeFalse()
-        ->and(config('event-sourcing.enforce_event_class_map'))->toBeFalse();
-});
 
 it('pins catch_exceptions to a literal false in the application file itself', function (): void {
     // THE MERGED RUNTIME VALUE CANNOT CARRY THIS. config('…catch_exceptions') is
@@ -146,9 +119,8 @@ it('maps every production storable event, discovered rather than listed', functi
     // and never mapping it — which would silently store a fully-qualified class
     // name in stored_events.event_class and defeat the aliasing decision.
     //
-    // It scans Modules/*/app only, so the deliberately unmapped T3/T4 spike
-    // fixtures under Modules/*/tests stay invisible to it. That is exactly why
-    // enforce_event_class_map can remain false.
+    // It scans Modules/*/app only, so test-only classes under Modules/*/tests stay
+    // invisible to it.
     $discovered = [];
 
     foreach (Finder::create()->files()->name('*.php')->in(base_path('Modules'))->path('app/') as $file) {
@@ -170,43 +142,6 @@ it('maps every production storable event, discovered rather than listed', functi
     expect($discovered)->toContain(PaymentInitiated::class);
 
     expect($discovered)->toEqualCanonicalizing(array_values(config('event-sourcing.event_class_map')));
-});
-
-it('persists one stored event carrying the alias, identity and version contract', function (): void {
-    $paymentId = (string) Str::uuid7();
-
-    DB::transaction(fn () => PaymentAggregate::retrieve($paymentId)->initiate(
-        eventId: (string) Str::uuid7(),
-        paymentId: $paymentId,
-        merchantId: Merchant::factory()->create()->getKey(),
-        amountMinor: 1_250,
-        currency: 'USD',
-        occurredAt: '2026-08-14T10:11:12.123456+00:00',
-    )->persist());
-
-    $stored = t5StoredEvent();
-
-    // The alias, not the FQCN — that is what lets the namespace move later.
-    expect($stored->event_class)->toBe('payments.payment_initiated');
-    expect($stored->event_class)->not->toContain('Modules\\');
-
-    expect($stored->aggregate_uuid)->toBe($paymentId)
-        ->and((int) $stored->aggregate_version)->toBe(1)
-        ->and((int) $stored->event_version)->toBe(1);
-});
-
-it('keeps the durable payload to exactly the six business fields at full precision', function (): void {
-    // Spatie's ObjectNormalizer filters the ShouldBeStored attributes only when
-    // the child declares no property of that name. This pins the durable key set
-    // so a future property cannot widen it unnoticed, and proves microseconds
-    // survive serialisation.
-    persistOnePayment(occurredAt: '2026-08-14T10:11:12.123456+00:00');
-
-    $payload = json_decode((string) t5StoredEvent()->event_properties, true);
-
-    expect(array_keys($payload))->toEqualCanonicalizing([
-        'eventId', 'paymentId', 'merchantId', 'amountMinor', 'currency', 'occurredAt',
-    ])->and($payload['occurredAt'])->toBe('2026-08-14T10:11:12.123456+00:00');
 });
 
 it('reads the event back out of the store unchanged', function (): void {
@@ -282,70 +217,4 @@ it('refuses a paymentId that disagrees with the bound aggregate uuid', function 
         currency: 'USD',
         occurredAt: '2026-08-14T10:11:12.123456+00:00',
     ))->toThrow(InvalidPaymentInitiation::class);
-});
-
-it('derives every required outbox column from a really-persisted event', function (): void {
-    // THIS IS WHY T5 DOES NOT SHIP THE OUTBOX WRITER. The writer is step 5 of
-    // T6's atomic write. What T5 owes is proof that payment_outbox is satisfiable
-    // from a real PaymentInitiated — so the derivation runs here, in a test,
-    // against values measured off the event rather than invented by a fixture.
-    //
-    // T6 SLICE 2 REGISTERED THE PRODUCTION WRITER, so persist() now fills
-    // payment_outbox on its own and the by-hand insert below would collide on the
-    // event_id primary key. Removing the projector for the duration of this test
-    // keeps T5's claim exactly what it always was — the envelope is DERIVABLE from a
-    // bare persist() — rather than silently turning it into a second test of T6's
-    // writer, which InitiatePaymentWriteTest already covers.
-    resolve(Projectionist::class)->withoutEventHandler(PaymentOutboxWriter::class);
-
-    $event = persistOnePayment();
-    $stored = t5StoredEvent();
-    $now = CarbonImmutable::now();
-
-    DB::table('payment_outbox')->insert([
-        'event_id' => $event->eventId,
-        'event_type' => StoredEvent::getEventClass($event::class),
-        'schema_version' => $event->eventVersion(),
-        'aggregate_uuid' => $event->aggregateRootUuid(),
-        'aggregate_version' => $event->aggregateRootVersion(),
-        'payload' => $stored->event_properties,
-        'occurred_at' => $event->occurredAt,
-        'available_at' => $now,
-        'created_at' => $now,
-        'updated_at' => $now,
-    ]);
-
-    $row = DB::table('payment_outbox')->sole();
-
-    // EVERY column traced back to a real source — the event object or the stored
-    // event — never to a literal. A literal only proves the fixture matches
-    // itself; this pinned the mapping T6 later lifted into PaymentOutboxWriter.
-    //
-    // Column defaults and nullability are NOT re-asserted here: Slice 2's schema
-    // contract owns those, and duplicating them would mean two places to update.
-    expect($row->event_id)->toBe($event->eventId)
-        ->and($row->event_type)->toBe(StoredEvent::getEventClass($event::class))
-        ->and($row->event_type)->toBe($stored->event_class)
-        ->and((int) $row->schema_version)->toBe($event->eventVersion())
-        ->and($row->aggregate_uuid)->toBe($event->aggregateRootUuid())
-        ->and($row->aggregate_uuid)->toBe($stored->aggregate_uuid)
-        ->and((int) $row->aggregate_version)->toBe($event->aggregateRootVersion())
-        ->and((int) $row->aggregate_version)->toBe((int) $stored->aggregate_version);
-
-    // SEMANTIC time comparison, not a substring. PostgreSQL renders timestamptz
-    // in its own style ('2026-08-14 10:11:12.123456+00'), so parsing it back and
-    // re-formatting canonically is what proves the instant survived the round
-    // trip — and it catches a truncated microsecond, a shifted zone, or a column
-    // that was handed now() instead of the event's own time. A contains('.123456')
-    // check would pass on any of those as long as those six digits appeared
-    // somewhere.
-    expect(CarbonImmutable::parse($row->occurred_at)->utc()->format(PaymentInitiated::OCCURRED_AT_FORMAT))
-        ->toBe($event->occurredAt);
-
-    // Envelope equals stored event, compared as jsonb — exactly what M5's verifier
-    // will do. Bound to the row we captured rather than a `limit 1` subquery,
-    // which would pick an arbitrary row if a spike ever leaked one.
-    expect(DB::table('payment_outbox')
-        ->whereRaw('payload = ?::jsonb', [$stored->event_properties])
-        ->count())->toBe(1);
 });

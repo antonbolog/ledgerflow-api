@@ -182,15 +182,6 @@ beforeEach(function (): void {
     IntegrationDatabase::register();
     IntegrationDatabase::refuseIfWrapped();
     IntegrationDatabase::truncate();
-
-    DB::table('payment_projection_controls')->where('projection', 'payment_details')->update([
-        'state' => 'ready',
-        'owner_token' => null,
-        'owner_pid' => null,
-        'started_at' => null,
-        'cleared_at' => null,
-        'updated_at' => now(),
-    ]);
 });
 
 afterEach(function (): void {
@@ -200,18 +191,6 @@ afterEach(function (): void {
     IntegrationDatabase::releaseLocks();
     ProjectionGateLocks::releaseAll(IntegrationDatabase::LOCK);
     ProjectionGateLocks::releaseAll(DB::getDefaultConnection());
-
-    // UNCONDITIONAL, per every other T11 suite's own rule: a test that closes
-    // the gate and fails before reopening it must not leak `rebuilding` into a
-    // later test.
-    DB::table('payment_projection_controls')->where('projection', 'payment_details')->update([
-        'state' => 'ready',
-        'owner_token' => null,
-        'owner_pid' => null,
-        'started_at' => null,
-        'cleared_at' => null,
-        'updated_at' => now(),
-    ]);
 
     IntegrationDatabase::truncate();
     IntegrationDatabase::disconnectAll();
@@ -283,10 +262,17 @@ it('waits for a traffic-shaped shared holder, refuses on lock timeout, and clear
     // an unconditional one.
     $lock->rollBack();
 
+    // Phase 1 refused before pinning anything, so reconnection was never suppressed.
+    expect(fn () => DB::connection()->reconnect())->not->toThrow(RuntimeException::class);
+
     [$exitCode, $result] = rebuildRun();
 
     expect($exitCode)->toBe(RebuildOutcome::EXIT_DONE)
         ->and($result['outcome'])->toBe(RebuildOutcome::OUTCOME_COMPLETED);
+
+    // Suppression lasts for the run only, so a completed run leaves a usable reconnector.
+    expect(fn () => DB::connection()->reconnect())->not->toThrow(RuntimeException::class);
+    expect(DB::connection()->selectOne('select 1 as ok')?->ok)->toEqual(1);
 });
 
 it('refuses inside an already-open transaction, matching the verifier and repair guard', function (): void {
@@ -540,6 +526,9 @@ it('checkpoint 2: a takeover between batches is caught by the token check, and t
     // never reached.
     expect(rebuildReadRow($first['payment_id']))->not->toBeNull()
         ->and(rebuildReadRow($second['payment_id']))->toBeNull();
+
+    // The same `finally` that restores reconnection after a completed run covers an aborted one.
+    expect(fn () => DB::connection()->reconnect())->not->toThrow(RuntimeException::class);
 });
 
 it('checkpoint 3: ownership lost before the ready transition never reopens the gate', function (): void {
@@ -767,89 +756,6 @@ it('reports a completed rebuild whose own completion record failed, never as a d
 
     // The lock was released here too - the SAME `finally` covers this exit.
     expect(rebuildLockHeld())->toBeFalse();
-    expect(fn () => DB::connection()->reconnect())->not->toThrow(RuntimeException::class);
-});
-
-/*
-|--------------------------------------------------------------------------
-| Reconnection suppression (F3) — for the DURATION of the run, and no longer
-|--------------------------------------------------------------------------
-|
-| "For the duration of this run" is a claim about the START and the END of
-| suppression, not only the start. The `checkpoint 2: a pinned session
-| terminated between batches...` test above already proves it is genuinely
-| ACTIVE mid-run: a killed backend surfaces as an immediate failure rather than
-| a silent reconnect. The tests below prove the other half - that it does not
-| outlive the run - on every family of exit: refused, completed, and aborted.
-|
-*/
-
-it('restores the original reconnector after a run refused on the lock', function (): void {
-    $lock = DB::connection(IntegrationDatabase::LOCK);
-    $lock->beginTransaction();
-    new ProjectionGate($lock)->inspectPaymentDetails();
-
-    rebuildWithConfig(lockTimeoutMs: 300);
-
-    [$exitCode, $result] = rebuildRun();
-
-    $lock->rollBack();
-
-    expect($exitCode)->toBe(RebuildOutcome::EXIT_REFUSED)
-        ->and($result['reason'])->toBe(RebuildReason::LockTimeout->value);
-
-    // NOT DISABLED: this run never reached the point of pinning anything
-    // (phase 1 itself refused), so the reconnector must already be exactly
-    // what it was before rebuild() was ever called.
-    expect(fn () => DB::connection()->reconnect())->not->toThrow(RuntimeException::class);
-});
-
-it('restores the original reconnector after a completed run', function (): void {
-    rebuildSeed();
-
-    [$exitCode] = rebuildRun();
-    expect($exitCode)->toBe(RebuildOutcome::EXIT_DONE);
-
-    // NOT DISABLED ANYMORE: the run has ended, so a genuine reconnect must
-    // behave normally again rather than throwing DatabaseProjectionRebuild's
-    // own message - "for the duration of the run" has to mean something, or
-    // every later use of this shared connection in the same PHP process
-    // would be silently broken by a rebuild that ran earlier.
-    expect(fn () => DB::connection()->reconnect())->not->toThrow(RuntimeException::class);
-
-    // And the restored connection is genuinely usable, not merely non-throwing.
-    expect(DB::connection()->selectOne('select 1 as ok')?->ok)->toEqual(1);
-});
-
-it('restores the original reconnector after an aborted run', function (): void {
-    rebuildSeed();
-    rebuildSeed();
-
-    rebuildWithConfig(batchSize: 1);
-
-    $commits = 0;
-    Event::listen(TransactionCommitted::class, function () use (&$commits): void {
-        $commits++;
-
-        if ($commits !== 3) {
-            return;
-        }
-
-        DB::connection(IntegrationDatabase::LOCK)
-            ->table('payment_projection_controls')
-            ->where('projection', 'payment_details')
-            ->update(['owner_token' => (string) Str::uuid7(), 'updated_at' => now()]);
-    });
-
-    [$exitCode, $result] = rebuildRun();
-
-    Event::forget(TransactionCommitted::class);
-
-    expect($exitCode)->toBe(RebuildOutcome::EXIT_FAILED)
-        ->and($result['reason'])->toBe(RebuildReason::OwnershipLost->value);
-
-    // NOT DISABLED: an aborted run restores it exactly as a completed one
-    // does - the SAME `finally` in rebuild() covers both.
     expect(fn () => DB::connection()->reconnect())->not->toThrow(RuntimeException::class);
 });
 
