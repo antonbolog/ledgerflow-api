@@ -3,7 +3,7 @@
 # This Makefile is the sole interface for three categories of work:
 #
 #   environment lifecycle   install  start  stop  destroy
-#   database lifecycle      db-migrate  db-seed  db-reset
+#   database lifecycle      db-migrate  db-seed
 #   projection runtime      projection-start  projection-stop
 #   validation              quality  test-unit  test-integration  test  check  ci
 #   images                  build-runtime  build-nginx
@@ -39,17 +39,15 @@ DEV_DB  := ledgerflow
 TEST_DB := ledgerflow_test
 
 # ---------------------------------------------------------------------------
-# assert_local_db — refuse to mutate anything that is not a local project
-# database.
+# assert_local_db - refuse to mutate anything that is not the local project
+# development database.
 #
 # Resolves the EFFECTIVE target the way Laravel does, with DB_URL taking
-# precedence over DB_HOST/DB_DATABASE, then requires both:
+# precedence over DB_HOST/DB_DATABASE, then requires all of:
 #
-#   host     in the compose-local set
-#   database exactly equal to the expected role for this target
-#
-# Exact role mapping, not set membership: a .env that swaps the development and
-# test names, or points both at the same database, is refused too.
+#   connection  pgsql
+#   host        the compose `postgres` service
+#   database    exactly the expected name
 #
 # It runs through `exec`, in the SAME running container the Artisan command will
 # use, and never through `run`. That distinction is the whole guarantee: `run`
@@ -59,14 +57,11 @@ TEST_DB := ledgerflow_test
 # after the stack started would let the guard approve a target the migration
 # never actually uses. Both halves must observe one environment.
 #
-# The same $(2) options are passed to the guard and to the mutation, so the test
-# database override is checked exactly as it is applied.
-#
 #   $(1) expected database name
-#   $(2) extra docker options (e.g. -e DB_DATABASE=... for the test target)
 # ---------------------------------------------------------------------------
 define assert_local_db
-	@$(EXEC) $(2) app php -r '\
+	@$(EXEC) app php -r '\
+	  $$connection = getenv("DB_CONNECTION") ?: ""; \
 	  $$url = getenv("DB_URL") ?: ""; \
 	  if ($$url !== "") { \
 	    $$parts = parse_url($$url); \
@@ -78,14 +73,12 @@ define assert_local_db
 	    $$db = getenv("DB_DATABASE") ?: ""; \
 	    $$via = "DB_HOST/DB_DATABASE"; \
 	  } \
-	  $$allowedHosts = ["postgres", "127.0.0.1", "localhost", "::1"]; \
 	  $$expected = "$(1)"; \
-	  if (!in_array($$host, $$allowedHosts, true) || $$db !== $$expected) { \
-	    fwrite(STDERR, "REFUSING: this target may only touch local project databases.\n"); \
-	    fwrite(STDERR, "  resolved via $$via: host=$$host database=$$db\n"); \
-	    fwrite(STDERR, "  allowed host:      " . implode(", ", $$allowedHosts) . "\n"); \
-	    fwrite(STDERR, "  expected database: $$expected\n"); \
-	    fwrite(STDERR, "  Fix DB_URL / DB_HOST / DB_DATABASE in .env, or run this against the right target.\n"); \
+	  if ($$connection !== "pgsql" || $$host !== "postgres" || $$db !== $$expected) { \
+	    fwrite(STDERR, "REFUSING: this target may only touch the local project database.\n"); \
+	    fwrite(STDERR, "  resolved via $$via: connection=$$connection host=$$host database=$$db\n"); \
+	    fwrite(STDERR, "  required: connection=pgsql host=postgres database=$$expected\n"); \
+	    fwrite(STDERR, "  Fix DB_CONNECTION / DB_URL / DB_HOST / DB_DATABASE in .env, then run make start.\n"); \
 	    exit(1); \
 	  } \
 	  fwrite(STDOUT, "  target ok: $$host/$$db\n"); \
@@ -104,7 +97,6 @@ help: ## Show the public command surface
 	@echo ""
 	@echo "Destructive targets require explicit confirmation:"
 	@echo "  make destroy      CONFIRM=destroy"
-	@echo "  make db-reset     CONFIRM=db-reset"
 	@echo "  make demo-corrupt PAYMENT_ID=<uuid> CONFIRM=corrupt-projection"
 
 # ---------------------------------------------------------------------------
@@ -222,7 +214,7 @@ export DEMO_CONFIRM    := $(CONFIRM)
 
 .PHONY: demo-guard
 demo-guard:
-	$(call assert_local_db,$(DEV_DB),)
+	$(call assert_local_db,$(DEV_DB))
 
 # Stdout carries the token and nothing else, so `TOKEN=$$(make demo-token)` works.
 .PHONY: demo-token
@@ -320,7 +312,7 @@ db-ensure-test: ## Create the test database if it is missing
 .PHONY: db-migrate
 db-migrate: ## Apply migrations to the development database
 	@echo "==> migrating $(DEV_DB)"
-	$(call assert_local_db,$(DEV_DB),)
+	$(call assert_local_db,$(DEV_DB))
 	$(EXEC) app php artisan migrate --force
 
 # The seeder is deterministic and repeatable; tests own collision and rollback
@@ -328,28 +320,8 @@ db-migrate: ## Apply migrations to the development database
 .PHONY: db-seed
 db-seed: ## Run the deterministic development seeders
 	@echo "==> seeding $(DEV_DB)"
-	$(call assert_local_db,$(DEV_DB),)
+	$(call assert_local_db,$(DEV_DB))
 	$(EXEC) app php artisan db:seed --force
-
-.PHONY: db-reset
-db-reset: ## Drop and rebuild local and test data (CONFIRM=db-reset)
-	@echo "==> db-reset would rebuild, from scratch:"
-	@echo "      host:      postgres (compose service)"
-	@echo "      databases: $(DEV_DB), $(TEST_DB)"
-	@if [ "$(CONFIRM)" != "db-reset" ]; then \
-	  echo "REFUSING: db-reset drops every table in the databases listed above."; \
-	  echo "  It cannot touch any other database, and it cannot touch files."; \
-	  echo "  Re-run with: make db-reset CONFIRM=db-reset"; \
-	  exit 1; \
-	fi
-	@$(MAKE) --no-print-directory db-ensure-test
-	@echo "==> resetting $(DEV_DB)"
-	$(call assert_local_db,$(DEV_DB),)
-	$(EXEC) app php artisan migrate:fresh --force
-	@echo "==> resetting $(TEST_DB)"
-	$(call assert_local_db,$(TEST_DB),-e DB_DATABASE=$(TEST_DB))
-	$(EXEC) -e DB_DATABASE=$(TEST_DB) app php artisan migrate:fresh --force
-	@$(MAKE) --no-print-directory db-seed
 
 # ---------------------------------------------------------------------------
 # Validation

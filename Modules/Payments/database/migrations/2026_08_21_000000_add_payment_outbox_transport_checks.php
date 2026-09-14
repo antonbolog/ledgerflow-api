@@ -10,7 +10,7 @@ use Illuminate\Support\Facades\DB;
  *
  * A FORWARD MIGRATION, NOT AN EDIT TO 2026_08_14_000300. That migration is merged
  * and has already run against both ledgerflow and ledgerflow_test. Editing it would
- * take effect only after a destructive db-reset and would leave an applied
+ * take effect only after destroying the database and would leave an applied
  * migration disagreeing with the history that records it as applied.
  *
  * WHY A CHECK AT ALL, WHEN THE RELAY CANNOT PRODUCE A NEGATIVE. The relay writes
