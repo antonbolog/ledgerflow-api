@@ -46,8 +46,13 @@ Requires Docker with Compose v2, GNU Make, and Git. No host PHP or Composer is r
 
 ```bash
 make install   # build, install dependencies, start services, migrate
-make check     # instruction parity + Composer + Pint + Rector + PHPStan + Pest
+make check     # Composer + Pint + Rector + PHPStan + Pest
 ```
+
+CI runs dependency setup, quality, unit tests, integration tests (including Feature and
+Architecture), and separate production runtime and Nginx image builds.
+See the [CI contract](docs/specifications/foundation/development-environment.md#ci-contract) for
+commands and evidence boundaries.
 
 The API is available at <http://127.0.0.1:8080> (loopback only). `GET /up` is the health endpoint;
 `POST /api/payments` requires a Sanctum bearer token and an `Idempotency-Key` header, and

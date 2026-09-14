@@ -200,8 +200,8 @@ The target refuses, without deleting anything, if you omit `PAYMENT_ID`, pass so
 canonical UUID, omit the typed `CONFIRM`, or name a payment that does not have exactly one projection
 row. It only ever touches the allowlisted local `ledgerflow` database.
 
-It is local development tooling. No validation target ever deletes a row through it: `make check`
-never invokes it, and `ci-contract` exercises only its refusals.
+It is local development tooling.
+Neither `make check` nor `make ci` invokes it or exercises its shell refusals.
 
 Read the payment again: it answers `202 projection_pending`, because the idempotency receipt outlived
 the deleted read row.
@@ -243,10 +243,9 @@ answer `503 projection_rebuilding` with `Retry-After: 1`, and the relay and cons
 consuming any delivery or failure budget.
 
 **You will almost certainly not observe that `503` by hand here.** On this dataset the rebuild
-committed in 36 ms. The gate's behaviour under a real, slow, interrupted rebuild is proved instead by
-`ProjectionRebuildTest` and by `make resilience-contract`, which holds a real rebuild process at the
-destructive clear with a lock barrier and `SIGKILL`s it; see
-[process-level resilience](../testing/payments-resilience.md#process-level-resilience).
+committed in 36 ms during the recorded demo.
+`ProjectionRebuildTest` covers the gate with database barriers and failure injection in the current Pest suite.
+The real-process kill rehearsal is [historical evidence](../testing/payments-resilience.md#process-level-resilience), retired from CI by ANT-18.
 
 ### 9. Verify healthy
 
@@ -305,9 +304,9 @@ A malformed identifier gets the same answer for the same reason.
   assertion, which cannot be honestly compressed into a timed demo. Follow
   [manual verification and targeted repair](runtime-contract.md#manual-verification-and-targeted-repair)
   instead.
-- Automated proof of these paths belongs to `make resilience-contract` and `make projection-contract`,
-  which run real processes under real signals inside disposable Compose projects as part of
-  `make ci`. This guide is the human-readable restatement, not the evidence.
+- This guide remains a manual demonstration.
+  Current CI runs Pest evidence for the component contracts and does not execute the process outage or signal scenarios.
+  Earlier process rehearsal results are recorded as historical evidence in the resilience test plan.
 
 ## Related
 

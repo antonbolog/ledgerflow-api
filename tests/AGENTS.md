@@ -22,5 +22,6 @@ inherit their module's scoped instructions instead.
   architecture rule is the behavior under test.
 - Do not weaken existing boundary, isolation, or mutation probes to make a change pass.
 
-Run tests through `make test` or the full `make check` contract; do not invent another suite entry
-point.
+Run tests through `make test`, `make test-unit`, `make test-integration`, or the full `make check`
+contract.
+The split CI commands must retain all four suites declared in `phpunit.xml`.

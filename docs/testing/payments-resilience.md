@@ -65,9 +65,9 @@ commands before the scaffold exists.
 **Evidence ownership, delivered by T8.** T8 owns the duplicate-delivery,
 marker-repair, poison-exhaustion, and operator-retry evidence in this section and in the
 confirmed-handler-failure bullets under **Outbox relay**, and proves rollback and redelivery through
-a deterministic integration failpoint plus a real Horizon stop / backlog / restart smoke. Transport
-failure never consumes projection failure budget: only confirmed handler failures count toward
-exhaustion. The full barrier-coordinated SIGTERM/SIGKILL multi-process suite stays with T12.
+a deterministic integration failpoint.
+The live Horizon stop/backlog/restart smoke and T12 signal matrix are historical evidence retired from CI by ANT-18.
+Transport failure never consumes projection failure budget: only confirmed handler failures count toward exhaustion.
 
 ## Query payment
 
@@ -169,7 +169,7 @@ command issued through `EXPLAIN`. Plan evidence is a claim about plan shape and 
 at fixture volume, not about speed or production scale; the repair lookup's cost is additionally
 measured at 22k and 200k canonical rows and recorded in
 [verification and rebuild](../specifications/payments/verification-and-rebuild.md). T11 delivers the rebuild group, while the
-barrier-coordinated SIGTERM/SIGKILL process suite stays T12's, per **Failure injection** below.
+barrier-coordinated SIGTERM/SIGKILL process suite is historical T12 evidence, retired in ANT-18.
 The [T10 evidence table](../specifications/payments/verification-and-rebuild.md#t10-implementation-evidence) maps these contracts to the actual tests and states the limits of their claims.
 Final review additionally covers nil-UUID reverse cursors, combined transaction/audit failures, explicit repair isolation, invalid invocation/configuration, and refusal to borrow an outer transaction.
 A green suite on small fixtures is not a scale claim; any index justified by later measurements remains a separate forward-migration decision.
@@ -182,32 +182,30 @@ A green suite on small fixtures is not a scale claim; any index justified by lat
 4. Corrupt `PaymentDetails` -> verifier fails -> controlled rebuild -> verifier passes.
 5. Corrupt one outbox envelope -> verifier fails -> targeted repair -> delivery converges.
 
-Paths 1-4 are exercised end to end by `make resilience-contract` (see **Process-level resilience**).
+Paths 1-4 were exercised end to end by the retired T12 process rehearsal (see **Process-level resilience**).
+Current CI retains component coverage through the unchanged Pest suites, without executing these complete process scenarios.
 Path 5 - targeted outbox repair - stays with the T10 integration suite.
 
 ## Failure injection
 
 - Integration tests inject failures at named persistence and delivery checkpoints.
 - A real transport push followed by an injected exception proves the publish-before-commit path.
-- Process tests use synchronization barriers, then SIGTERM/SIGKILL real relay, consumer, and rebuild
-  processes. Arbitrary sleeps are not accepted as coordination. **Delivered by
-  `make resilience-contract`** - see **Process-level resilience** below. T8's crash evidence stays
-  the deterministic failpoint and live Horizon restart smoke named under **Projection consumer**.
+- Historical process tests used synchronization barriers before signalling real relay, consumer, and rebuild processes.
+  ANT-18 removed those scripts and their CI execution; deterministic in-process failpoints remain.
 - Production logic contains no environment-conditioned fault flags.
 
 ## Process-level resilience
 
-`make resilience-contract` is T12's process half. It runs a disposable, isolated Compose project
-(`ledgerflow-resilience-contract`) with its own PostgreSQL, Redis, nginx and PHP-FPM, a bounded work
-deadline, failure diagnostics, and a mandatory scoped teardown whose own failure fails the contract,
-and it is part of `make ci`. It
-proves only what an in-process test cannot - a real `php artisan` process signalled mid-transaction,
-with `SIGKILL` and with `SIGTERM` - and names its boundary against the integration evidence rather
-than repeating it.
+**Historical evidence, retired by ANT-18.**
+The following table records the T12 process rehearsal delivered in commit `2521f80` and its subsequent refinements before ANT-18.
+The shell harness and both disposable Compose contracts have been removed.
+None of these process-level observations is a current executable CI claim.
+Current CI runs the unchanged Pest suites, including real PostgreSQL/Redis integration, and builds the production runtime and Nginx images.
+The present-tense descriptions in this historical table describe the old acceptance criteria and mechanisms.
 
 | Acceptance criterion (ANT-14) | Evidence | Boundary of the claim |
 |---|---|---|
-| Critical `POST -> outbox -> Redis -> consumer -> GET` passes | Real bearer token, real `POST` (`202`), a one-shot relay pass, the Horizon consumer, real `GET` (`202 -> 200` with the exact projected fields). | One payment through the real HTTP endpoints and the real transport, not a load or cadence claim - `make projection-contract` owns the live per-second scheduler. |
+| Critical `POST -> outbox -> Redis -> consumer -> GET` passes | Real bearer token, real `POST` (`202`), a one-shot relay pass, the Horizon consumer, real `GET` (`202 -> 200` with the exact projected fields). | One payment through the real HTTP endpoints and the real transport, not a load or cadence claim - the retired T8 projection rehearsal covered the live per-second scheduler. |
 | Redis outage/recovery converges pending -> projected | `compose stop redis`; `POST` still commits; the relay cannot publish and consumes no transport or poison budget; `GET` is `202`. `compose start redis`; the relay republishes; `GET` is `200`. | A real transport-daemon outage, not an injected `RedisException`. |
 | Concurrent identical `POST` produces one logical payment | A `SHARE`-lock barrier on `stored_events` admits the first request's idempotency reservation and blocks its stored-event insert; the second identical request is then launched and observed through `pg_blocking_pids()` to be blocked by the first request's own backend, on that uncommitted reservation. Only then is the barrier released -> both answer successfully with one `payment_id`, one stored event, one receipt, one outbox envelope. | Complements T6's PostgreSQL-arbitration evidence with two real request processes whose write transactions provably overlap. Backgrounding two clients would not: the same assertions hold for a sequential replay, so the overlap is constructed and observed rather than assumed. |
 | Publish-before-commit is deterministic | A `SHARE`-lock barrier on `payment_outbox`; a real relay process; a real Redis `push()`; `SIGKILL` while the relay is blocked on its post-push acceptance `UPDATE` -> the envelope rolls back to eligible and a later pass converges to exactly one read row and one receipt. | The kill is gated on an observed `pg_stat_activity` lock wait; no sleep. `OutboxRelayTest` owns the same boundary in-process. |
@@ -220,7 +218,7 @@ than repeating it.
 | Teardown leaves no orphan process or corrupted fixture | The `EXIT` trap force-removes the named crash containers that still exist, runs `down --volumes --remove-orphans`, and removes the fixture directory; the suite then asserts no crash container survived and the scheduler is not running. | Scoped to the disposable project; it never touches the development database. |
 | A failed teardown cannot be reported as a pass | Teardown is mandatory, so each stage is attempted even after an earlier one fails, stays bounded, and records its own failure. A suite that passed but left a crash container, a Compose service, a volume or its fixture behind exits non-zero; a suite that already failed keeps its first cause. Diagnostics run best-effort and never skip the teardown they precede. | The exit status of the teardown commands, not an inventory of the Docker host. |
 
-Two documented operational dials are set for single spawned processes so a `SIGKILL` lands inside the
+The historical process rehearsal set two documented operational dials for single spawned processes so a `SIGKILL` landed inside the
 intended window: the relay's `statement_timeout` for the relay-crash step and the rebuild's
 `batch_size` for the rebuild-crash step. Production code branches on neither.
 

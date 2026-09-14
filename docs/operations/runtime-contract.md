@@ -51,8 +51,8 @@ Three `demo-` Make targets support [the five-minute demo](five-minute-demo.md): 
 Sanctum token for a seeded fixture identity, `demo-status` shows relay and Horizon state read-only,
 and `demo-corrupt` deletes one named `payment_details` row behind a typed confirmation and the local
 database allowlist. They are local development tooling. No validation target performs their effect:
-`make check` never invokes them, and `ci-contract` asserts only that their guards refuse, alongside
-the `destroy` and `db-reset` guards it already covers.
+`make check` and `make ci` never invoke them.
+Their shell refusal paths are not exercised by current CI.
 
 **Scheduler/relay, as implemented by T7.** `Schedule::command('payments:outbox:relay')->everySecond()`
 in root `routes/console.php`, run by `php artisan schedule:work`. `payments:outbox:status` is the
@@ -85,45 +85,10 @@ registered, `1` when every master is paused - so a dead or paused supervisor fai
 its container is still alive. Its `stop_grace_period` is 20s, above the 15-second worker timeout, so
 SIGTERM lets an in-flight projection finish rather than being SIGKILLed mid-transaction.
 
-`make projection-contract` proves the pair end to end in a disposable Compose project with its own
-PostgreSQL and Redis volumes, reusing the already-built development image and never touching the
-development stack.
-
-**Its 180-second deadline bounds the contract's WORK, not the whole wall clock.** Every external
-command - not merely each step - runs under a budget of whatever is left of that deadline, so no
-single hung `docker compose exec`, `psql`, or `artisan` can outlive it; the polling loops keep their
-own attempt limits on top. Guaranteed scoped cleanup takes precedence over a flat wall-clock cap, so
-once the work stops the obligatory teardown adds a **separately bounded tail**: at most four
-10-second diagnostics plus one 60-second `down --volumes`. Total wall clock on a terminated run is
-therefore the work deadline plus that bounded tail, never unbounded.
-
-**Teardown is mandatory, so a teardown failure is a contract failure.** Every stage is attempted even
-after an earlier one fails and each stays bounded; a run whose work passed but whose teardown left a
-crash container, a Compose service, a volume or its fixture directory behind exits non-zero, while a
-run that already failed keeps its first cause. Diagnostics are best-effort and never skip the
-teardown they precede.
-
-`PROJECTION_CONTRACT_DEADLINE_SECONDS` may shorten the work deadline but never lengthen it past 180;
-a non-numeric or out-of-range value falls back to 180. `PROJECTION_CONTRACT_SELF_TEST=1` runs one
-deliberate hang before anything is created, which is how the enforcement itself is evidenced without
-waiting out the full budget.
-
-The contract prints expanded diagnostics only on failure, tears the project down on every exit
-including the deadline path, and runs as part of `make ci`. It proves paired startup, a backlog while the consumer is stopped that consumes no poison
-budget, restart convergence, duplicate delivery converging to one receipt and one read row, and that
-the paired stop reaches both processes.
-
-`make resilience-contract` proves the process half of the Payments resilience plan in a second
-disposable Compose project built on the shared `scripts/ci/lib/contract.sh` harness - bounded work
-deadline, scoped teardown, failure-only diagnostics, `RESILIENCE_CONTRACT_SELF_TEST=1` hang - and
-also runs as part of `make ci`.
-It drives the critical `POST -> GET` HTTP path, a real Redis-daemon outage and recovery, two identical
-`POST`s held in overlapping write transactions, barrier-coordinated `SIGKILL` of the real relay,
-consumer and rebuild processes, and a `SIGTERM` of a real worker from the same barrier position that
-must commit its projection and exit by itself. Each signal is gated on an observed PostgreSQL lock
-wait or control-row state rather than a timer, and the concurrent `POST` is released only after
-`pg_blocking_pids()` names the first request's backend as the second's blocker. Its claim boundaries against the integration evidence live in the
-[resilience test plan](../testing/payments-resilience.md#process-level-resilience).
+CI runs quality, all existing Pest suites, and separate runtime and Nginx image builds after dependency setup.
+It no longer starts disposable projects to rehearse paired lifecycle, Redis outages, or operating-system signals.
+The retired process checks are retained as [historical resilience evidence](../testing/payments-resilience.md#process-level-resilience).
+The paired local runtime commands and their configuration remain available for manual operation.
 
 That consumer gets **one Horizon execution per published job**; outbox reconciliation, not Horizon,
 owns republication after grace. Accepted starting values: one process, a 15-second Horizon worker
@@ -269,7 +234,8 @@ The gate remains closed after an aborted destructive run until a successful repl
 `PAYMENTS_REBUILD_BATCH_SIZE` defaults to 500 (1-1000); `PAYMENTS_REBUILD_LOCK_TIMEOUT_MS` and `PAYMENTS_REBUILD_STATEMENT_TIMEOUT_MS` each default to 5000 (1-600000), through `config/payments.php`.
 Final JSON and completion/abort logs report `high_watermark`, `events_replayed`, and `batches_committed` as far as confirmed; they are not live per-batch telemetry or proof about an unacknowledged commit.
 `guarded_recovery` indicates path selection and can also be true on a failed recovery attempt.
-`make resilience-contract` additionally kills a real `payments:projections:rebuild` process with `SIGKILL` while it holds the `rebuilding` state, and proves the gate stays closed, defers traffic without budget, and reopens after an authorized recovery run.
+The retired T12 process rehearsal also killed a real rebuild process while the gate was closed.
+That result is historical evidence; current CI covers rebuild invariants through the existing in-process Pest suites.
 No production-scale SLA, throughput figure, zero-downtime behavior, exhaustive kill matrix, or real-incident runbook rehearsal is claimed.
 See the [T11 evidence table](../specifications/payments/verification-and-rebuild.md#t11-implementation-evidence).
 

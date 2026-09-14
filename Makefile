@@ -5,7 +5,8 @@
 #   environment lifecycle   install  start  stop  destroy
 #   database lifecycle      db-migrate  db-seed  db-reset
 #   projection runtime      projection-start  projection-stop
-#   validation              agent-check  quality  test  check  projection-contract  resilience-contract  ci
+#   validation              quality  test-unit  test-integration  test  check  ci
+#   images                  build-runtime  build-nginx
 #
 # CI derives all validation from these targets. Ad-hoc `artisan`, `tinker` and
 # `psql` access is ordinary developer work and is not a violation of that rule.
@@ -353,25 +354,14 @@ db-reset: ## Drop and rebuild local and test data (CONFIRM=db-reset)
 # ---------------------------------------------------------------------------
 # Validation
 #
-# `check` is the normal local validation entry point. `ci` is the full
-# CI-equivalent contract after `install`: it adds destructive-guard assertions,
-# development-database isolation evidence, and production/web image builds.
-#
 # Non-destructive by contract: `quality` only reads files, and `test` mutates
-# exactly one thing — the isolated ledgerflow_test database, which the suite
+# exactly one thing - the isolated ledgerflow_test database, which the suite
 # truncates and re-migrates by design. Neither touches source files or the
 # development database.
 #
 # Both run from a stopped stack. `quality` needs no services at all; `test`
 # starts postgres and redis itself and leaves them running.
 # ---------------------------------------------------------------------------
-
-# The agent instruction check runs on the host because Git is part of the
-# documented prerequisites and the adapters must be inspectable before a
-# container starts.
-.PHONY: agent-check
-agent-check: ## Verify canonical and path-scoped agent instruction parity
-	@./scripts/verify-agent-instructions.sh
 
 # Every PHP tool here only reads files, so this runs in a throwaway container
 # with no service dependencies and works with the stack stopped. All four run in ONE
@@ -383,7 +373,7 @@ agent-check: ## Verify canonical and path-scoped agent instruction parity
 # the skeleton was a separate, deliberate act, not something a validation
 # target performs.
 .PHONY: quality
-quality: agent-check ## Run instruction, formatting, refactoring and static analysis checks (read-only)
+quality: ## Run Composer, formatting, refactoring and static analysis checks (read-only)
 	@echo "==> quality (read-only: no file is modified)"
 	$(RUN) sh -c '\
 	  composer validate --strict && \
@@ -417,22 +407,28 @@ check: ## Run normal local validation: quality then test
 	$(MAKE) --no-print-directory quality
 	$(MAKE) --no-print-directory test
 
-.PHONY: ci-contract
-ci-contract: ## Assert Make guards and development-database isolation around one check
-	@./scripts/ci/assert-contracts.sh
+.PHONY: test-unit
+test-unit: ## Run the Unit suite without starting database services
+	$(RUN) vendor/bin/pest --testsuite=Unit --colors=always
 
-.PHONY: image-contract
-image-contract: ## Build the production and web image targets
+.PHONY: test-integration
+test-integration: ## Run Integration, Feature and Architecture suites against the test database
+	$(DC) up -d --wait postgres redis
+	$(MAKE) --no-print-directory db-ensure-test
+	$(RUN_DB) vendor/bin/pest --testsuite=Integration,Feature,Architecture --colors=always
+
+.PHONY: build-runtime
+build-runtime: ## Build the Laravel production runtime image without publishing
 	docker build --target production -t ledgerflow-api:ci .
+
+.PHONY: build-nginx
+build-nginx: ## Build the Laravel Nginx image without publishing
 	docker build --target web -t ledgerflow-web:ci .
 
-.PHONY: projection-contract
-projection-contract: ## Prove the scheduler+Horizon pair end to end in a disposable Compose project
-	@./scripts/ci/projection-contract.sh
-
-.PHONY: resilience-contract
-resilience-contract: ## Prove Payments resilience with real OS-process SIGKILL in a disposable Compose project
-	@./scripts/ci/resilience-contract.sh
-
 .PHONY: ci
-ci: ci-contract projection-contract resilience-contract image-contract ## Run the full CI-equivalent contract after install
+ci: ## Run quality, unit, integration and both image builds after install
+	$(MAKE) --no-print-directory quality
+	$(MAKE) --no-print-directory test-unit
+	$(MAKE) --no-print-directory test-integration
+	$(MAKE) --no-print-directory build-runtime
+	$(MAKE) --no-print-directory build-nginx

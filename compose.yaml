@@ -61,12 +61,6 @@ services:
       start_period: 20s
 
   app:
-    # A STABLE TAG, so the image is addressable by name rather than by project.
-    # Compose's default is `<project>-<service>`, which means a disposable project
-    # would build its own copy of an image that already exists. Naming it here
-    # makes `projection-contract` able to reuse the development build instead of
-    # spending minutes rebuilding it, and changes nothing for the default project:
-    # the name is exactly what Compose already produced.
     image: ${LEDGERFLOW_APP_IMAGE:-ledgerflow-app:latest}
     build:
       context: .

@@ -37,12 +37,19 @@ fence, guarded recovery, takeover, T10 verify/repair participation, and operator
 implemented under [ADR 0005](adr/0005-payments-projection-gate-and-rebuild-ownership.md).
 The final continuous `make ci` checkpoint passed before shipping.
 **T12 is complete and shipped** in pull request #13, merged to `main` as `2521f80`:
-`make resilience-contract` proves the process half against real services, and its evidence and claim
+The now-retired T12 process rehearsal proved the process half against real services, and its evidence and claim
 boundaries live in the
 [resilience test plan](testing/payments-resilience.md#process-level-resilience).
 **T13 is complete and shipped** in pull request #15, merged to `main` as `051bf08`, closing M5:
 the [five-minute demo](operations/five-minute-demo.md) and
 [`docs/api/openapi.json`](api/openapi.json) are published through project-defined commands.
+
+ANT-18 retires the shell CI harness and process rehearsals while retaining the implemented
+application and all Pest suites.
+References below to removed commands describe historical milestone evidence, not the current CI
+contract.
+The current stages and commands are defined in the
+[development environment](specifications/foundation/development-environment.md#ci-contract).
 
 ## Outcome
 
@@ -159,14 +166,14 @@ Complete the asynchronous tracer bullet on Redis/Horizon.
   15-second worker timeout, ordered strictly below the 90-second reservation and above the new
   2-second projection-local `statement_timeout`; and paired scheduler+Horizon activation after
   migrations through `make projection-start`/`make projection-stop`, proved end to end by
-  `make projection-contract`. Ten production types, one forward migration, one new Composer
+  the retired T8 projection rehearsal. Ten production types, one forward migration, one new Composer
   dependency. Evidence in
   [projection and query](specifications/payments/projection-and-query.md#implementation-evidence).
   **No shared projection gate was added**: T11 keeps the reciprocal obligation recorded in
   [verification and rebuild](specifications/payments/verification-and-rebuild.md#t8s-reciprocal-obligation-discharged-by-t11-slice-2).
-  T8's crash evidence is a deterministic in-process commit-boundary failpoint plus a live Horizon
-  stop/backlog/restart smoke; literal SIGTERM/SIGKILL process suites stay
-  [T12's](testing/payments-resilience.md).
+  T8's crash evidence includes a deterministic in-process commit-boundary failpoint.
+  Its live Horizon stop/backlog/restart smoke and T12's literal SIGTERM/SIGKILL process suite are
+  historical evidence retired from CI by ANT-18.
 - T9 — **Complete.** Authenticated `GET /api/payments/{paymentId}`, merchant-scoped through
   `MerchantContext`: an owned `payment_details` row returns `200` with exactly `payment_id`,
   `amount_minor`, `currency`, `status` and `initiated_at`; an owned idempotency receipt without a
@@ -225,13 +232,12 @@ Detect and repair derived-state corruption while keeping partial rebuilds invisi
   The integration half was delivered across T6-T11: transaction-lifecycle failpoints, a real Redis
   push followed by an injected commit-boundary exception, `pg_locks` barriers, and backend
   termination.
-  The process half is `make resilience-contract` - a disposable isolated Compose project that drives
+  The historical process half used a disposable isolated Compose project that drove
   the critical HTTP path, a real Redis outage, two identical `POST`s held in overlapping write
   transactions, `SIGKILL` of the real
   relay, consumer and rebuild processes, and `SIGTERM` of a real worker that must commit its
-  projection and exit by itself - all under synchronization barriers, wired into `make ci`.
-  Both disposable-project contracts share one bounded-deadline, scoped-teardown harness,
-  `scripts/ci/lib/contract.sh`; `projection-contract` moved onto it in the same change.
+  projection and exit by itself - all under synchronization barriers, wired into the pre-ANT-18 CI.
+  Both disposable-project contracts shared one bounded-deadline, scoped-teardown harness, removed by ANT-18.
   Post-merge review closed two evidence gaps: the concurrent `POST` is now barrier-coordinated and
   proves genuine transaction overlap, and a failed mandatory teardown can no longer be reported as a
   passing contract.
@@ -251,11 +257,10 @@ Detect and repair derived-state corruption while keeping partial rebuilds invisi
   carried by the README, the documentation index, the payments flow and the ADR index are corrected.
   No production behavior, dependency, migration, or process was added.
 
-Exit: the complete [resilience test plan](testing/payments-resilience.md) passes through
-project-defined commands; the README demo works from a clean checkout.
+At M5 shipment, the complete [resilience test plan](testing/payments-resilience.md) passed through
+the then-current project-defined commands, and the README demo worked from a clean checkout.
 
-**M5 exit satisfied.** T12 carries the resilience half through `make resilience-contract` inside
-`make ci`, with its evidence and claim boundaries in the
+**M5 exit satisfied at shipment.** T12 supplied the historical process resilience evidence, retired from CI by ANT-18, with its claim boundaries in the
 [resilience test plan](testing/payments-resilience.md#process-level-resilience).
 T13 carries the demo half through the
 [five-minute demo](operations/five-minute-demo.md) and its guarded `demo-` Make targets.
