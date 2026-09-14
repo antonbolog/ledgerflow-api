@@ -383,6 +383,10 @@ would be a separate schema and design decision.
 
 ## T10 implementation evidence
 
+Historical validation checkpoints in this document record the commands available at their respective milestones.
+ANT-18 removed the shell instruction, guard, and process contracts; references to them below are historical evidence only.
+The current [CI contract](../foundation/development-environment.md#ci-contract) runs quality, all Pest suites, and separate production runtime and Nginx image builds.
+
 The operator procedure lives in [Runtime Contract](../../operations/runtime-contract.md#manual-verification-and-targeted-repair).
 The following evidence is owned by executable tests, not by the existence of this document.
 
@@ -897,8 +901,7 @@ The barrier-coordinated OS-process matrix was delivered by T12; online staging s
 On 2026-09-07, the final continuous `make ci` run exited `0`: **693 tests, 4116 assertions**;
 the development-database marker row survived `make check` intact, the projection contract passed in
 127 seconds, and the API and web CI images both built successfully.
-This validates the current Slice 5 source, tests, instructions, and canonical documentation in one
-repository-defined run.
+That historical run validated the Slice 5 source, tests, instructions, and documentation as they existed at the checkpoint.
 
 ## Deferred evolution
 

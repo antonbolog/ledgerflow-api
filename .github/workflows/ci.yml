@@ -1,9 +1,5 @@
 name: CI
 
-# CI consumes the same public Make interface as local development. Guard,
-# database-isolation, application-validation, and image contracts live behind
-# `make ci`; this workflow owns only clean-checkout orchestration and diagnostics.
-
 on:
   push:
     branches: [main]
@@ -18,7 +14,7 @@ permissions:
 
 jobs:
   check:
-    name: make ci
+    name: Quality, tests and images
     runs-on: ubuntu-24.04
     timeout-minutes: 20
 
@@ -30,8 +26,20 @@ jobs:
       - name: Install from a clean checkout
         run: make install
 
-      - name: Validate CI contract
-        run: make ci
+      - name: Code quality
+        run: make quality
+
+      - name: Unit tests
+        run: make test-unit
+
+      - name: Integration tests (including Feature and Architecture)
+        run: make test-integration
+
+      - name: Build Laravel production runtime image
+        run: make build-runtime
+
+      - name: Build Laravel Nginx image
+        run: make build-nginx
 
       - name: Diagnostics on failure
         if: failure()

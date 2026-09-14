@@ -268,8 +268,8 @@ T11:
 (`2026_08_31_000000_create_payment_projection_schema`), `config/horizon.php`, the
 `payments.projection` configuration block, the `laravel/horizon` dependency, and the paired
 `projection` Compose profile. Every row below was observed through `make check` against
-PostgreSQL 18.4 and Redis 8.10.0, except the last four, which come from `make projection-contract`
-against live `scheduler` and `horizon` processes.
+PostgreSQL 18.4 and Redis 8.10.0, except the last four, which came from the retired T8 projection rehearsal against live `scheduler` and `horizon` processes.
+Those four rows are historical observations; ANT-18 removed their harness and CI execution.
 
 **Each row was also confirmed by mutation**: the named behaviour was removed or inverted in the
 production source and the cited test was re-run to prove it fails. Ten defects were found that way
@@ -305,16 +305,17 @@ during implementation, including four in tests that passed for the wrong reason.
 | P-26 | Retry refuses unknown, completed and non-exhausted envelopes without mutation | `…it refuses an unknown event without mutating anything`, `…it refuses a completed or non-exhausted envelope without mutating anything` (4 datasets) | Whole-row byte comparison after each refusal; exit code 1 and a fixed reason in both the JSON output and the log | **PASS** |
 | P-27 | Queued messages published before T8 still deserialise | `…it still deserialises a message published before the body changed` | A hand-built legacy payload with the fully-qualified name written as a literal; the consumer arrives as a `handle()` parameter so the serialised property list is still exactly `eventId` | **PASS** |
 | P-28 | The job acknowledges nothing it did not project | `…it lets a consumer failure escape the job rather than acknowledging it` | The exception reaches the caller and the failure is still charged, so the job cannot mark an envelope delivered while nothing was projected | **PASS** |
-| — | Paired startup: scheduler and Horizon both healthy from one command | `make projection-contract` | `horizon:status` exits 0 and `payments:outbox:status` reports a fresh heartbeat, against live processes in a disposable Compose project | **PASS** |
-| — | A stopped consumer builds a backlog that consumes no poison budget | `make projection-contract` | The relay publishes (`publish_count = 1`) while Horizon is stopped; count 0, no `exhausted_at`, no `last_projection_error` | **PASS** |
-| — | Restart convergence | `make projection-contract` | After `start horizon`, exactly one receipt and one read row, with the read row's fields matching the envelope | **PASS** |
-| — | Duplicate delivery through the live pipeline converges | `make projection-contract` | The completion marker is cleared, the relay republishes (`publish_count = 2`), and the second delivery repairs only the marker: still one receipt, one read row, count 0 | **PASS** |
+| - | Paired startup: scheduler and Horizon both healthy from one command | Historical T8 process rehearsal (retired) | `horizon:status` exits 0 and `payments:outbox:status` reports a fresh heartbeat, against live processes in a disposable Compose project | **PASS** |
+| - | A stopped consumer builds a backlog that consumes no poison budget | Historical T8 process rehearsal (retired) | The relay publishes (`publish_count = 1`) while Horizon is stopped; count 0, no `exhausted_at`, no `last_projection_error` | **PASS** |
+| - | Restart convergence | Historical T8 process rehearsal (retired) | After `start horizon`, exactly one receipt and one read row, with the read row's fields matching the envelope | **PASS** |
+| - | Duplicate delivery through the live pipeline converges | Historical T8 process rehearsal (retired) | The completion marker is cleared, the relay republishes (`publish_count = 2`), and the second delivery repairs only the marker: still one receipt, one read row, count 0 | **PASS** |
 
-**What T8 did not prove.** No literal SIGTERM/SIGKILL process matrix - T8's crash evidence is a
-deterministic in-process commit-boundary failpoint plus a live Horizon stop/backlog/restart smoke,
-and the barrier-coordinated process suite stays [T12's](../../testing/payments-resilience.md). No
-multi-process consumer race: concurrency is proved with two PostgreSQL backends inside one PHP
-process, not with two workers. No load, throughput or query-plan claim, and therefore no secondary
+**What T8 did not prove.** T8 did not prove a literal SIGTERM/SIGKILL process matrix.
+Its crash evidence includes a deterministic in-process commit-boundary failpoint.
+The live Horizon stop/backlog/restart smoke and T12 barrier-coordinated process suite are historical
+evidence retired from CI by ANT-18.
+T8 did not prove a multi-process consumer race: concurrency is proved with two PostgreSQL backends
+inside one PHP process, not with two workers. No load, throughput or query-plan claim, and therefore no secondary
 index. No rebuild-safety claim: **the shared projection gate did not exist at T8** - it landed in
 T11 Slice 2, see the reciprocal obligation in
 [verification and rebuild](verification-and-rebuild.md#t8s-reciprocal-obligation-discharged-by-t11-slice-2)
@@ -357,8 +358,7 @@ live in `PaymentQueryTest`'s closed-gate section, per
 batch rebuild that would close the gate for real is still T11's. The absence of Redis from the query
 path is established by source inspection only - the SQL listener that pins the table allowlist cannot
 observe a Redis call.
-`make projection-contract` was not extended: T9 adds no process, and the live scheduler+Horizon
-evidence it depends on for a *projected* read is T8's, unchanged.
+The historical T8 process rehearsal was not extended by T9 and was retired in ANT-18.
 
 ## Related
 

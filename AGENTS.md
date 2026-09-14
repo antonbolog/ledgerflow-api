@@ -36,8 +36,7 @@ compatibility evidence live in
   `payments:outbox:retry {eventId}` is the sole reactivation path. Backlog, locks, transport and
   commit uncertainty are never counted.
 - The scheduler and Horizon are activated together through `make projection-start`/`projection-stop`
-  and never one alone; `make projection-contract` proves the pair end to end in a disposable Compose
-  project.
+  and never one alone.
 - `GET /api/payments/{paymentId}` is merchant-scoped through `MerchantContext`: owned projection ->
   `200` with exactly `payment_id`, `amount_minor`, `currency`, `status`, `initiated_at`; owned
   receipt without projection -> `202 projection_pending` with `Retry-After: 1`; otherwise
@@ -60,12 +59,11 @@ compatibility evidence live in
   and `ProblemType`. [The five-minute demo](docs/operations/five-minute-demo.md) walks the healthy
   flow, a real Redis outage, deliberate corruption, read-only verification and an explicit rebuild
   through project-defined commands.
-- Resilience is proved end to end. The integration suites inject every persistence and delivery
-  failpoint in process; `make resilience-contract` drives the critical HTTP path, a real Redis
-  outage, two identical POSTs held in overlapping write transactions, SIGKILL of the real relay,
-  consumer and rebuild processes, and SIGTERM of a real worker that must commit its projection and
-  exit by itself - all barrier-coordinated in a disposable Compose project whose mandatory teardown
-  fails the contract when it does not complete, inside `make ci`. See the
+- The integration suites inject persistence and delivery failpoints in process against real
+  PostgreSQL and Redis.
+  CI runs these Pest suites; process-level outage, lifecycle, and signal rehearsals are no longer
+  part of CI.
+  Historical process evidence is retained in the
   [resilience test plan](docs/testing/payments-resilience.md#process-level-resilience).
 
 ## Architecture and boundaries
@@ -97,8 +95,8 @@ and replay/rebuild semantics require explicit review against the smallest releva
 - Logs and errors must not expose raw idempotency keys, credentials, or sensitive payment payloads.
 
 Additional scoped rules apply under `Modules/Payments/`, `.github/`, `tests/`, and `docs/` through
-their nested `AGENTS.md` files. Each has a sibling `CLAUDE.md` adapter; `make agent-check` enforces
-parity.
+their nested `AGENTS.md` files. Each has a sibling `CLAUDE.md` adapter pointing to its canonical
+instructions.
 
 ## Development contract
 
@@ -117,23 +115,25 @@ environment lifecycle, database lifecycle, validation, and CI contracts.
 | `make demo-token [EMAIL=...]` | Print one Sanctum token for a seeded fixture merchant, on stdout only |
 | `make demo-status` | Show relay heartbeat and Horizon supervisor state, read-only |
 | `make demo-corrupt PAYMENT_ID=... CONFIRM=corrupt-projection` | Delete one named `payment_details` row for the demo |
-| `make agent-check` | Verify instruction adapters, scoping, and local-config exclusions |
 | `make quality` | Read-only Composer, Pint, Rector, and PHPStan checks |
 | `make test` | Run Pest against `ledgerflow_test`; leaves PostgreSQL and Redis running |
 | `make check` | Run the normal local validation contract: `quality` then `test` |
-| `make projection-contract` | Prove the scheduler+Horizon pair in a disposable Compose project |
-| `make resilience-contract` | Prove Payments resilience under real OS-process signals in a disposable Compose project |
-| `make ci` | After `make install`, run the full CI guard, isolation, validation, and image contract |
+| `make test-unit` | Run the unchanged Unit suite without starting database services |
+| `make test-integration` | Run the unchanged Integration, Feature and Architecture suites on the test database |
+| `make build-runtime` / `make build-nginx` | Build production and web image targets without publishing |
+| `make ci` | After `make install`, run quality, unit, integration and both image builds in order |
 
-The three `demo-` targets are local development tooling for
-[the five-minute demo](docs/operations/five-minute-demo.md). No validation target performs their
-destructive or token-minting effect: `make check` never invokes them at all, and `ci-contract`
-exercises only their refusal paths, exactly as it already does for `destroy` and `db-reset`. Their
-safety guards are therefore tested; their operations are not executed.
+The three `demo-` targets are local development tooling for the
+[five-minute demo](docs/operations/five-minute-demo.md).
+Neither `make check` nor `make ci` invokes them or tests their shell refusal paths.
+Database lifecycle commands and their existing guards remain unchanged.
 
-Use only these repository-defined validation commands. `make check` must not mutate source or the
-development database. CI runs `make install` followed by `make ci`; it does not reproduce hidden
-Composer, Artisan, test, or image-build sequences.
+Use only these repository-defined validation commands.
+`make check` must not mutate source or the development database.
+CI runs `make install` before separately named quality, unit, integration, runtime image and Nginx
+image steps.
+The workflow calls the same commands as `make ci`; see the
+[CI contract](docs/specifications/foundation/development-environment.md#ci-contract).
 
 ## Working method and tools
 
@@ -171,6 +171,7 @@ not in this file or the root README.
 ## Maintenance
 
 Keep instructions synchronized with actual repository state. Update the smallest canonical source
-when behavior changes, run `make agent-check`, and surface conflicts instead of choosing silently.
+when behavior changes, keep instruction adapters aligned, and surface conflicts instead of choosing
+silently.
 Add another nested `AGENTS.md` only when a subtree has material local rules or recurring mistakes.
 Do not claim a higher agent-setup level without executable evidence for its required capabilities.

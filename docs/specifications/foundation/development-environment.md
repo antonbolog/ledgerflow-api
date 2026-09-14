@@ -13,7 +13,7 @@ prerequisites, effects, and evidence; this document states the requirements they
 
 Implemented in T1: the multi-stage `Dockerfile` (`base`/`vendor`/`dev`/`production`/`web`),
 `compose.yaml` with health checks and persistent volumes, the separate `ledgerflow_test` database,
-the twelve-target Makefile, Pest on PostgreSQL with a three-layer database guard, Pint, Rector,
+the initial Makefile, Pest on PostgreSQL with database isolation checks, Pint, Rector,
 PHPStan level 10, and CI.
 
 Implemented in T2: the `Merchant` and `Payments` modules with enforced layer boundaries
@@ -21,20 +21,32 @@ Implemented in T2: the `Merchant` and `Payments` modules with enforced layer bou
 `Modules/Merchant` behind a Sanctum-authenticated application contract, a required and indexed
 `users.merchant_id` foreign key, and two deterministic seeded merchants and users.
 
-**All validation runs through public Make targets.** CI installs from a clean checkout with
-`make install`, then calls the single full-pipeline target `make ci`. That target composes the normal
-`make check` application validation with three additional contract classes; the workflow contains no
-Composer, Pest, Pint, Rector, PHPStan, Artisan, or image-build sequence of its own:
+## CI contract
 
-- **guard assertions** — `destroy`, `db-reset`, `db-migrate`, and `db-seed` must refuse, each with
-  its documented refusal message;
-- **isolation assertion** - a marker table created before `make check` still holds its row
-  afterwards, proving the suite resets `ledgerflow_test` without dropping or resetting the
-  development database;
-- **image-contract builds** — `docker build --target production` and `--target web`, because
-  Compose only ever builds the `dev` target;
-Failure diagnostics remain workflow orchestration only. The guard and image commands live behind
-public Make targets, so local and CI behavior cannot drift into two implementations.
+All validation runs through public Make targets using the Docker development environment.
+GitHub Actions uses one job on `ubuntu-24.04` with sequential, separately named steps so a failed stage is visible directly in the run:
+
+| Stage | Public command | Contract |
+|---|---|---|
+| Checkout and dependency setup | `make install` after checkout | Build the development image, install locked Composer dependencies before any tool or test, prepare the local stack and databases |
+| Code quality | `make quality` | `composer validate --strict`, `vendor/bin/pint --test`, `vendor/bin/rector process --dry-run`, `vendor/bin/phpstan analyse --memory-limit=-1 --no-progress` |
+| Unit tests | `make test-unit` | Pest `Unit` suite |
+| Integration tests | `make test-integration` | Pest `Integration,Feature,Architecture` suites in their existing declaration order, against PostgreSQL and Redis |
+| Laravel production runtime image | `make build-runtime` | Build Dockerfile target `production` |
+| Laravel Nginx image | `make build-nginx` | Build Dockerfile target `web` |
+
+Dependency setup must finish before quality or Pest runs.
+`make ci` executes the last five stages in the same order after `make install`.
+`make check` remains the normal local quality-plus-full-Pest entry point, and `make test` still runs all suites.
+The split commands select the existing suites without moving, deleting, or changing tests.
+A failure stops later stages; failure-only Compose diagnostics preserve the original failure.
+Both images are built locally without publishing or deployment.
+No registry credentials, AWS, OIDC, or additional security stage is involved.
+
+ANT-18 removes the shell contract harness and its instruction-parity, refusal, injection-marker, development-database marker, disposable projection, and process resilience rehearsals.
+Current CI does not prove Horizon/scheduler lifecycle, a Redis-daemon outage, or SIGTERM/SIGKILL behavior.
+The test bootstrap, PHPUnit configuration, live infrastructure tests, and existing local database guards remain in place.
+Historical implementation checkpoints describe the checks that existed when they were recorded; they are not claims about the current pipeline.
 
 The entrypoint ends in `exec "$@"` with `CMD ["php-fpm"]`, so Horizon, the scheduler/relay, Reverb,
 and future SQS workers reuse the same image with a `command:` override and no image change. That
@@ -63,8 +75,8 @@ The first milestone must establish a small public surface in these directions:
 | Setup | `install` | Build/configure the project from a clean checkout |
 | Lifecycle | `start`, `stop` | Start and stop local services without deleting data |
 | Destructive lifecycle | `destroy` | Remove generated containers/volumes only after explicit confirmation |
-| Validation | `agent-check`, `test`, `quality`, `check` | Run instruction parity, supported tests, quality tools, and normal local validation |
-| Full CI | `ci-contract`, `image-contract`, `ci` | Assert guards/isolation, build deployable image targets, and compose the CI-equivalent contract |
+| Validation | `test`, `test-unit`, `test-integration`, `quality`, `check` | Run all existing Pest suites and read-only quality tools |
+| Images and CI | `build-runtime`, `build-nginx`, `ci` | Build both production images and compose the current CI stages |
 | Database | `db-migrate`, `db-seed` | Apply schema and deterministic development fixtures |
 | Destructive database | `db-reset` | Reset local/test data only after explicit confirmation |
 
@@ -700,7 +712,8 @@ From a clean checkout with Git, Docker, and Docker Compose:
    **(T1)**
 
 This list is the Milestone 1 exit criterion. T1 established the command contracts; T2 supplied the
-deterministic identities that item 3's second clause requires. **Every item is now verified.**
+deterministic identities that item 3's second clause requires.
+These are historical milestone observations; ANT-18 removes automated shell refusal and marker rehearsals from current CI.
 
 Note what proves what. `make check` runs `quality` and `test`; it never invokes `db-seed`. The suite
 proves the seeder's logic — idempotence, collision refusal, transactional rollback — because those
@@ -708,8 +721,8 @@ tests call `$this->seed()` directly. Running `make db-seed` twice against the de
 what proves the command contract. Both are required; neither substitutes for the other.
 
 Validation must not be invented ad hoc: `check` is the normal local entry point; after `install`,
-`ci` is the CI-equivalent entry point. The workflow calls those public targets rather than
-reproducing their steps.
+`ci` is the CI-equivalent entry point.
+The workflow calls its component targets separately to identify the failing stage.
 
 ## Known deferred concerns
 
