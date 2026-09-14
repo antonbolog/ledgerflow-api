@@ -34,6 +34,10 @@ it('runs against the allowlisted PostgreSQL test database', function (): void {
     expect($database)->toBe('ledgerflow_test');
 });
 
+it('boots the suite in the testing environment', function (): void {
+    expect(app()->environment())->toBe('testing');
+});
+
 it('reaches PostgreSQL on a supported server version', function (): void {
     $version = DB::selectOne('show server_version')->server_version;
 

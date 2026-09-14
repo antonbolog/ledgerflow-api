@@ -42,6 +42,8 @@ The split commands select the existing suites without moving, deleting, or chang
 A failure stops later stages; failure-only Compose diagnostics preserve the original failure.
 Both images are built locally without publishing or deployment.
 No registry credentials, AWS, OIDC, or additional security stage is involved.
+Each run attempt uses its own Compose project, `ledgerflow-ci-<run_id>-<run_attempt>`, so CI containers, networks and volumes never share a namespace with local development.
+GitHub-hosted runner disposal is the cleanup boundary; the workflow adds no teardown step.
 
 ANT-18 removes the shell contract harness and its instruction-parity, refusal, injection-marker, development-database marker, disposable projection, and process resilience rehearsals.
 Current CI does not prove Horizon/scheduler lifecycle, a Redis-daemon outage, or SIGTERM/SIGKILL behavior.
@@ -78,10 +80,35 @@ The first milestone must establish a small public surface in these directions:
 | Validation | `test`, `test-unit`, `test-integration`, `quality`, `check` | Run all existing Pest suites and read-only quality tools |
 | Images and CI | `build-runtime`, `build-nginx`, `ci` | Build both production images and compose the current CI stages |
 | Database | `db-migrate`, `db-seed` | Apply schema and deterministic development fixtures |
-| Destructive database | `db-reset` | Reset local/test data only after explicit confirmation |
 
 `AGENTS.md` documents prerequisites, effects, and expected evidence. CI must call the same public
 targets instead of duplicating hidden command sequences.
+
+## Database lifecycles
+
+Persistent database state changes only through forward migrations and deterministic seeders.
+Persistent state is recovered with a forward corrective migration or a data restore, never with a reset.
+No Make target resets a database; `make install` is idempotent and applies migrations without dropping data.
+
+| Lifecycle | Namespace and storage | State | Schema commands | Recovery |
+|---|---|---|---|---|
+| Local development | Compose project from `COMPOSE_PROJECT_NAME` (default `ledgerflow`) with named `postgres-data` and `redis-data` volumes; `ledgerflow` and `ledgerflow_test` share one PostgreSQL cluster | `ledgerflow` is persistent developer data; `ledgerflow_test` is disposable | `make install`, `make db-migrate`, `make db-seed`; Pest resets only `ledgerflow_test` | A forward corrective migration or a data restore. `make destroy CONFIRM=destroy` followed by `make install` is an explicit option only when losing all local project data is accepted |
+| Remote development | Provisioned by `ledgerflow-infra`, not by this repository | Persistent | `php artisan migrate --force` only | A forward corrective migration or a data restore; the application artifact refuses destructive commands |
+| CI test | Compose project `ledgerflow-ci-<run_id>-<run_attempt>` on a GitHub-hosted runner | Disposable with the run | `make install`, then Pest against `ledgerflow_test` | None needed; Pest resets only the recognized test target and runner disposal removes the project |
+| Future production | Provisioned by `ledgerflow-infra` | Persistent | `php artisan migrate --force` only | A forward corrective migration or a data restore; the application artifact refuses destructive commands |
+
+The recognized disposable test target is exactly `APP_ENV=testing`, default connection `pgsql`, an empty database URL, host `postgres`, and database `ledgerflow_test`.
+`tests/bootstrap.php` refuses to start Pest for any other environment, URL, host, connection or database, and forces the accepted values over the container's `$_SERVER` environment.
+
+`AppServiceProvider` keeps Laravel's destructive-command prohibition on by default for `migrate:fresh`, `migrate:refresh`, `migrate:reset`, `migrate:rollback` and `db:wipe`.
+Laravel checks that prohibition as one global flag before a command reads `--database`, so the provider lifts it for a single top-level invocation only.
+It lifts it when the bound `--database` option is absent or `pgsql`, the configured and resolved `pgsql` connection both match the recognized target, and neither declares read, write or direct connections.
+The flag is restored when the command finishes, whether it succeeds or throws.
+Laravel does not bridge console command events while running unit tests, so the provider enables that bridge in console contexts; an invocation the bridge does not observe stays prohibited.
+`tests/Feature/DatabaseLifecycleGuardTest.php` is the executable evidence for both layers.
+
+The guard observes Artisan invocations only.
+A custom command that calls a destructive command through `$this->call()` inherits the flag of its own top-level invocation, and direct `Migrator` or schema-builder use is not intercepted.
 
 ## Tooling requirements
 
@@ -755,8 +782,9 @@ Recorded so they are not rediscovered as surprises:
 - **The `$_SERVER` env-precedence trap** that let the suite reach the development database is fixed
   in `tests/bootstrap.php`. T4 found the same trap defeating the queue, cache and session
   declarations and extended the fix to them; those three *are* covered by live assertions in
-  `tests/Feature/InfrastructureContractTest.php`. The database half of the fix still has no test of
-  its own.
+  `tests/Feature/InfrastructureContractTest.php`. ANT-20 forces `APP_ENV=testing` the same way and
+  covers the environment, URL, host, connection and database refusals in
+  `tests/Feature/DatabaseLifecycleGuardTest.php`.
 - **CI has no Docker layer caching**, deliberately: `docker compose build` cannot use the Actions
   cache backend without a buildx bake setup that local development would not share.
 

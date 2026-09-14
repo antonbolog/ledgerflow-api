@@ -34,9 +34,10 @@ return new class extends Migration
         if (DB::table('users')->exists()) {
             throw new RuntimeException(
                 'Refusing to add users.merchant_id: the users table is not empty and there is no '
-                .'backfill policy, because no deployed environment exists. Rebuild with '
-                .'`make db-reset CONFIRM=db-reset`. Once a deployed environment exists, replace '
-                .'this migration with a real backfill or a nullable-then-tighten pair.'
+                .'backfill policy. Recover persistent data with a corrective migration, such as a real '
+                .'backfill or a nullable-then-tighten pair, or with a data restore. Only when losing all '
+                .'local project data is acceptable, `make destroy CONFIRM=destroy` followed by '
+                .'`make install` rebuilds an empty local stack.'
             );
         }
 

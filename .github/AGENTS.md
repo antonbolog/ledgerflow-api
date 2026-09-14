@@ -7,6 +7,8 @@ Applies to `.github/**` in addition to the repository root instructions.
 - Keep job permissions least-privilege and disable persisted checkout credentials when no later
   step needs to push.
 - Run `make install` before quality tools or Pest.
+- Give each run attempt its own Compose project through `COMPOSE_PROJECT_NAME`. GitHub-hosted runner
+  disposal is the cleanup boundary; do not add teardown harnesses.
 - Keep quality, unit tests, integration tests, runtime image build, and Nginx image build in
   separately named steps calling the corresponding Make targets.
 - `make ci` mirrors those five steps for local use after installation.

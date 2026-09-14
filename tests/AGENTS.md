@@ -7,6 +7,8 @@ inherit their module's scoped instructions instead.
 
 - The suite may mutate only `ledgerflow_test`. `tests/bootstrap.php`, `phpunit.xml`, and the live
   infrastructure contract jointly enforce this boundary.
+- `tests/bootstrap.php` also forces `APP_ENV=testing`. Destructive Artisan database commands are
+  refused for any other environment or target, so never probe them without a SQL-refusing sentinel.
 - Framework defaults remain `QUEUE_CONNECTION=sync`, `CACHE_STORE=array`, and
   `SESSION_DRIVER=array`. Reach Redis only through an explicitly named test connection.
 - Never flush a shared Redis database. Delete only the exact keys owned by the test.

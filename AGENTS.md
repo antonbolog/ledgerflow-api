@@ -106,11 +106,10 @@ environment lifecycle, database lifecycle, validation, and CI contracts.
 
 | Target | Contract |
 |---|---|
-| `make install` | Build and start a clean checkout, install dependencies, ensure test DB, migrate |
+| `make install` | Build and start a clean checkout, install dependencies, ensure test DB, migrate; idempotent and never drops data |
 | `make start` / `make stop` | Start or stop services without deleting data |
 | `make destroy CONFIRM=destroy` | Remove only project containers, networks, and volumes |
 | `make db-migrate` / `make db-seed` | Mutate only the allowlisted local development database |
-| `make db-reset CONFIRM=db-reset` | Rebuild only the allowlisted development and test databases |
 | `make projection-start` / `make projection-stop` | Start or stop the scheduler and Horizon consumer together, never one alone |
 | `make demo-token [EMAIL=...]` | Print one Sanctum token for a seeded fixture merchant, on stdout only |
 | `make demo-status` | Show relay heartbeat and Horizon supervisor state, read-only |
@@ -126,7 +125,14 @@ environment lifecycle, database lifecycle, validation, and CI contracts.
 The three `demo-` targets are local development tooling for the
 [five-minute demo](docs/operations/five-minute-demo.md).
 Neither `make check` nor `make ci` invokes them or tests their shell refusal paths.
-Database lifecycle commands and their existing guards remain unchanged.
+
+Persistent development data changes only through migrations and seeders, and is recovered with a forward
+corrective migration or a data restore.
+`make destroy CONFIRM=destroy` deletes all local project data and is an explicit option only when that
+loss is accepted.
+Destructive Artisan database commands run only against the recognized disposable test target, and each
+CI run attempt uses its own Compose project.
+See [database lifecycles](docs/specifications/foundation/development-environment.md#database-lifecycles).
 
 Use only these repository-defined validation commands.
 `make check` must not mutate source or the development database.

@@ -59,8 +59,10 @@ The API is available at <http://127.0.0.1:8080> (loopback only). `GET /up` is th
 `GET /api/payments/{paymentId}` requires the same bearer token.
 
 Run `make` to see the complete command surface. Destructive targets require target-specific typed
-confirmation, for example `make destroy CONFIRM=destroy` and
-`make db-reset CONFIRM=db-reset`.
+confirmation, for example `make destroy CONFIRM=destroy`.
+Development data changes only through migrations and seeders; local development, remote development,
+CI test and future production lifecycles are defined in
+[database lifecycles](docs/specifications/foundation/development-environment.md#database-lifecycles).
 
 To watch the whole slice work, including a real Redis outage, deliberate read-model corruption and a
 controlled rebuild, follow the

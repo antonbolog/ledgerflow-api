@@ -268,7 +268,8 @@ final class IntegrationDatabase
                 .'Something outside this process holds a lock on them — almost certainly a backend '
                 .'leaked by a run that was killed mid-test, which stays `idle in transaction` until '
                 .'its container dies. Clear it, then re-run: '
-                .'docker rm -f $(docker ps -aq --filter name=ledgerflow-app-run)',
+                .'docker rm -f $(docker ps -aq --filter label=com.docker.compose.project=${COMPOSE_PROJECT_NAME:-ledgerflow} '
+                .'--filter label=com.docker.compose.oneoff=True)',
                 previous: $exception,
             );
         } finally {

@@ -51,8 +51,10 @@ declare(strict_types=1);
  */
 const LEDGERFLOW_TEST_DATABASE = 'ledgerflow_test';
 
+const LEDGERFLOW_TEST_ENVIRONMENT = 'testing';
+
 /** Hosts the suite may reach. Mirrors the Makefile allowlist. */
-const LEDGERFLOW_ALLOWED_HOSTS = ['postgres', '127.0.0.1', 'localhost', '::1'];
+const LEDGERFLOW_ALLOWED_HOSTS = ['postgres'];
 
 /**
  * Isolation defaults phpunit.xml declares, which must survive $_SERVER.
@@ -191,6 +193,18 @@ if (! in_array($ledgerflowHost, LEDGERFLOW_ALLOWED_HOSTS, true)) {
     );
 }
 
+// Compose's APP_ENV=local reaches $_SERVER exactly like the database keys do, and
+// AppServiceProvider permits destructive commands only in the testing environment.
+$ledgerflowEnvironment = $ledgerflowIntent('APP_ENV');
+
+if ($ledgerflowEnvironment !== LEDGERFLOW_TEST_ENVIRONMENT) {
+    $ledgerflowRefuse(
+        'APP_ENV is not the testing environment.',
+        'APP_ENV='.($ledgerflowEnvironment === '' ? '(unset)' : $ledgerflowEnvironment).', expected '.LEDGERFLOW_TEST_ENVIRONMENT.'.',
+        'Destructive database commands are recognised only in the testing environment.',
+    );
+}
+
 // Validate the isolation intent the same way, and for the same reason: if
 // someone edits phpunit.xml to point the suite's default queue back at Redis,
 // that is a decision to make deliberately, not one to have silently restored by
@@ -210,6 +224,7 @@ foreach (LEDGERFLOW_ISOLATION as $ledgerflowKey => $ledgerflowWanted) {
 // Make the validated intent authoritative across every source Laravel consults,
 // so $_SERVER can no longer shadow it.
 $ledgerflowForce = array_merge($ledgerflowExpected, LEDGERFLOW_ISOLATION, [
+    'APP_ENV' => LEDGERFLOW_TEST_ENVIRONMENT,
     'DB_HOST' => $ledgerflowHost,
     'DB_URL' => '',
 ]);
@@ -222,7 +237,7 @@ foreach ($ledgerflowForce as $ledgerflowKey => $ledgerflowValue) {
 
 // Prove it: every source must now agree, or the forcing above did not take.
 $ledgerflowProven = array_merge(
-    ['DB_CONNECTION', 'DB_HOST', 'DB_DATABASE'],
+    ['APP_ENV', 'DB_CONNECTION', 'DB_HOST', 'DB_DATABASE'],
     array_keys(LEDGERFLOW_ISOLATION),
 );
 

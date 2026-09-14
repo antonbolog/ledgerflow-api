@@ -19,6 +19,14 @@ scaled, restarted, and observed.
 The first Payments slice requires HTTP/API, Horizon, and scheduler/relay. Reverb and SQS workers
 arrive only with their milestones.
 
+### Database schema lifecycle
+
+Persistent environments, meaning local development, remote development and future production, change schema only through `php artisan migrate --force`.
+The application artifact refuses `migrate:fresh`, `migrate:refresh`, `migrate:reset`, `migrate:rollback` and `db:wipe` unless one invocation targets the recognized disposable test database.
+Deployment tooling therefore cannot reach test reset behavior through the shipped image.
+The lifecycle table and the exact recognized target live in
+[database lifecycles](../specifications/foundation/development-environment.md#database-lifecycles).
+
 ### Local process topology
 
 `make install` and `make start` bring up four services and no workers:

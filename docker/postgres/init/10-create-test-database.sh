@@ -13,9 +13,12 @@
 # directory is first initialised. Editing this file afterwards does nothing
 # until the volume is recreated. `make install` (slice 3) therefore performs
 # the same creation idempotently, so this script is the fresh-volume path only.
+#
+# The name is fixed rather than derived from POSTGRES_DB: tests/bootstrap.php,
+# the Makefile and the destructive-command guard recognise only ledgerflow_test.
 set -eu
 
-TEST_DB="${POSTGRES_DB:-ledgerflow}_test"
+TEST_DB=ledgerflow_test
 
 echo "init: ensuring test database ${TEST_DB} exists"
 
