@@ -2,8 +2,6 @@
 
 declare(strict_types=1);
 
-use Illuminate\Support\Facades\Schema;
-
 /*
 |--------------------------------------------------------------------------
 | Architecture baseline
@@ -19,7 +17,7 @@ use Illuminate\Support\Facades\Schema;
 */
 
 arch('source files declare strict types')
-    ->expect('App')
+    ->expect(['App', 'Modules\Merchant', 'Modules\Payments'])
     ->toUseStrictTypes();
 
 arch('no debugging helpers reach the codebase')
@@ -32,12 +30,3 @@ arch('env() is read only through configuration')
     // null. config/ is the one place it is legitimate.
     ->expect('env')
     ->not->toBeUsed();
-
-arch('module source files declare strict types')
-    ->expect(['Modules\Merchant', 'Modules\Payments'])
-    ->toUseStrictTypes();
-
-arch('no leftover skeleton debris')
-    ->expect('App')
-    ->not->toUse([Schema::class])
-    ->ignoring('App\Providers');

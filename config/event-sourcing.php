@@ -50,10 +50,9 @@ return [
     ],
 
     /*
-     * FALSE ON PURPOSE. Enforcement throws for any unmapped class, and the T3/T4
-     * compatibility spikes persist test-only fixtures that must never appear in
-     * production configuration. Completeness is asserted instead by exact
-     * equality on the map above, which does not see the test tree.
+     * FALSE ON PURPOSE. Enforcement throws for any unmapped class. Completeness is
+     * asserted instead by a test that discovers every production storable event
+     * and requires the map above to name exactly those classes.
      */
     'enforce_event_class_map' => false,
 ];

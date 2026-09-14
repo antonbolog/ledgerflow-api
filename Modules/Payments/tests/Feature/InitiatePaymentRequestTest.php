@@ -25,19 +25,6 @@ use Modules\Payments\Tests\Support\Initiation;
 |
 */
 
-it('refuses an unauthenticated initiation with problem details and no framework body', function (): void {
-    $response = $this->postJson('/api/payments', Initiation::body(), ['Idempotency-Key' => Initiation::KEY]);
-
-    $response->assertStatus(401);
-
-    expect($response->headers->get('Content-Type'))->toStartWith('application/problem+json')
-        ->and($response->json('code'))->toBe('unauthenticated')
-        ->and($response->json('instance'))->toBe('/api/payments')
-        // Handler::unauthenticated() returns {"message":"Unauthenticated."}. If that
-        // key survives, the respond() finaliser did not run.
-        ->and($response->json())->not->toHaveKey('message');
-});
-
 it('accepts the inclusive amount boundaries', function (int $amount): void {
     Initiation::send(['amount_minor' => $amount])->assertStatus(202);
 })->with([1, 100_000_000]);

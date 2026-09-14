@@ -5,8 +5,6 @@ declare(strict_types=1);
 use Illuminate\Cache\ArrayStore;
 use Illuminate\Cache\RedisStore;
 use Illuminate\Console\Scheduling\Schedule;
-use Illuminate\Queue\RedisQueue;
-use Illuminate\Queue\SyncQueue;
 use Illuminate\Support\Collection;
 use Illuminate\Support\ConfigurationUrlParser;
 use Illuminate\Support\Facades\Cache;
@@ -52,17 +50,6 @@ beforeEach(function (): void {
 
 afterEach(function (): void {
     RelayTransport::teardown();
-});
-
-it('keeps the default queue on sync while the relay connection is a named Redis queue', function (): void {
-    // The isolation contract T4 repaired must survive T7 adding a Redis queue.
-    expect(config('queue.default'))->toBe('sync')
-        ->and(Queue::connection())->toBeInstanceOf(SyncQueue::class);
-
-    $relay = Queue::connection(RelayTransport::QUEUE_CONNECTION);
-
-    expect($relay)->toBeInstanceOf(RedisQueue::class)
-        ->and($relay->getConnectionName())->toBe(RelayTransport::QUEUE_CONNECTION);
 });
 
 it('never defers a relay publication past commit', function (): void {

@@ -286,6 +286,12 @@ publication, and before finalization. A transient transport outage alone is not 
 
 ## Blocking compatibility evidence
 
+> **Historical evidence, retired in ANT-19.** The T4 spike suites and fixtures named in this section
+> no longer exist or run. The production contracts they de-risked are exercised against real code under
+> [Implementation evidence](#implementation-evidence) and in `ProjectionGateTest`,
+> `ProjectionRebuildTest` and `OutboxRelayTest`. The `after_commit` twin control and the
+> silent-reconnect observation remain recorded measurements only.
+
 **Satisfied by T4.** Every invariant below was proved against the Composer-resolved stack — Laravel
 13.24.0, PostgreSQL 18.4, Redis 8.10.0 via phpredis 6.3.0, PHP 8.4 — by a test-only spike under
 `Modules/Payments/tests/`. It adds no production behaviour; see
@@ -368,7 +374,7 @@ evidence above remains frozen and is not restated as re-measured here.
 | # | Invariant | Proving test | Observed mechanism | Status |
 |---|---|---|---|---|
 | M-1 | The physical Redis key a real `push()` writes matches what both read paths derive | `PaymentRelayRuntimeContractTest::it addresses one physical key from both read paths, and records the prefix phpredis applies` | `size()` (Lua `eval`) and `pendingSize()` (`llen`) agree at 1 after a real push on the named `payments-projection` connection; the key exists only under the client's own prefix | **PASS** |
-| M-2 | `SKIP LOCKED`, compiled and exercised, not merely intended | `OutboxRelayTest::it skips a row another session holds and publishes the next one instead`, `…it compiles the eligibility query with SKIP LOCKED rather than a bare row lock` | A second connection holds `FOR UPDATE` on the oldest eligible row; the relay selects and publishes the *other* row with no sleep and no `55P03`; compiled SQL pinned to end `for update skip locked` | **PASS** |
+| M-2 | `SKIP LOCKED`, exercised, not merely intended | `OutboxRelayTest::it skips a row another session holds and publishes the next one instead` | A second connection holds `FOR UPDATE` on the oldest eligible row; the relay selects and publishes the *other* row with no sleep and no `55P03` | **PASS** |
 | M-3 | The forward migration's two CHECK constraints are real and named correctly | `PaymentsSchemaTest::it refuses a negative publish_count and a negative consecutive_transport_failures`, `…it reports 23514 naming the violated transport constraint` | Both constraints exist, fit the 63-byte identifier limit, and a direct negative `UPDATE` now raises `23514` naming the violated constraint (measured accepting the same write silently before the migration) | **PASS** |
 | — | One eligible row, ordered by the index, three ways a row is correctly invisible | `OutboxRelayTest::it takes the oldest eligible row first and cannot see an ineligible one` | Oldest-`available_at` row published first; a future-dated, a completed, and an exhausted row all remain untouched through repeated passes | **PASS** |
 | — | Accepted publication updates transport state from PostgreSQL `now()`, with exact grace | `OutboxRelayTest::it makes an accepted row eligible again only after the grace has passed` | Row invisible inside the 30 s grace window, reachable again after it elapses | **PASS** |

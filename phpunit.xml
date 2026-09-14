@@ -30,19 +30,12 @@
     -->
     <testsuites>
         <testsuite name="Unit">
-            <directory>tests/Unit</directory>
             <directory>Modules/*/tests/Unit</directory>
         </testsuite>
         <!--
-            DECLARED BEFORE Feature, DELIBERATELY. PHPUnit sets no executionOrder
-            here, so suites run in declaration order. The Integration suite has no
-            RefreshDatabase and therefore no schema of its own unless it provisions
-            one (finding E2); putting it ahead of every RefreshDatabase test means
-            it always arrives at an unmigrated database on a fresh ledgerflow_test,
-            so IntegrationDatabase::ensureSchema() is exercised on every run rather
-            than being dead code that only matters when the suite is launched some
-            other way. Repository policy allows validation only through `make test`
-            and `make check`, so ordering is how that property stays proved.
+            Integration runs before Feature so a freshly created ledgerflow_test is
+            provisioned by IntegrationDatabase rather than by RefreshDatabase.
+            No suite depends on this order.
         -->
         <testsuite name="Integration">
             <directory>Modules/*/tests/Integration</directory>

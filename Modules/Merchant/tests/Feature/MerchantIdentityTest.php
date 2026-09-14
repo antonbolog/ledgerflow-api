@@ -3,19 +3,9 @@
 declare(strict_types=1);
 
 use Illuminate\Database\QueryException;
-use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Schema;
 use Modules\Merchant\Infrastructure\Persistence\Eloquent\Merchant;
 use Modules\Merchant\Infrastructure\Persistence\Eloquent\User;
-use Tests\TestCase;
-
-it('runs module tests with the application test case and a fresh database', function (): void {
-    // If tests/Pest.php stops matching this directory, module tests still run
-    // but without TestCase or RefreshDatabase, and every later failure is a
-    // confusing symptom of that one cause. This names it directly.
-    expect($this)->toBeInstanceOf(TestCase::class)
-        ->and(class_uses_recursive($this))->toContain(RefreshDatabase::class);
-});
 
 it('resolves the authenticatable user from the Merchant module', function (): void {
     expect(config('auth.providers.users.model'))->toBe(User::class);

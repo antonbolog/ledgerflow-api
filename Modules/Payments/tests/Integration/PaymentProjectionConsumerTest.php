@@ -211,12 +211,6 @@ afterEach(function (): void {
 
     IntegrationDatabase::rollbackOpenTransactions();
     IntegrationDatabase::releaseLocks();
-
-    // UNCONDITIONAL, NOT ONLY AT A TEST'S HAPPY-PATH END. See OutboxRelayTest's
-    // afterEach for why: a failed assertion between closing and reopening the gate
-    // must not leak `rebuilding` into every later test in this process.
-    projectionReopenGate();
-
     IntegrationDatabase::truncate();
     IntegrationDatabase::disconnectAll();
 });

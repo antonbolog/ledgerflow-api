@@ -211,40 +211,6 @@ function insertStoredEvent(
     ]);
 }
 
-it('gives stored_events the exact vendor column set and concurrency key', function (): void {
-    // Not a checksum against the vendor stub: a production migration is immutable
-    // project history and must not fail because a later package version edits a
-    // file we no longer read. What matters is the live shape our code uses.
-    $columns = t5Columns('stored_events');
-
-    expect(array_keys($columns))->toEqualCanonicalizing([
-        'id', 'aggregate_uuid', 'aggregate_version', 'event_version',
-        'event_class', 'event_properties', 'meta_data', 'created_at',
-    ])
-        ->and($columns['aggregate_uuid'])->toMatchArray(['type' => 'uuid', 'nullable' => true])
-        ->and($columns['aggregate_version'])->toMatchArray(['type' => 'bigint', 'nullable' => true])
-        ->and($columns['event_version'])->toMatchArray(['type' => 'smallint', 'nullable' => false])
-        ->and($columns['event_class'])->toMatchArray(['type' => 'character varying', 'nullable' => false, 'length' => 255])
-        ->and($columns['event_properties'])->toMatchArray(['type' => 'jsonb', 'nullable' => false])
-        ->and($columns['meta_data'])->toMatchArray(['type' => 'jsonb', 'nullable' => false])
-        ->and($columns['created_at'])->toMatchArray(['type' => 'timestamp without time zone', 'nullable' => false]);
-
-    // The vendor keeps this column at second precision and it is the package's
-    // own. Business time lives in the payload, not here.
-    expect($columns['created_at']['precision'])->toBe(0);
-
-    $indexes = t5IndexCatalog('stored_events');
-
-    expect(array_keys($indexes))->toEqualCanonicalizing([
-        'stored_events_pkey',
-        'stored_events_aggregate_uuid_index',
-        'stored_events_event_class_index',
-        'stored_events_aggregate_uuid_aggregate_version_unique',
-    ])
-        ->and($indexes['stored_events_aggregate_uuid_aggregate_version_unique'])
-        ->toMatchArray(['columns' => 'aggregate_uuid,aggregate_version', 'unique' => true]);
-});
-
 it('refuses a second stored event at the same aggregate version even under another event class', function (): void {
     // BEHAVIOURAL, not structural. A three-column unique that also included
     // event_class would still be named and reported as a unique index on
@@ -262,28 +228,6 @@ it('refuses a second stored event at the same aggregate version even under anoth
     insertStoredEvent($aggregateUuid, 2);
 
     expect(DB::table('stored_events')->where('aggregate_uuid', $aggregateUuid)->count())->toBe(2);
-});
-
-it('gives snapshots the exact vendor column set and its lookup index', function (): void {
-    // Nothing in M1-M5 writes this table; AggregateRoot::reconstituteFromEvents()
-    // READS it on every retrieve(), which is the whole reason it exists. Its shape
-    // still has to be right, because the read is a real query.
-    $columns = t5Columns('snapshots');
-
-    expect(array_keys($columns))->toEqualCanonicalizing([
-        'id', 'aggregate_uuid', 'aggregate_version', 'state', 'created_at', 'updated_at',
-    ])
-        ->and($columns['aggregate_uuid'])->toMatchArray(['type' => 'uuid', 'nullable' => false])
-        ->and($columns['aggregate_version'])->toMatchArray(['type' => 'bigint', 'nullable' => false])
-        ->and($columns['state'])->toMatchArray(['type' => 'jsonb', 'nullable' => false])
-        ->and($columns['created_at'])->toMatchArray(['type' => 'timestamp without time zone', 'nullable' => true])
-        ->and($columns['updated_at'])->toMatchArray(['type' => 'timestamp without time zone', 'nullable' => true]);
-
-    $indexes = t5IndexCatalog('snapshots');
-
-    expect(array_keys($indexes))->toEqualCanonicalizing(['snapshots_pkey', 'snapshots_aggregate_uuid_index'])
-        ->and($indexes['snapshots_aggregate_uuid_index'])
-        ->toMatchArray(['columns' => 'aggregate_uuid', 'unique' => false]);
 });
 
 it('gives payment_idempotency_receipts its exact documented shape', function (): void {

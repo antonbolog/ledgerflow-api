@@ -31,7 +31,7 @@ GitHub Actions uses one job on `ubuntu-24.04` with sequential, separately named 
 | Checkout and dependency setup | `make install` after checkout | Build the development image, install locked Composer dependencies before any tool or test, prepare the local stack and databases |
 | Code quality | `make quality` | `composer validate --strict`, `vendor/bin/pint --test`, `vendor/bin/rector process --dry-run`, `vendor/bin/phpstan analyse --memory-limit=-1 --no-progress` |
 | Unit tests | `make test-unit` | Pest `Unit` suite |
-| Integration tests | `make test-integration` | Pest `Integration,Feature,Architecture` suites in their existing declaration order, against PostgreSQL and Redis |
+| Integration tests | `make test-integration` | Pest `Integration,Feature,Architecture` suites against PostgreSQL and Redis; every Integration test provisions its schema and restores shared control state itself, so suite order is not load-bearing |
 | Laravel production runtime image | `make build-runtime` | Build Dockerfile target `production` |
 | Laravel Nginx image | `make build-nginx` | Build Dockerfile target `web` |
 
@@ -224,8 +224,9 @@ connection that repository's model resolves to.
   `stored_events` until the application owns one.** That was the state through T3 and T4. **T5 now
   owns four migrations** under `Modules/Payments/database/migrations/`, so `stored_events` and
   `snapshots` — schema-identical to the vendor stubs — plus `payment_idempotency_receipts` and
-  `payment_outbox` exist in `ledgerflow` and `ledgerflow_test`. The spike harness creates its copies
-  only when the tables are absent, so from T5 onward the T3/T4 suites run against these migrations.
+  `payment_outbox` exist in `ledgerflow` and `ledgerflow_test`. The spike harness created its copies
+  only when the tables were absent, so from T5 onward the T3/T4 suites ran against these migrations
+  until ANT-19 retired them.
 - **Its configuration does not need publishing.** `hasConfigFile()` routes through
   `ProcessConfigs::registerPackageConfigs()`, which calls `mergeConfigFrom()` during `register()`
   (`laravel-package-tools/src/Concerns/PackageServiceProvider/ProcessConfigs.php:7-27`), so every
@@ -304,6 +305,7 @@ version behavior above possible.
 > **Historical record of T3, superseded in part by T5.** The four bullets below were true when T3
 > landed and remain an accurate account of *that task*. T5 has since added production types, schema
 > and configuration; where a bullet reads in the present tense, **What T5 added** below is current.
+> The spike suites, fixtures and copied migrations described here were retired in ANT-19.
 
 T3 is a compatibility spike. Every executable artifact it produced — spike fixtures, the copied
 migrations, the schema they create, and the retry runner — is test-only, under
@@ -347,7 +349,8 @@ The measured invariant results live in
 
 Read from `vendor/laravel/framework` at **13.24.0** during T4, and measured against PostgreSQL 18.4
 and Redis 8.10.0 with phpredis 6.3.0. Every line is a source citation or a measurement, not a reading
-of the documentation.
+of the documentation. These are historical T4 measurements: the spike tests that produced them were
+retired in ANT-19.
 
 **Publication path.**
 
@@ -441,14 +444,14 @@ queue is a `SyncQueue`, the default cache store is an `ArrayStore`, and the sess
 what makes it win.
 
 A suite that reaches Redis explicitly and by name is fine — `InfrastructureContractTest` still asserts
-real Redis connectivity, and the T4 spike uses named connections on database 15. What is not fine is
-reaching shared infrastructure through a framework default nobody chose.
+real Redis connectivity, and the T4 spike, retired in ANT-19, used named connections on database 15.
+What is not fine is reaching shared infrastructure through a framework default nobody chose.
 
 ### What T4 deliberately did not add
 
 > **Historical record of T4, superseded in part by T5.** True when T4 landed and still an accurate
 > account of *that task*. For the current state of production types, schema and configuration, see
-> **What T5 added** below.
+> **What T5 added** below. The spike suites and fixtures described here were retired in ANT-19.
 
 T4 is a compatibility spike. Every executable artifact it produced is test-only, under
 `Modules/Payments/tests/`, which `tests/Architecture/ModuleBoundaryTest.php` excludes from every layer
@@ -517,8 +520,9 @@ T5 is the first task with production Payments code. It added no dependency: `com
   payload unless the child declares a *property* of that name, so an overridden method changes the
   durable key set not at all — measured, not assumed.
 - **`enforce_event_class_map` stays `false`.** Turning it on throws for any unmapped class, and the
-  T3/T4 spikes persist test-only fixtures that must never enter production configuration. An
-  exact-equality test on the map gives the same guarantee at `make check` time instead.
+  T3/T4 spikes, retired in ANT-19, persisted test-only fixtures that must never enter production
+  configuration. A discovery test requiring the map to name exactly the production storable events
+  gives the same guarantee at `make check` time instead.
 - **The dotted alias key is safe.** `Arr::get()` checks `Arr::exists()` *before* it splits on `.`, so
   `event_class_map['payments.payment_initiated']` resolves as a literal key and never as nested
   `['payments']['payment_initiated']`.

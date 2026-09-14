@@ -5,7 +5,6 @@ declare(strict_types=1);
 use Illuminate\Database\Events\TransactionCommitting;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
-use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Modules\Merchant\Infrastructure\Persistence\Eloquent\Merchant;
 use Modules\Payments\Application\Initiation\IdempotencyContention;
@@ -63,98 +62,8 @@ beforeEach(function (): void {
 afterEach(function (): void {
     IntegrationDatabase::rollbackOpenTransactions();
     IntegrationDatabase::releaseLocks();
-
-    // UNCONDITIONAL, NOT ONLY AT A TEST'S HAPPY-PATH END. See OutboxRelayTest's
-    // afterEach for why: a failed assertion between closing and reopening the gate
-    // must not leak `rebuilding` into every later test in this process.
-    initiationReopenGate();
-
     IntegrationDatabase::truncate();
     IntegrationDatabase::disconnectAll();
-});
-
-it('starts from a clean, unwrapped, empty database', function (): void {
-    // H-2, AND THE GUARD AGAINST FG-6. Two separate jobs.
-    //
-    // Unwrapped: transactionLevel() must be 0. If it were 1 this suite has picked
-    // up RefreshDatabase somewhere and every commit claim below is a savepoint.
-    //
-    // Empty: if truncation silently failed, a leaked receipt would make the
-    // reservation return zero rows and the replay assertions would pass for
-    // entirely the wrong reason — the exact false green T3 hit.
-    expect(DB::transactionLevel())->toBe(0)
-        ->and(DB::table('payment_idempotency_receipts')->count())->toBe(0)
-        ->and(DB::table('payment_outbox')->count())->toBe(0)
-        ->and(DB::table('stored_events')->count())->toBe(0);
-
-    // SELF-PROVISIONED (E2). This suite is declared before Feature, so on a fresh
-    // ledgerflow_test nothing has migrated when it arrives; the schema exists only
-    // because ensureSchema() put it there.
-    expect(Schema::hasTable('payment_idempotency_receipts'))->toBeTrue()
-        ->and(Schema::hasTable('payment_outbox'))->toBeTrue()
-        ->and(Schema::hasTable('stored_events'))->toBeTrue();
-
-    // A REAL COMMIT, WITNESSED FROM A SECOND BACKEND. This is the half of H-2 that
-    // the assertions above cannot reach: they would all hold on a connection that
-    // never commits anything. The observer is a different PostgreSQL session, so a
-    // row it can count is a row that genuinely left this transaction.
-    expect(IntegrationDatabase::backendPid())
-        ->not->toBe(IntegrationDatabase::backendPid(IntegrationDatabase::OBSERVER));
-
-    expect(IntegrationDatabase::observedCount('merchants'))->toBe(0);
-
-    $merchant = DB::transaction(function (): Merchant {
-        $merchant = Merchant::factory()->create();
-
-        // Still invisible to the observer while the transaction is open — which is
-        // what makes the count afterwards evidence of a COMMIT rather than of a
-        // write that happened to be readable all along.
-        expect(IntegrationDatabase::observedCount('merchants'))->toBe(0);
-
-        return $merchant;
-    });
-
-    expect(IntegrationDatabase::observedCount('merchants'))->toBe(1)
-        ->and(DB::connection(IntegrationDatabase::OBSERVER)->table('merchants')->where('id', $merchant->getKey())->exists())->toBeTrue()
-        // Back to no open transaction, so the next test starts where this one did.
-        ->and(DB::transactionLevel())->toBe(0);
-});
-
-it('provisions its own schema from nothing', function (): void {
-    // THE OTHER HALF OF H-2, AND IT NEEDS A COLD DATABASE TO MEAN ANYTHING.
-    //
-    // On a warm ledgerflow_test the tables already exist, so ensureSchema() returns
-    // without doing anything and the test above proves only that SOMEBODY migrated
-    // — possibly a previous run, possibly the Feature suite. That is not what E2
-    // claims. The claim is that this suite can start from nothing.
-    //
-    // Repository policy permits validation only through `make test` and `make
-    // check`, so the cold database is created HERE, inside the suite, rather than
-    // by an out-of-band command: drop everything, prove it is gone, and let the
-    // production provisioning path put it back. dropAllTables() takes the
-    // migrations table with it, so ensureSchema()'s `migrate --force` runs the
-    // exact cold-start path a fresh checkout would take.
-    Schema::dropAllTables();
-
-    expect(Schema::hasTable('payment_idempotency_receipts'))->toBeFalse()
-        ->and(Schema::hasTable('stored_events'))->toBeFalse()
-        ->and(Schema::hasTable('merchants'))->toBeFalse();
-
-    IntegrationDatabase::ensureSchema();
-
-    expect(Schema::hasTable('payment_idempotency_receipts'))->toBeTrue()
-        ->and(Schema::hasTable('payment_outbox'))->toBeTrue()
-        ->and(Schema::hasTable('stored_events'))->toBeTrue()
-        ->and(Schema::hasTable('snapshots'))->toBeTrue()
-        ->and(Schema::hasTable('merchants'))->toBeTrue()
-        ->and(Schema::hasTable('users'))->toBeTrue();
-
-    // Usable, not merely present: a schema that exists but cannot take a write
-    // would still pass every hasTable() above.
-    $merchant = Merchant::factory()->create();
-
-    expect(IntegrationDatabase::observedCount('merchants'))->toBe(1)
-        ->and($merchant->exists)->toBeTrue();
 });
 
 it('commits receipt, stored event and outbox in one transaction on one backend', function (): void {
@@ -455,9 +364,8 @@ it('explains a truncation it cannot lock, and gives the bound back afterwards', 
     expect(fn () => IntegrationDatabase::truncate('250ms'))
         ->toThrow(RuntimeException::class, 'Could not truncate the Integration tables within 250ms');
 
-    // THE BOUND IS GIVEN BACK. The default connection outlives this suite — the
-    // Feature suite runs on it next — so a leaked lock_timeout would turn some later
-    // unrelated test into an intermittent 55P03 with no visible cause.
+    // THE BOUND IS GIVEN BACK. A leaked lock_timeout would turn a later statement on
+    // this connection into an intermittent 55P03 with no visible cause.
     expect((string) DB::selectOne('show lock_timeout')->lock_timeout)
         ->toBe($before)
         ->not->toBe('250ms');

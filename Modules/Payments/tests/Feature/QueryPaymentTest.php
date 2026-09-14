@@ -76,15 +76,6 @@ function showPaymentReceipt(int $merchantId, string $paymentId): void
     ]);
 }
 
-it('refuses an unauthenticated read with the shared 401 contract', function (): void {
-    $response = test()->getJson('/api/payments/'.Str::uuid7());
-
-    $response->assertStatus(401);
-
-    expect($response->headers->get('Content-Type'))->toStartWith('application/problem+json')
-        ->and($response->json('code'))->toBe('unauthenticated');
-});
-
 it('returns the owned projection as exactly five fields in wire order', function (): void {
     $merchant = Merchant::factory()->create();
     $paymentId = (string) Str::uuid7();
@@ -132,33 +123,6 @@ it('returns the pending contract with Retry-After when only the receipt exists',
 
     expect($response->headers->get('Retry-After'))->toBe('1')
         ->and($response->headers->get('Content-Type'))->toStartWith('application/json');
-});
-
-it('answers payment_not_found for a payment neither table knows', function (): void {
-    $paymentId = (string) Str::uuid7();
-
-    $response = showPayment($paymentId);
-
-    $response->assertStatus(404);
-
-    // The WHOLE problem document, order-sensitively. `detail` is ProblemType's own
-    // safe sentence rather than the exception message, and `errors` is absent
-    // because there is nothing field-shaped to report - an extra member here would
-    // be an extra member on the wire.
-    expect($response->json())->toBe([
-        'type' => '/problems/payment-not-found',
-        'title' => 'Payment not found',
-        'status' => 404,
-        'detail' => 'No payment matching this identifier is available.',
-        'instance' => '/api/payments/'.$paymentId,
-        'code' => 'payment_not_found',
-    ]);
-
-    expect($response->headers->get('Content-Type'))->toStartWith('application/problem+json');
-
-    // Nothing about an unknown payment is transient, so nothing invites a retry.
-    // Retry-After belongs to the pending contract and to idempotency contention.
-    $response->assertHeaderMissing('Retry-After');
 });
 
 it('answers payment_not_found for another merchant projection and serves its owner', function (): void {

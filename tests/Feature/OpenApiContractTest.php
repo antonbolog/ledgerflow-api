@@ -283,6 +283,8 @@ it('answers an unknown payment exactly as the documented 404 says', function ():
 
     expect($response->headers->get('Content-Type'))->toStartWith('application/problem+json')
         ->and((array) $response->json())->toBe([...$documented, 'instance' => '/api/payments/'.$paymentId]);
+
+    $response->assertHeaderMissing('Retry-After');
 });
 
 it('documents the idempotency key bounds the request object enforces', function (): void {

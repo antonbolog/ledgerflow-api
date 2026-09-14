@@ -126,7 +126,9 @@ halves.** The commit-boundary suite runs without `RefreshDatabase`, so `DB::tran
 on arrival and every write crosses a real `COMMIT`; a second backend, on a different pid, counts zero
 rows while the transaction is open and the committed rows after it returns. The suite drops every
 table — including `migrations` — proves they are gone, and restores them through the same
-`migrate --force` a fresh checkout would run.
+`migrate --force` a fresh checkout would run. That drop-and-restore probe was retired in ANT-19: the
+suite now runs the idempotent migration and restores its own shared state in every test, independent
+of suite order.
 
 That suite is what proves the atomicity claim rather than restating it:
 

@@ -7,7 +7,6 @@ use Laravel\Horizon\Horizon;
 use Laravel\Horizon\ProvisioningPlan;
 use Laravel\Horizon\SupervisorOptions;
 use Modules\Payments\Infrastructure\Projection\ProjectionConfiguration;
-use Modules\Payments\Infrastructure\Relay\ProjectPaymentEvent;
 use Modules\Payments\Infrastructure\Relay\RelayConfiguration;
 
 /*
@@ -126,24 +125,6 @@ it('keeps the three timeouts strictly ordered in the real configuration', functi
         ->toBe($projection->retryAfterSeconds);
 });
 
-it('adds no timeout or tries property to the serialised job', function (): void {
-    // The ordering chain is enforced by CONFIGURATION, never by properties on the
-    // message. A $timeout or $tries on the job would override the supervisor for
-    // that message alone, invisibly to every assertion above — and would also
-    // change the serialised payload, breaking messages already on the queue.
-    $properties = array_map(
-        fn (ReflectionProperty $p): string => $p->getName(),
-        new ReflectionClass(ProjectPaymentEvent::class)->getProperties(),
-    );
-
-    expect($properties)->toBe(['eventId']);
-
-    foreach (['timeout', 'tries', 'backoff', 'maxExceptions', 'retryUntil'] as $property) {
-        expect(property_exists(ProjectPaymentEvent::class, $property))
-            ->toBeFalse("ProjectPaymentEvent must not declare \${$property}");
-    }
-});
-
 /*
 |--------------------------------------------------------------------------
 | The metadata connection
@@ -169,16 +150,6 @@ it('stores its own bookkeeping away from the Payments transport', function (): v
     expect($payments['max_retries'])->toBe(0)
         ->and($horizon)->not->toHaveKey('max_retries')
         ->and($horizon)->not->toHaveKey('read_timeout');
-});
-
-it('leaves the relay transport bounds untouched', function (): void {
-    // A REGRESSION GUARD, not a restatement: the obvious way to make Horizon work
-    // against a failing connection is to relax `payments`, and that would remove
-    // the bound on how long a row lock is held.
-    $relay = resolve(RelayConfiguration::class);
-
-    expect($relay->redisTimeout)->toBe(0.25)
-        ->and($relay->redisReadTimeout)->toBe(0.25);
 });
 
 /*

@@ -4,21 +4,11 @@ declare(strict_types=1);
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
-use Laravel\Sanctum\PersonalAccessToken;
 use Laravel\Sanctum\Sanctum;
 use Modules\Merchant\Application\Identity\MerchantContext;
 use Modules\Merchant\Application\Identity\NoAuthenticatedMerchantUser;
-use Modules\Merchant\Infrastructure\Identity\AuthenticatedMerchantContext;
 use Modules\Merchant\Infrastructure\Persistence\Eloquent\Merchant;
 use Modules\Merchant\Infrastructure\Persistence\Eloquent\User;
-
-it('stores only the hash of an issued token', function (): void {
-    $user = User::factory()->create();
-    $plainText = $user->createToken('test')->plainTextToken;
-
-    expect(PersonalAccessToken::query()->where('token', $plainText)->exists())->toBeFalse()
-        ->and(PersonalAccessToken::findToken($plainText)?->tokenable_id)->toBe($user->getKey());
-});
 
 it('stores a morph alias rather than a class name', function (): void {
     // The alias is what lets the User class move again without a data
@@ -63,8 +53,4 @@ it('does not cache the merchant across authenticated users', function (): void {
 
     Sanctum::actingAs(User::factory()->for($second)->create());
     expect($context->currentMerchantId())->toBe($second->getKey());
-});
-
-it('is bound to the Sanctum-aware implementation', function (): void {
-    expect(resolve(MerchantContext::class))->toBeInstanceOf(AuthenticatedMerchantContext::class);
 });

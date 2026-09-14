@@ -28,9 +28,8 @@ use Modules\Payments\Infrastructure\Projection\PaymentProjectionConsumer;
  * is what makes a crash before COMMIT produce one safe duplicate instead of a lost
  * projection, so this is a correctness constraint, not a style rule.
  *
- * It implements no queue interface at all. `push()` does not need ShouldQueue —
- * T4 measured that with SpikeRelayJob — and every interface added here is another
- * chance to walk into the trap above.
+ * It implements no queue interface at all. `push()` does not need ShouldQueue, and
+ * every interface added here is another chance to walk into the trap above.
  */
 final readonly class ProjectPaymentEvent
 {

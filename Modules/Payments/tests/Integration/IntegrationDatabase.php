@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Modules\Payments\Infrastructure\Persistence\RetryingAtomicTransaction;
+use Modules\Payments\Infrastructure\Projection\ProjectionGate;
 use RuntimeException;
 use Throwable;
 
@@ -78,20 +79,12 @@ final class IntegrationDatabase
      *
      * RefreshDatabase runs migrate:fresh exactly once per process, gated on the
      * static RefreshDatabaseState::$migrated, and only from a RefreshDatabase test.
-     * A suite without the trait inherits a schema only by accident of ordering, so
-     * on a fresh ledgerflow_test every test here would die on "relation
-     * payment_idempotency_receipts does not exist" whenever it ran before the
-     * Feature suite. This suite is DECLARED BEFORE Feature in phpunit.xml precisely
-     * so that it always does run first — which makes this method load-bearing on
-     * every run rather than dead code that only matters in a launch mode nobody
-     * uses.
+     * A suite without the trait would inherit a schema only by accident of ordering,
+     * so every Integration test establishes its own here, whichever suite ran first.
      *
      * The dangerous repair is worse than the failure: adding RefreshDatabase to make
      * the error go away silently converts every commit into a savepoint, and this
      * suite stops proving the one thing it exists to prove.
-     *
-     * Idempotent, and modelled on SpikeDatabase::ensureSchema(), which solved the
-     * same problem for T3/T4.
      *
      * ONCE PER PROCESS, NOT GATED ON ONE TABLE NAME. An earlier version ran
      * migrations only when `payment_idempotency_receipts` was missing, which is
@@ -220,14 +213,13 @@ final class IntegrationDatabase
     }
 
     /**
-     * TRUNCATE, not DELETE — the opposite of SpikeDatabase's choice, for the
-     * opposite reason.
+     * TRUNCATE, not DELETE: nothing here holds an open read transaction, so ACCESS
+     * EXCLUSIVE is available, and `restart identity` keeps stored_events.id
+     * comparable between tests.
      *
-     * The spike could not use TRUNCATE because the observer sat inside
-     * RefreshDatabase's still-open transaction holding ACCESS SHARE on every table
-     * it had read, and TRUNCATE needs ACCESS EXCLUSIVE. Nothing here holds an open
-     * read transaction, so TRUNCATE is available — and it is what `restart
-     * identity` needs, which keeps stored_events.id comparable between tests.
+     * The seeded projection control row is schema rather than fixture data, so it is
+     * restored rather than truncated. A leaked `rebuilding` row or a deleted one would
+     * otherwise close the gate for every later test in this process.
      *
      * $lockTimeout exists so the failure branch below can be TESTED rather than
      * merely asserted about. The one test that stages a real conflicting lock passes
@@ -260,6 +252,7 @@ final class IntegrationDatabase
 
         try {
             DB::statement('truncate '.implode(', ', self::TABLES).' restart identity cascade');
+            self::restoreProjectionControls();
         } catch (Throwable $exception) {
             // ONLY a lock timeout gets the explanation. Found by mutation: an earlier
             // version caught everything and blamed a leaked backend for a truncate
@@ -279,9 +272,9 @@ final class IntegrationDatabase
                 previous: $exception,
             );
         } finally {
-            // The default connection outlives this suite — the Feature suite runs on
-            // it next. Restoring the server default is what keeps the bound local to
-            // truncation instead of becoming a silent global timeout.
+            // The default connection outlives this call. Restoring the server default is
+            // what keeps the bound local to truncation instead of becoming a silent
+            // global timeout.
             DB::statement('set lock_timeout = default');
         }
     }
@@ -368,5 +361,23 @@ final class IntegrationDatabase
         $row = DB::connection($connection)->selectOne('select pg_backend_pid() as pid');
 
         return (int) ($row->pid ?? 0);
+    }
+
+    private static function restoreProjectionControls(): void
+    {
+        DB::statement(
+            <<<'SQL'
+            insert into payment_projection_controls (projection, state, created_at, updated_at)
+            values (?, ?, now(), now())
+            on conflict (projection) do update set
+                state = excluded.state,
+                owner_token = null,
+                owner_pid = null,
+                started_at = null,
+                cleared_at = null,
+                updated_at = excluded.updated_at
+            SQL,
+            [ProjectionGate::PAYMENT_DETAILS, ProjectionGate::READY],
+        );
     }
 }
