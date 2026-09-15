@@ -39,10 +39,6 @@ it('refuses to delete a merchant that still has users', function (): void {
 });
 
 it('refuses to change merchant ownership through mass assignment', function (): void {
-    // fill()/update() are how request input reaches a model. If merchant_id were
-    // mass-assignable, a payload carrying it would move a user between tenants,
-    // and the whole "the client cannot choose the merchant" rule would be a
-    // convention rather than a guarantee.
     $original = Merchant::factory()->create();
     $other = Merchant::factory()->create();
     $user = User::factory()->for($original)->create();
@@ -52,16 +48,11 @@ it('refuses to change merchant ownership through mass assignment', function (): 
     $user->save();
     $user->refresh();
 
-    // The benign attribute in the same payload still applies, which is what
-    // makes this a mass-assignment guard rather than a rejected write.
     expect($user->name)->toBe('Renamed')
         ->and($user->merchant_id)->toBe($original->id)
         ->and($user->getFillable())->not->toContain('merchant_id');
 });
 
 it('indexes the merchant foreign key', function (): void {
-    // PostgreSQL does not index a foreign key column, and every merchant-scoped
-    // query filters on it. Nothing else in this suite would notice the index
-    // disappearing, because the absence is silent and only costs latency.
     expect(Schema::hasIndex('users', 'users_merchant_id_index'))->toBeTrue();
 });

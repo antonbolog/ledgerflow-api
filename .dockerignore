@@ -1,32 +1,18 @@
-# Build context exclusions.
-#
-# The production stage does `COPY . .`, so anything reachable here can be baked
-# into an image that is later pushed to a registry. Secrets and host artefacts
-# must not be reachable.
-
-# Secrets and local environment. .env.example is deliberately NOT excluded:
-# it is tracked, carries no secrets, and documents the runtime contract.
+# The production stage runs COPY . ., so secrets and host artefacts must never be reachable here.
 .env
 .env.*
 !.env.example
 auth.json
 
-# Version control and CI. Every .gitignore is excluded at every depth: they are
-# repository bookkeeping with no runtime role, and the image must not rely on
-# the nested storage placeholders to create its directory tree. The production
-# stage mkdir's that tree explicitly instead.
 .git
 .gitignore
 **/.gitignore
 .gitattributes
 .github
 
-# Host-installed dependencies. vendor/ is rebuilt inside the image from the
-# committed lockfile; copying the host copy would defeat the pinned build.
 vendor
 node_modules
 
-# Generated runtime data. The entrypoint recreates the directory tree.
 storage/app/private/*
 storage/app/public/*
 storage/framework/cache/*
@@ -36,17 +22,14 @@ storage/framework/views/*
 storage/logs/*
 bootstrap/cache/*
 
-# Test and tooling caches
 .phpunit.cache
 .phpunit.result.cache
 .phpactor.json
 
-# Frontend build output
 public/build
 public/hot
 public/storage
 
-# Editor and OS metadata
 .idea
 .vscode
 .cursor
@@ -58,13 +41,10 @@ public/storage
 .DS_Store
 Thumbs.db
 
-# Documentation and project instructions: not needed at runtime and they make
-# the context larger and the image layers noisier.
 docs
 *.md
 !README.md
 
-# Docker inputs themselves are consumed by explicit COPY, not by `COPY . .`
 compose.yaml
 Dockerfile
 .dockerignore

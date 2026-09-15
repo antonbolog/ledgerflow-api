@@ -13,32 +13,11 @@ use Modules\Payments\Application\Query\PaymentNotFound;
 use Modules\Payments\Tests\Support\CountingMerchantContext;
 use Modules\Payments\Tests\Support\Initiation;
 
-/*
-|--------------------------------------------------------------------------
-| GET /api/payments/{paymentId} - the authenticated read contract
-|--------------------------------------------------------------------------
-|
-| REAL SANCTUM BEARER TOKENS, never Sanctum::actingAs, for the reason
-| Modules/Payments/tests/Support/Initiation.php records: actingAs installs the user
-| straight into the guard and would still pass against a misconfigured guard or a
-| missing personal_access_tokens table.
-|
-| WHAT THIS FILE PROVES: status, exact body, field order, header presence and
-| absence, and that missing, foreign and malformed ids are ONE answer at the wire.
-| The transaction, connection, table-allowlist and gate-affinity claims below HTTP
-| belong to Modules/Payments/tests/Integration/PaymentQueryTest.php, where no
-| RefreshDatabase wrapper turns a transaction into a savepoint.
-|
-*/
-
 function showPayment(string $paymentId, ?Merchant $merchant = null): TestResponse
 {
     $token = Initiation::token($merchant);
 
-    // Required for the same reason Initiation::send() gives: RequestGuard memoises
-    // its resolved user across requests made by one test, so a second request would
-    // silently keep the first token's merchant and every isolation claim here would
-    // pass for the wrong reason.
+    // RequestGuard memoises its user across requests in one test.
     Auth::forgetGuards();
 
     return test()
@@ -86,9 +65,6 @@ it('returns the owned projection as exactly five fields in wire order', function
 
     $response->assertStatus(200);
 
-    // The WHOLE document, compared order-sensitively: an extra member, a renamed
-    // one or a reordered one all fail here. merchant_id, source_event_id and
-    // aggregate_version are internal and must never appear.
     expect($response->json())->toBe([
         'payment_id' => $paymentId,
         'amount_minor' => 1_250,
@@ -97,12 +73,10 @@ it('returns the owned projection as exactly five fields in wire order', function
         'initiated_at' => '2026-08-21T10:11:12.123456+00:00',
     ]);
 
-    // amount_minor crosses the wire as a NUMBER, not a quoted bigint.
     expect($response->json('amount_minor'))->toBeInt();
 
     expect($response->headers->get('Content-Type'))->toStartWith('application/json');
 
-    // A projected payment is not pending, so nothing tells the client to come back.
     $response->assertHeaderMissing('Retry-After');
 });
 
@@ -134,8 +108,6 @@ it('answers payment_not_found for another merchant projection and serves its own
 
     showPayment($paymentId, $stranger)->assertStatus(404);
 
-    // The positive control makes the refusal non-vacuous: the projection is really
-    // there, and its owner really can read it.
     showPayment($paymentId, $owner)->assertStatus(200);
 });
 
@@ -154,19 +126,13 @@ it('cannot be told apart from a missing payment when the payment is someone else
     $stranger = Merchant::factory()->create();
     $paymentId = (string) Str::uuid7();
 
-    // Same id, same caller, one difference: whether another merchant's row exists.
     $missing = showPayment($paymentId, $stranger);
 
-    // BOTH FOREIGN SHAPES, because they are two different rows on two different
-    // tables reached by two different lookups. Only the projected one was compared
-    // at the byte level before; a pending receipt owned by someone else has to be
-    // just as silent.
     $giveItToAStranger(Merchant::factory()->create()->getKey(), $paymentId);
 
     $foreign = showPayment($paymentId, $stranger);
 
-    // BYTES, not a decoded document: a difference in key order or in `instance`
-    // would leak the distinction just as effectively as a different code.
+    // Bytes: a key order or instance difference would leak the distinction too.
     expect($foreign->getContent())->toBe($missing->getContent())
         ->and($foreign->getStatusCode())->toBe($missing->getStatusCode())
         ->and($foreign->headers->get('Content-Type'))->toBe($missing->headers->get('Content-Type'));
@@ -180,8 +146,6 @@ it('gives a malformed payment id the payment contract, never the generic one', f
 
     $response->assertStatus(404);
 
-    // not_found here would mean a route constraint had turned an invalid id into a
-    // different error class from an unknown one.
     expect($response->json('code'))->toBe('payment_not_found')
         ->and($response->json('instance'))->toBe('/api/payments/'.$malformed);
 })->with([
@@ -206,20 +170,12 @@ it('resolves the merchant through MerchantContext exactly once', function (): vo
 it('does not report a not-found payment to the log', function (): void {
     $handler = resolve(ExceptionHandler::class);
 
-    // Laravel declines to report the framework's own NotFoundHttpException. This
-    // is the same answer for a payment rather than a route, and a merchant asking
-    // for identifiers it does not own must not be able to write an error-level
-    // line with a stack trace once per request.
     expect($handler->shouldReport(PaymentNotFound::forRequestedPayment()))->toBeFalse();
 
-    // The positive control: the exemption is this one type, not a handler that
-    // stopped reporting things.
     expect($handler->shouldReport(new RuntimeException('unrelated')))->toBeTrue();
 });
 
 it('leaves an unknown api path on the generic not_found contract', function (): void {
-    // payment_not_found is reachable only through the query endpoint's own
-    // exception type. A status-driven mapping would hand it to every unmatched path.
     $response = test()->getJson('/api/nothing-here');
 
     $response->assertStatus(404);
@@ -227,18 +183,10 @@ it('leaves an unknown api path on the generic not_found contract', function (): 
     expect($response->json('code'))->toBe('not_found');
 });
 
-/*
-|--------------------------------------------------------------------------
-| T11's shared projection gate
-|--------------------------------------------------------------------------
-*/
-
 it('answers 503 projection_rebuilding with Retry-After: 1 while the gate is closed', function (): void {
     $merchant = Merchant::factory()->create();
     $paymentId = (string) Str::uuid7();
 
-    // A PROJECTED ROW EXISTS, so a response that skipped the gate check would
-    // answer 200 instead of refusing - the non-vacuity control.
     showPaymentProjection($merchant->getKey(), $paymentId);
 
     DB::table('payment_projection_controls')->where('projection', 'payment_details')->update([
@@ -274,6 +222,5 @@ it('answers 503 projection_rebuilding with Retry-After: 1 while the gate is clos
         'updated_at' => now(),
     ]);
 
-    // The mutation: the gate reopened is what makes the refusal above non-vacuous.
     showPayment($paymentId, $merchant)->assertStatus(200);
 });

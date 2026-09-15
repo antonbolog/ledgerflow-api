@@ -10,21 +10,7 @@ use RuntimeException;
 use Spatie\EventSourcing\EventHandlers\Projectors\Projector;
 
 /**
- * A synchronous projector that fails AFTER the production writer has run.
- *
- * $weight = 1 puts it behind PaymentOutboxWriter's implicit 0.
- * EventHandlerCollection::syncEventHandlers() sorts handlers by getWeight(), so the
- * ordering is the package's own mechanism and not an accident of which projector
- * was registered first.
- *
- * IT MUST BE A CONTAINER SINGLETON. Projectionist::callEventHandler() re-resolves
- * every handler with app($handler::class) and throws the registered instance away,
- * so a plain `new` would record into an object the test never sees again — the trap
- * T3 hit. Registering by class name plus a singleton binding is what makes
- * outboxRowsSeen readable afterwards.
- *
- * It records BEFORE it throws, so the test can prove the envelope really existed at
- * the moment of failure rather than assuming it from the weight.
+ * Weight 1 runs after PaymentOutboxWriter. Bind it as a container singleton: the projectionist re-resolves handlers through app().
  */
 final class ThrowingProjector extends Projector
 {
@@ -35,10 +21,6 @@ final class ThrowingProjector extends Projector
 
     public function __construct(private readonly ConnectionInterface $connection) {}
 
-    /**
-     * `never`, not `void`: it records and then always throws, and the type says so.
-     * The base Projector declares no such method, so there is no signature to widen.
-     */
     public function onPaymentInitiated(PaymentInitiated $event): never
     {
         $this->outboxRowsSeen[] = $this->connection->table('payment_outbox')->count();

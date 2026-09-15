@@ -93,6 +93,12 @@ registered, `1` when every master is paused - so a dead or paused supervisor fai
 its container is still alive. Its `stop_grace_period` is 20s, above the 15-second worker timeout, so
 SIGTERM lets an in-flight projection finish rather than being SIGKILLed mid-transaction.
 
+The Horizon dashboard is closed unless `APP_ENV=local` and `HORIZON_DASHBOARD_ENABLED=true` both hold.
+Horizon itself has no off switch and, without an explicit gate, falls back to allowing the `local` environment.
+`App\Providers\HorizonServiceProvider` registers that gate, which reads `horizon.dashboard.enabled` and `horizon.dashboard.environments` through configuration, never `env()`, so it still works with cached configuration.
+The gate is evaluated on every request, so any other combination answers `403`.
+`.env.example` ships `HORIZON_DASHBOARD_ENABLED=false`, and the dashboard routes carry only the `web` middleware because the API has no web session.
+
 CI runs quality, all existing Pest suites, and separate runtime and Nginx image builds after dependency setup.
 It no longer starts disposable projects to rehearse paired lifecycle, Redis outages, or operating-system signals.
 The retired process checks are retained as [historical resilience evidence](../testing/payments-resilience.md#process-level-resilience).

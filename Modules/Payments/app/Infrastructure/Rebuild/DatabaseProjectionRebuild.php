@@ -22,105 +22,16 @@ use ReflectionProperty;
 use RuntimeException;
 use Throwable;
 
-/**
- * The bounded batch rebuild, in D6's three phases plus the replay work they
- * guard.
- *
- *     [pin the connection; disable silent reconnection]
- *     SET lock_timeout; SELECT pg_advisory_lock(...)         <- phase 1, session-level, blocking
- *     SET lock_timeout = default
- *     BEGIN; SET LOCAL statement_timeout
- *     SELECT state, cleared_at ... FOR UPDATE; UPDATE ... rebuilding <- phase 2, claims ownership
- *     COMMIT
- *     if takeover AND cleared_at was null:            <- D7 guarded recovery
- *       BEGIN; SET LOCAL statement_timeout
- *       <fence checkpoint 3>; UPDATE ... ready
- *       COMMIT
- *     else:                                            <- fresh start, or a non-null inheritance
- *       BEGIN; SET LOCAL statement_timeout
- *       <fence checkpoint 1>; capture watermark; set cleared_at; DELETE payment_details / receipts
- *       COMMIT
- *       loop:
- *         BEGIN; SET LOCAL statement_timeout
- *         <fence checkpoint 2>; SELECT canonical batch; INSERT receipt+row per event; reconcile marker
- *         COMMIT
- *       BEGIN; SET LOCAL statement_timeout
- *       <fence checkpoint 3>; UPDATE ... ready, cleared_at = null
- *       COMMIT
- *     SELECT pg_advisory_unlock(...)
- *
- * ONE PINNED CONNECTION FOR THE WHOLE RUN, WITH RECONNECTION DISABLED (F3). A
- * command process, not a pooled request: nothing else in this PHP process needs
- * the default connection to reconnect while a rebuild is in progress, and an
- * attempt now fails loudly instead of silently moving to a backend holding no
- * advisory lock - see RebuildFenceFailed and the "surviving process" case in
- * verification-and-rebuild.md.
- *
- * PHASE 1 IS WHY "the rebuild waits for a consumer transaction that started
- * before it, and clears nothing until that transaction ends" NEEDS NO EXPLICIT
- * WAIT LOOP OF ITS OWN. Every traffic path holds ProjectionGate's shared
- * advisory lock for the WHOLE of its own transaction, not merely for the
- * instant of the check; PostgreSQL's exclusive `pg_advisory_lock` call here
- * cannot be granted until every such shared holder has released it. By the
- * time phase 1 returns, no in-flight traffic transaction can still be reading
- * or writing `payment_details`.
- *
- * THE OWNERSHIP FENCE IS RE-VERIFIED AT THREE CHECKPOINTS - immediately before
- * the destructive clear, at the start of every batch, and inside the
- * transaction that sets `ready` - and each one asserts BOTH the control row
- * (this run's token, read FOR UPDATE) and this backend's own possession of the
- * exclusive lock, read from `pg_locks`. Lock possession is asked directly
- * rather than inferred from a stored pid, because a pid comparison is a proxy
- * defeated by pid reuse; see assertOwnership().
- *
- * `cleared_at` HAS EXACTLY TWO WRITERS HERE (D7): clearAndCaptureWatermark()
- * sets it, in the same transaction as the clear, only while still null;
- * transitionToReady() nulls it, in the same transaction as the `ready`
- * transition, after a complete successful replay. claimOwnership() never
- * touches it, so a takeover inherits whatever a previous run left - byte for
- * byte, across any number of takeovers, aborts and re-invocations.
- *
- * GUARDED RECOVERY (D7) is the one shortcut this class takes, and it is
- * narrow on purpose: only when a takeover finds the row already `rebuilding`
- * with `cleared_at` still null - proof that no destructive clear has
- * committed by anyone since the last completed rebuild - does the run skip
- * straight to the `ready` transition, replaying nothing. A fresh start from
- * `ready` also reads `cleared_at` as null (the CHECK constraint requires it),
- * which is exactly why that fact alone is never the test: only
- * claimOwnership()'s own previous-state read distinguishes "nothing to redo"
- * from "this is the first attempt". Every other combination - a fresh start,
- * or a takeover whose inherited `cleared_at` is already set - is a mandatory
- * full clear and replay, even when the read model happens to look complete.
- * See runClaimedRebuild().
- *
- * REPLAY READS ONLY `stored_events`, THROUGH THE CONSUMER'S OWN DECODER
- * (PaymentInitiatedEnvelope::fromStoredEventRow()). The outbox is derived
- * state this whole feature exists to detect corruption in; deriving the read
- * model from it instead would launder that corruption back in. It never
- * rehydrates PaymentAggregate, dispatches an event, or invokes Spatie replay,
- * the consumer, or PaymentOutboxWriter.
- *
- * WHAT THIS NEVER TOUCHES: `payment_outbox` rows (never created or deleted -
- * only `projection_completed_at` is reconciled per event, exactly as a first
- * delivery would set it), `stored_events`, `snapshots`, and
- * `payment_idempotency_receipts`.
- */
+// One pinned connection with reconnection disabled for the whole run. The exclusive lock waits out every
+// traffic transaction holding the shared gate, and replay reads stored_events only, never the outbox (ADR 0005).
 final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
 {
     private const string PAYMENTS_ALIAS_PREFIX = 'payments.';
 
-    /** `lock_not_available` - phase 1's bounded wait expired; a live rebuild holds the gate. */
     private const string LOCK_TIMEOUT_SQLSTATE = '55P03';
 
-    /** `query_canceled` - a later statement's own bound fired. */
     private const string STATEMENT_TIMEOUT_SQLSTATE = '57014';
 
-    /**
-     * NO IN-PROCESS WORK BUDGET, unlike the verifier's. Every bound here is
-     * already a PostgreSQL-side timeout - the exclusive lock's `lock_timeout`
-     * and each transaction's `statement_timeout` - and a bounded batch loop
-     * checks progress by row count, not by elapsed wall time.
-     */
     public function __construct(
         private Connection $connection,
         private RebuildConfiguration $config,
@@ -134,19 +45,14 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
             return RebuildOutcome::refused(RebuildReason::ConfirmationMissing);
         }
 
-        // A savepoint could not establish this command's session-level lock or
-        // durable commit boundaries - the same guard targeted repair and the
-        // verifier both carry.
+        // A savepoint cannot hold this command's session lock or its own commit boundaries.
         if ($this->connection->transactionLevel() !== 0) {
             return RebuildOutcome::failed(RebuildReason::DatabaseError);
         }
 
         $originalReconnector = $this->disableReconnection();
 
-        // "FOR THE DURATION OF THE RUN" MEANS EVERY EXIT FROM HERE, not only a
-        // completed one: a refused lock acquisition restores it exactly as a
-        // completed or aborted run does. Nothing below this point may return
-        // without passing through this `finally`.
+        // Every exit, including a refused lock acquisition, must restore the reconnector.
         try {
             return $this->runUnderExclusiveLock($operationId);
         } finally {
@@ -154,16 +60,6 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
         }
     }
 
-    /**
-     * Phase 1, and everything the exclusive lock guards.
-     *
-     * THE LOCK RELEASE IS UNCONDITIONAL ON EVERY EXIT FROM runClaimedRebuild(),
-     * including a failure in the intent log itself - the very first thing that
-     * runs after the lock is confirmed held. A `finally` here, rather than a
-     * release at the end of the happy path plus another in a catch block, is
-     * what makes that true regardless of which of runClaimedRebuild()'s own
-     * exits is taken, including one this class did not anticipate.
-     */
     private function runUnderExclusiveLock(string $operationId): RebuildOutcome
     {
         try {
@@ -185,36 +81,6 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
         }
     }
 
-    /**
-     * Everything from token minting onward, run while phase 1's exclusive
-     * lock is held.
-     *
-     * NOTHING HERE MAY ESCAPE UNCAUGHT. Both blocks below run before
-     * claimOwnership() ever does, so a failure in either leaves the control
-     * row exactly as claimOwnership() found it - untouched - and reports a
-     * classified `RebuildOutcome` rather than propagating past
-     * runUnderExclusiveLock()'s lock-release `finally` and rebuild()'s
-     * reconnector-restoring one uncaught, which would skip the console
-     * command's JSON contract entirely.
-     *
-     * THE CONNECTION READ IS CAUGHT SEPARATELY FROM THE LOG, and deliberately
-     * first: a lost connection immediately after acquiring the exclusive lock
-     * is a realistic failure - PostgreSQL can drop a session at any point,
-     * not only mid-transaction - and it is a database fact, not an audit-sink
-     * fact, so it is reported as DatabaseError rather than being folded into
-     * IntentAuditFailed. Neither classification touches runStep()'s own
-     * commit-uncertainty logic below: nothing here has opened a transaction
-     * yet, so there is no commit outcome to be uncertain about.
-     *
-     * A LOGGING FAILURE NEVER MISREPORTS THE OUTCOME, in either direction.
-     * Before claimOwnership() runs, a broken sink means the mutation never
-     * begins (IntentAuditFailed, matching RepairReason's own case exactly).
-     * After transitionToReady() has committed, a broken sink must not turn a
-     * real success into a reported failure state, nor silently claim a clean
-     * success when the run's own audit trail is unreliable - AuditFailed
-     * reports the completed progress while still being a failure exit, for the
-     * same reason targeted repair's own AuditFailed is.
-     */
     private function runClaimedRebuild(string $operationId): RebuildOutcome
     {
         try {
@@ -243,27 +109,13 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
             /** @var array{previousState: string, clearedAt: string|null} $claim */
             $claim = $this->runStep(fn (): array => $this->claimOwnership($token, $pid));
 
-            // GUARDED RECOVERY (D7). Only a TAKEOVER of an already-`rebuilding`
-            // row is eligible, never a fresh start from `ready` - the CHECK
-            // constraint guarantees `ready` also reads `cleared_at` as null, so
-            // that fact alone cannot be the test, or a fresh start would wrongly
-            // skip the very work it exists to do. Eligible only when BOTH hold:
-            // this run took over (previousState is REBUILDING) AND the durable
-            // row's cleared_at is still null - proof that no destructive clear
-            // has committed, by anyone, since the last completed rebuild. Every
-            // other combination - a fresh start, or a takeover whose inherited
-            // cleared_at is already set - is a mandatory full clear and replay,
-            // even when the read model happens to look complete.
+            // Guarded recovery requires a takeover of a rebuilding row with cleared_at still null (ADR 0005, D7).
+            // A fresh start from ready also reads null, so previousState is part of the test.
             if ($claim['previousState'] === ProjectionGate::REBUILDING && $claim['clearedAt'] === null) {
                 $guardedRecovery = true;
                 $eventsReplayed = 0;
                 $batchesCommitted = 0;
 
-                // CHECKPOINT 3 STILL APPLIES, UNCHANGED: transitionToReady()
-                // re-verifies ownership before it may reopen the gate, exactly
-                // as it does on the full-replay path below. Checkpoints 1 and 2
-                // do not apply here because there is no clear and no batch to
-                // guard - not because they were skipped.
                 $this->runStep(function () use ($token): void {
                     $this->transitionToReady($token);
                 });
@@ -312,11 +164,6 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
 
             return RebuildOutcome::failed($failed->reason, $highWatermark, $eventsReplayed, $batchesCommitted, $guardedRecovery);
         } catch (Throwable $failure) {
-            // ANYTHING runStep() DID NOT ALREADY CLASSIFY - in practice only
-            // reachable from a bug, since every database statement above runs
-            // inside runStep(). Reported the same way rather than escaping
-            // uncaught, which would skip both the JSON contract and the lock
-            // release this method's caller depends on.
             $this->logSafely(function () use ($operationId, $token, $failure, $highWatermark, $eventsReplayed, $batchesCommitted): void {
                 $this->logger->error('Payments projection rebuild: aborted.', [
                     'category' => 'rebuild_aborted',
@@ -333,10 +180,7 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
             return RebuildOutcome::failed(RebuildReason::DatabaseError, $highWatermark, $eventsReplayed, $batchesCommitted, $guardedRecovery);
         }
 
-        // THE WORK LANDED: transitionToReady()'s own transaction already
-        // committed. From here, a logging failure reports AuditFailed with the
-        // real final progress attached - never DatabaseError, which would
-        // wrongly suggest the projection is still `rebuilding`.
+        // The ready transition has committed: a logging failure is AuditFailed, never DatabaseError.
         try {
             $this->logger->info('Payments projection rebuild: completed.', [
                 'category' => 'rebuild_completed',
@@ -357,10 +201,6 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
     }
 
     /**
-     * Log best-effort: a logging failure here must never replace or mask an
-     * outcome already decided by the caller - the same rule releaseLockQuietly()
-     * follows for the lock itself.
-     *
      * @param  Closure(): void  $logCall
      */
     private function logSafely(Closure $logCall): void
@@ -368,36 +208,13 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
         try {
             $logCall();
         } catch (Throwable) {
-            // Deliberate: see the call sites.
+            // Logging must not replace an outcome the caller already decided.
         }
     }
 
+    // A silent reconnect would continue on a backend holding no advisory lock. Connection has no reconnector
+    // getter, so the original is read by reflection and restored after the run.
     /**
-     * F3's defence, in code. Any statement issued outside a transaction while
-     * this connection believes it has none open would otherwise be silently
-     * retried on a freshly reconnected backend - one holding no advisory lock -
-     * per Connection::tryAgainIfCausedByLostConnection(). Turning that into a
-     * loud failure is strictly additional to the ownership fence, which is the
-     * actual proof; a defence that depends on framework configuration alone is
-     * not one.
-     *
-     * "FOR THE DURATION OF THIS RUN", NOT PERMANENTLY. This connection is the
-     * SAME shared default object every other Payments adapter resolves - a
-     * standalone `payments:projections:rebuild` process owns it exclusively for
-     * its own lifetime and disabling reconnection for good would be harmless
-     * there, but this class also has to be safe to call twice in one PHP
-     * process (Integration tests do exactly that), so the original reconnector
-     * is captured here and handed back to rebuild()'s own `finally`, which
-     * restores it via restoreReconnection() on every exit - refused,
-     * completed, or aborted alike.
-     *
-     * READ BY REFLECTION, DELIBERATELY, RATHER THAN GUESSED. Connection
-     * exposes setReconnector() but no getter; reconstructing what
-     * DatabaseManager would have installed risks restoring a DIFFERENT
-     * closure from whatever was actually there - including one a test itself
-     * installed. Reading the live property back is the only way "restore
-     * exactly what was there before" is a fact rather than an assumption.
-     *
      * @return callable(Connection): mixed
      */
     private function disableReconnection(): callable
@@ -423,20 +240,11 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
         return $original;
     }
 
-    /** The other half of disableReconnection(): restore exactly what was captured. */
     private function restoreReconnection(callable $original): void
     {
         $this->connection->setReconnector($original);
     }
 
-    /**
-     * Phase 1: the session-level exclusive lock, bounded and blocking.
-     *
-     * SESSION-LEVEL lock_timeout, not SET LOCAL: no transaction is open yet for
-     * a local setting to be scoped to. Reset unconditionally in `finally`, so
-     * phase 1's bound can never leak into a later short transaction regardless
-     * of whether the lock was granted or the wait timed out.
-     */
     private function acquireExclusiveLock(): void
     {
         $this->connection->statement($this->config->lockTimeoutStatement());
@@ -451,28 +259,8 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
         }
     }
 
+    // Never writes cleared_at: a takeover must inherit it unchanged. Only the clear and the ready transition write it.
     /**
-     * Phase 2: claim ownership, preserving `cleared_at` exactly as D7 requires,
-     * and report what was found so the caller can decide guarded recovery.
-     *
-     * `cleared_at` IS NOT NAMED IN THIS STATEMENT, ON PURPOSE. Whatever a
-     * previous run left - null after a clean start, non-null after a partial
-     * clear - passes through untouched. Only clearAndCaptureWatermark() and
-     * transitionToReady() may ever write that column. This method claims
-     * UNCONDITIONALLY, whether the row was `ready` (a fresh start) or already
-     * `rebuilding` (a takeover of an abandoned run). The session-level exclusive
-     * gate serialises rebuild owners; FOR UPDATE protects this row transition.
-     * CHECK constraints enforce row shape, not preservation of historical clear
-     * evidence, which depends on these writers leaving the marker untouched.
-     *
-     * THE PREVIOUS STATE IS RETURNED, NOT ONLY `cleared_at`, because guarded
-     * recovery (D7) is conditioned on BOTH: a fresh start from `ready` also
-     * reads `cleared_at` as null - the CHECK constraint requires it - so that
-     * fact alone cannot be the test, or a fresh start would wrongly skip the
-     * very work it exists to do. Only a genuine takeover of an already
-     * `rebuilding` row, found with `cleared_at` still null, may take the
-     * shortcut.
-     *
      * @return array{previousState: string, clearedAt: string|null}
      */
     private function claimOwnership(string $token, int $pid): array
@@ -484,7 +272,6 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
         );
 
         if ($row === null) {
-            // Unreachable from the seeded migration; refused rather than assumed.
             throw new RuntimeException(
                 'payment_projection_controls has no row for payment_details; refusing to claim it.'
             );
@@ -502,15 +289,7 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
         return ['previousState' => $row->state, 'clearedAt' => $row->cleared_at];
     }
 
-    /**
-     * Fence checkpoint 1, the watermark, and the atomic clear (D6 step 3-4).
-     *
-     * `cleared_at` AND THE CLEAR COMMIT IN ONE TRANSACTION, so a lost commit
-     * response leaves the two either both landed or neither did - never one
-     * without the other. `coalesce(cleared_at, now())` is what makes this
-     * write idempotent across a takeover of a run that already cleared: it
-     * only ever records the FIRST clear since the last completed rebuild.
-     */
+    // cleared_at and the clear commit together; coalesce keeps the first clear since the last completed rebuild.
     private function clearAndCaptureWatermark(string $token): int
     {
         $this->assertOwnership($token, 'before the destructive clear');
@@ -538,21 +317,6 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
     }
 
     /**
-     * Fence checkpoint 2, one keyset batch of canonical events, replayed.
-     *
-     * DERIVED FROM stored_events THROUGH THE CONSUMER'S OWN DECODER, never
-     * from `payment_outbox`. A row that fails to decode raises
-     * ProjectionEnvelopeRejected, which aborts the whole run rather than
-     * skipping the row: a rebuild that quietly stepped over corrupt canonical
-     * history would report `ready` over a projection it did not fully build.
-     *
-     * THE RECEIPT, THE READ ROW, AND THE MARKER RECONCILIATION, per event, in
-     * this transaction - the same three writes projectFirstDelivery() makes,
-     * because every event in a rebuild IS a first delivery against the
-     * just-cleared tables. `on conflict do nothing` on the receipt is
-     * defensive rather than expected: nothing but this run's own clear could
-     * have left one behind.
-     *
      * @return array{count: int, cursor: int}
      */
     private function replayBatch(string $token, int $cursor, int $watermark): array
@@ -576,9 +340,6 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
         $lastId = $cursor;
 
         foreach ($rows as $row) {
-            // NAMED EXPLICITLY, NOT `(array) $row` - the decoder reads five
-            // keys and this select returns six; spreading the row would hand
-            // it `id`, a column it does not read.
             $envelope = PaymentInitiatedEnvelope::fromStoredEventRow([
                 'aggregate_uuid' => $row->aggregate_uuid,
                 'aggregate_version' => $row->aggregate_version,
@@ -607,10 +368,6 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
                 'initiated_at' => $envelope->occurredAt->format(PaymentInitiated::OCCURRED_AT_FORMAT),
             ]);
 
-            // D9's marker reconciliation: set only where this batch just
-            // created the receipt that completes it, and only while the
-            // marker is still null. Every other payment_outbox column is
-            // untouched.
             $this->connection->update(
                 <<<'SQL'
                 update payment_outbox
@@ -627,13 +384,6 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
         return ['count' => count($rows), 'cursor' => $lastId];
     }
 
-    /**
-     * Fence checkpoint 3: the transition that reopens the gate.
-     *
-     * The only path permitted to null `cleared_at` (D7), and it does so in the
-     * same transaction as the state transition itself - so a lost commit
-     * response leaves both landed or neither, exactly as the clear does.
-     */
     private function transitionToReady(string $token): void
     {
         $this->assertOwnership($token, 'in the transaction that sets ready');
@@ -649,19 +399,7 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
         );
     }
 
-    /**
-     * The ownership fence: both assertions, neither redundant (see the class
-     * docblock and verification-and-rebuild.md, "Ownership fence").
-     *
-     * LOCK POSSESSION IS READ FROM pg_locks, NOT COMPARED AGAINST A STORED PID.
-     * A pid comparison is a proxy for "is this still my session" and pid
-     * reuse defeats it; asking pg_locks whether THIS backend currently holds
-     * the exclusive gate lock is the direct question. This is a runtime
-     * self-check on the session in question, not the affinity EVIDENCE T4's
-     * rule forbids a holder from self-reporting - that rule governs test
-     * evidence, and tests for this fence still witness from a third
-     * connection.
-     */
+    // Lock possession comes from pg_locks, not a stored pid, which pid reuse would defeat.
     private function assertOwnership(string $token, string $checkpoint): void
     {
         $row = $this->connection->selectOne(
@@ -699,10 +437,6 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
     }
 
     /**
-     * Run one transaction: `SET LOCAL` the bound, the caller's work, commit -
-     * classifying an ambiguous commit exactly as the relay, the consumer and
-     * targeted repair each do at this same boundary.
-     *
      * @template TResult
      *
      * @param  Closure(): TResult  $work
@@ -733,13 +467,6 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
         }
     }
 
-    /**
-     * The classification, from the phases rather than from the end state -
-     * the same reasoning OutboxRelay::abort() and PaymentProjectionConsumer::abort()
-     * record. A fence refusal or an undecodable canonical event are never
-     * ambiguous: both are raised from a plain read, before this step ever
-     * attempted its COMMIT.
-     */
     private function classifyAbort(Throwable $failure, bool $transactionStarted, bool $commitAttempted): RebuildReason
     {
         $serverTransactionOpen = $this->serverTransactionOpen();
@@ -766,9 +493,7 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
             return RebuildReason::CanonicalEventUndecodable;
         }
 
-        // An OPEN SERVER TRANSACTION is the only thing that PROVES the commit
-        // did not land; its absence after an attempted commit is the absence
-        // of proof either way, which is what "unknown" means.
+        // Only an open server transaction proves an attempted commit did not land.
         if ($commitAttempted && ! $serverTransactionOpen) {
             return RebuildReason::CommitOutcomeUnknown;
         }
@@ -779,14 +504,7 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
         };
     }
 
-    /**
-     * Whether PostgreSQL still has a transaction open on this connection.
-     *
-     * Wrapped, because getPdo() is exactly the call that fails when the
-     * connection is the thing that broke. An unanswerable question is
-     * `false`: this is only ever used to look for PROOF the commit did not
-     * land, and the absence of proof is what "unknown" is made of.
-     */
+    // Unanswerable means false: callers only look for proof that a commit did not land.
     private function serverTransactionOpen(): bool
     {
         try {
@@ -804,15 +522,6 @@ final readonly class DatabaseProjectionRebuild implements ProjectionRebuild
         return (int) $row->pid;
     }
 
-    /**
-     * Release the exclusive lock, or say why not, but never let cleanup
-     * replace the failure that led here.
-     *
-     * SAFE TO CALL WHETHER OR NOT THIS SESSION STILL HOLDS IT: PostgreSQL's
-     * `pg_advisory_unlock` returns false rather than raising when the caller
-     * does not hold the lock, which is exactly the state a fence failure or a
-     * lost session can leave this connection in.
-     */
     private function releaseLockQuietly(): void
     {
         try {

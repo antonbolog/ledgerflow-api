@@ -6,17 +6,6 @@ namespace Modules\Payments\Domain\Payment\Exceptions;
 
 use InvalidArgumentException;
 
-/**
- * A PaymentInitiated could not be constructed from the values supplied.
- *
- * Deliberately extends an SPL class: a single-segment global name is the one
- * thing the Domain rule admits without an allowlist entry, and there is no
- * framework exception this could usefully be.
- *
- * This is the last line of defence, not the user-facing one. T6's request
- * validation returns 422 before any of these can fire; if one does fire through
- * the HTTP path, the handler skipped canonicalisation.
- */
 final class InvalidPaymentInitiation extends InvalidArgumentException
 {
     public static function identifier(string $field, string $value): self

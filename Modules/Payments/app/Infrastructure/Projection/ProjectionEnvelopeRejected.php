@@ -6,32 +6,8 @@ namespace Modules\Payments\Infrastructure\Projection;
 
 use RuntimeException;
 
-/**
- * A deterministic refusal to project the envelope this delivery carried.
- *
- * DETERMINISTIC IS THE WHOLE CLASSIFICATION. Every factory below describes a
- * condition that the SAME bytes will reproduce on every redelivery: the alias is
- * not the one this consumer decodes, the schema version is not the one it
- * understands, the payload disagrees with itself or with its columns, or a receipt
- * exists whose read row does not. None of them can be fixed by waiting, so a
- * redelivery budget is the right thing for them to consume — as opposed to a lock
- * timeout or a lost connection, which say nothing about the envelope and are not
- * this type.
- *
- * The CATEGORY, not the message, is the durable artefact. `last_projection_error`
- * takes one of the constants below and nothing else, so an operator reading a
- * poisoned row sees a fixed vocabulary rather than whatever a driver or a decoder
- * happened to write. The message stays for the log and for the failed-job record.
- *
- * NO CALLER DATA IN ANY MESSAGE. Every `$reason` below is a literal written in this
- * module — a column name, a key name, a type name — and the only interpolated
- * values are the event id and integers the schema already constrains. A payload
- * value, an idempotency key or a raw exception text must never reach here.
- *
- * WRITING THE METADATA IS NOT THIS CLASS'S JOB. It only says what happened and how
- * it should be counted; the separate short transaction that records it belongs to
- * the failure recorder.
- */
+// Messages reach logs and failed-job records: interpolate only event ids, schema-bound integers
+// and module-owned literals, never payload values or exception text.
 final class ProjectionEnvelopeRejected extends RuntimeException
 {
     public const string UNSUPPORTED_ALIAS = 'projection_alias_unsupported';
@@ -57,8 +33,6 @@ final class ProjectionEnvelopeRejected extends RuntimeException
 
     public static function unsupportedAlias(string $eventId, string $alias): self
     {
-        // The alias is module-owned durable schema, not caller data, so naming it
-        // is safe and is what makes the refusal diagnosable.
         return new self(
             self::UNSUPPORTED_ALIAS,
             "Outbox event {$eventId} carries alias {$alias}, which this consumer does not decode. "
@@ -112,16 +86,6 @@ final class ProjectionEnvelopeRejected extends RuntimeException
         );
     }
 
-    /**
-     * A projector receipt exists, and the read row it claims to have written does not.
-     *
-     * CORRUPTION, NOT AN EMPTY SLOT TO FILL. The receipt and the read row are
-     * written by one transaction, so this state cannot arise from an interrupted
-     * delivery — only from something that deleted or never wrote one of them.
-     * Recreating the row here would make a duplicate delivery quietly repair
-     * damage nobody had detected, and would destroy the evidence that verification
-     * and rebuild exist to act on.
-     */
     public static function readRowMissing(string $eventId, string $paymentId): self
     {
         return new self(
@@ -133,14 +97,6 @@ final class ProjectionEnvelopeRejected extends RuntimeException
         );
     }
 
-    /**
-     * A projector receipt's read row exists and describes a DIFFERENT payment.
-     *
-     * The same corruption as readRowMissing, reachable by the same routes, and
-     * strictly worse: a delivery that accepted it would report the projection
-     * complete and stamp the outbox marker over a row for another payment,
-     * permanently retiring an envelope whose work was never done.
-     */
     public static function readRowMismatch(string $eventId, string $paymentId): self
     {
         return new self(

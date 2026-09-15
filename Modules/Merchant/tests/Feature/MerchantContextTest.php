@@ -11,8 +11,6 @@ use Modules\Merchant\Infrastructure\Persistence\Eloquent\Merchant;
 use Modules\Merchant\Infrastructure\Persistence\Eloquent\User;
 
 it('stores a morph alias rather than a class name', function (): void {
-    // The alias is what lets the User class move again without a data
-    // migration. Asserted here because nothing else would notice its removal.
     expect(User::factory()->create()->getMorphClass())->toBe('merchant_user');
 });
 
@@ -25,13 +23,7 @@ it('authenticates a merchant user from a real bearer token', function (): void {
     $request->headers->set('Authorization', 'Bearer '.$token);
     app()->instance('request', $request);
 
-    // forgetGuards is required, not decorative: the sanctum RequestGuard is
-    // constructed with whatever request was in the container at the time, so a
-    // guard resolved before this swap would never see the header.
-    //
-    // This path is what actingAs() does NOT test. actingAs installs the user
-    // straight into the guard, so it would still pass with no
-    // personal_access_tokens table at all.
+    // A guard resolved before the request swap would never see the header.
     Auth::forgetGuards();
 
     expect(Auth::guard('sanctum')->user()?->getKey())->toBe($user->getKey())

@@ -4,17 +4,6 @@ declare(strict_types=1);
 
 use Modules\Payments\Application\Initiation\PaymentInitiationContext;
 
-/*
-|--------------------------------------------------------------------------
-| The immutable command context
-|--------------------------------------------------------------------------
-|
-| Framework-free on purpose: this class is the one thing that must be identical
-| across every transaction attempt, and it can be proved without a database, a
-| container or a request.
-|
-*/
-
 function slice2Context(
     int $merchantId = 7,
     string $paymentId = '01984f6f-6a20-7000-8000-000000000001',
@@ -53,9 +42,6 @@ it('derives a stable fingerprint from canonical values only', function (): void 
 });
 
 it('never carries the raw idempotency key on any property', function (): void {
-    // The context is the last place the raw key could hide before it reaches the
-    // database. A property scan rather than a named-field check: this fails when a
-    // future property happens to carry it.
     $raw = 'raw-key-that-must-not-survive';
 
     $context = new PaymentInitiationContext(

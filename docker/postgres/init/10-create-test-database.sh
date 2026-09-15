@@ -1,21 +1,6 @@
 #!/bin/sh
-#
-# Creates the separate PostgreSQL test database alongside the development one.
-#
-# The development environment specification requires a separate testing
-# database. Both live in this single pinned engine, so development and test can
-# never drift onto different PostgreSQL versions.
-#
-#   ledgerflow        development
-#   ledgerflow_test   test suite target, reset freely by RefreshDatabase
-#
-# IMPORTANT: docker-entrypoint-initdb.d scripts run exactly once, when the data
-# directory is first initialised. Editing this file afterwards does nothing
-# until the volume is recreated. `make install` (slice 3) therefore performs
-# the same creation idempotently, so this script is the fresh-volume path only.
-#
-# The name is fixed rather than derived from POSTGRES_DB: tests/bootstrap.php,
-# the Makefile and the destructive-command guard recognise only ledgerflow_test.
+# Runs only on a fresh data directory; make db-ensure-test repeats this idempotently for existing volumes.
+# The name is fixed: tests/bootstrap.php, the Makefile and the destructive-command guard recognise only ledgerflow_test.
 set -eu
 
 TEST_DB=ledgerflow_test

@@ -2,12 +2,7 @@ includes:
     - vendor/larastan/larastan/extension.neon
 
 parameters:
-    # Level 10 is PHPStan's strictest, and it is honestly green here with no
-    # baseline. A baseline file is deliberately NOT used: with no domain code
-    # yet there is nothing legitimate to suppress, and one created now would
-    # quietly absorb real findings from T2 onward. If a future slice cannot hold
-    # this level, lower it explicitly and record why rather than generating
-    # suppressions.
+    # No baseline: lower the level explicitly rather than absorbing findings into suppressions.
     level: 10
 
     paths:
@@ -17,26 +12,12 @@ parameters:
         - config
         - database
         - routes
-        # Only the pre-autoload guard is analysed from tests/. The Pest suites
-        # are not: PHPStan cannot see through Pest's fluent DSL, so arch(),
-        # expect() and $this->get() inside closures produce ~20 undefined-method
-        # and mixed errors that are artefacts of the analyser, not defects. That
-        # is a low-level rule, so no level change fixes it, and suppressing it
-        # would need exactly the baseline this project refuses to create. The
-        # suites are verified by running them; the guard is security-relevant
-        # enough to be worth analysing statically as well.
+        # Only the pre-autoload guard is analysed from tests/: PHPStan cannot see through Pest's fluent DSL.
         - tests/bootstrap.php
 
     excludePaths:
         - bootstrap/cache
         - storage
         - vendor
-        # Module test suites are excluded for the same reason tests/ is analysed
-        # only down to bootstrap.php: PHPStan cannot see through Pest's fluent
-        # DSL, so arch() and expect() inside closures produce analyser artefacts
-        # rather than defects.
-        # The trailing /* is load-bearing: PHPStan fnmatches this pattern against
-        # each file path, so `Modules/*/tests` matches the directory and nothing
-        # inside it. Without it the exclusion silently does nothing, which is how
-        # it shipped until the first module test existed to prove otherwise.
+        # The trailing /* is required: PHPStan fnmatches file paths, so Modules/*/tests alone excludes nothing.
         - Modules/*/tests/*

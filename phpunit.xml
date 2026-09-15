@@ -4,39 +4,12 @@
          bootstrap="tests/bootstrap.php"
          colors="true"
 >
-    <!--
-        The bootstrap above is layer 1 of the test-database guard: it runs
-        before the autoloader and refuses any non-allowlisted target before
-        RefreshDatabase can migrate. See tests/bootstrap.php.
-
-        The Laravel skeleton ships DB_CONNECTION=sqlite and DB_DATABASE=:memory:
-        here. Both were removed deliberately and must not come back:
-        docs/testing/payments-resilience.md states that SQLite is not a
-        substitute for PostgreSQL concurrency and advisory-lock behaviour, which
-        the Payments slice depends on. tests/Feature/InfrastructureContractTest
-        asserts the live connection so a silent regression fails loudly.
-
-        force="true" on the database entries is necessary but NOT sufficient.
-        PHPUnit writes putenv() and $_ENV; it does not write $_SERVER, and
-        Laravel's env resolver reads $_SERVER first. Compose's env_file puts the
-        development database in $_SERVER, so these values alone lose to it —
-        measured, not theoretical. tests/bootstrap.php validates the intent
-        declared here and then forces it into every source. This file remains
-        the place the intent is declared; the bootstrap is what makes it win.
-
-        Test configuration lives here rather than in .env.testing because
-        .gitignore excludes .env.* and an untracked file would break
-        clean-checkout reproducibility.
-    -->
+    <!-- force="true" does not write $_SERVER, which Laravel reads first: tests/bootstrap.php validates and forces these values. -->
     <testsuites>
         <testsuite name="Unit">
             <directory>Modules/*/tests/Unit</directory>
         </testsuite>
-        <!--
-            Integration runs before Feature so a freshly created ledgerflow_test is
-            provisioned by IntegrationDatabase rather than by RefreshDatabase.
-            No suite depends on this order.
-        -->
+        <!-- Before Feature, so IntegrationDatabase rather than RefreshDatabase provisions a fresh ledgerflow_test. -->
         <testsuite name="Integration">
             <directory>Modules/*/tests/Integration</directory>
         </testsuite>
@@ -60,17 +33,14 @@
         <env name="BCRYPT_ROUNDS" value="4"/>
         <env name="BROADCAST_CONNECTION" value="null"/>
 
-        <!-- PostgreSQL, the allowlisted test database, never SQLite. -->
+        <!-- PostgreSQL, never SQLite: Payments depends on PostgreSQL locking behaviour. -->
         <env name="DB_CONNECTION" value="pgsql" force="true"/>
         <env name="DB_HOST" value="postgres" force="true"/>
         <env name="DB_PORT" value="5432" force="true"/>
         <env name="DB_DATABASE" value="ledgerflow_test" force="true"/>
-        <!-- Emptied explicitly: DB_URL would otherwise override the above. -->
+        <!-- DB_URL would otherwise override the values above. -->
         <env name="DB_URL" value="" force="true"/>
 
-        <!-- Cache and queue are faked: the suite tests neither in T1, and a
-             shared Redis keyspace would couple test runs to each other. Redis
-             connectivity itself is asserted directly in the contract test. -->
         <env name="CACHE_STORE" value="array" force="true"/>
         <env name="QUEUE_CONNECTION" value="sync" force="true"/>
         <env name="SESSION_DRIVER" value="array" force="true"/>

@@ -12,23 +12,6 @@ use Illuminate\Support\Str;
 use Modules\Payments\Infrastructure\Relay\RelayHeartbeat;
 use Modules\Payments\Tests\Support\RelayTransport;
 
-/*
-|--------------------------------------------------------------------------
-| payments:outbox:status — the read-only JSON health surface
-|--------------------------------------------------------------------------
-|
-| TWO INDEPENDENT SIGNALS. The heartbeat proves the scheduler is still being
-| invoked; the database aggregate proves what PostgreSQL currently holds. Every
-| test below keeps one signal fixed while varying the other, so a failure
-| pinpoints which one broke rather than only that the command returned 1.
-|
-| WRITES NOTHING. There is no commit boundary to test here — only whether the
-| read-only aggregate succeeded or not — which is why this suite needs none of
-| RelayPaymentOutboxCommandTest's transaction-phase machinery.
-|
-*/
-
-/** One payment_outbox row, shaped exactly as PaymentOutboxWriter leaves it. */
 function statusEnvelope(
     string $availableAt = 'now()',
     ?string $projectionCompletedAt = null,
@@ -81,12 +64,6 @@ afterEach(function (): void {
     Date::setTestNow();
 });
 
-/*
-|--------------------------------------------------------------------------
-| Healthy shape
-|--------------------------------------------------------------------------
-*/
-
 it('reports the exact healthy schema and exits 0 on an empty backlog', function (): void {
     putHeartbeat(Date::now());
 
@@ -110,12 +87,6 @@ it('reports the exact healthy schema and exits 0 on an empty backlog', function 
         ])
         ->and($body['heartbeat']['timestamp'])->toBeString();
 });
-
-/*
-|--------------------------------------------------------------------------
-| Heartbeat states, database held constant at ok
-|--------------------------------------------------------------------------
-*/
 
 it('is unhealthy with a non-zero exit when the heartbeat is stale', function (): void {
     putHeartbeat(Date::now()->subSeconds(10));
@@ -151,9 +122,6 @@ it('is unhealthy with a non-zero exit when the heartbeat value is malformed', fu
 });
 
 it('reports the heartbeat as unavailable, distinct from missing, when the cache backend cannot be read', function (): void {
-    // The cache itself is unreachable, which is a different fact from "the
-    // scheduler never ran" — collapsing the two would send an operator after the
-    // wrong process.
     app()->bind(CacheFactory::class, fn (): CacheFactory => new class implements CacheFactory
     {
         public function store($name = null): never
@@ -167,35 +135,22 @@ it('reports the heartbeat as unavailable, distinct from missing, when the cache 
     expect($exit)->toBe(1)
         ->and($body['healthy'])->toBeFalse()
         ->and($body['heartbeat'])->toBe(['state' => 'unavailable', 'timestamp' => null, 'age_seconds' => null])
-        // The database aggregate uses a real Connection, not the cache, so it is
-        // untouched by a broken CacheFactory.
         ->and($body['database']['state'])->toBe('ok');
 });
-
-/*
-|--------------------------------------------------------------------------
-| Database aggregate
-|--------------------------------------------------------------------------
-*/
 
 it('computes eligible, active and oldest-eligible-age from one snapshot', function (): void {
     putHeartbeat(Date::now());
 
-    // Eligible: past available_at, neither completed nor exhausted.
     statusEnvelope(availableAt: "now() - interval '10 seconds'");
-    // Active, but not yet eligible: available_at is still in the future.
     statusEnvelope(availableAt: "now() + interval '1 hour'");
-    // Neither eligible nor active: completed.
     statusEnvelope(projectionCompletedAt: 'now()');
-    // Neither eligible nor active: exhausted.
     statusEnvelope(exhaustedAt: 'now()');
 
     ['exit' => $exit, 'body' => $body] = runStatus();
 
     expect($exit)->toBe(0)
         ->and($body['database'])->toMatchArray(['state' => 'ok', 'eligible_count' => 1, 'active_count' => 2])
-        // Bounded, not exact: the row's age keeps advancing with real wall time
-        // between the insert and the query.
+        // Bounded: the row keeps ageing in real time between insert and query.
         ->and($body['database']['oldest_eligible_age_seconds'])->toBeGreaterThanOrEqual(10)
         ->and($body['database']['oldest_eligible_age_seconds'])->toBeLessThan(30);
 });
@@ -205,9 +160,7 @@ it('reports the database as unavailable, with null metrics and a non-zero exit, 
 
     $sentinel = 'S3CRET-status-sentinel';
 
-    // SELF-DISARMING, same reason as the relay's own pre-BEGIN fault injection: the
-    // callback is registered on the Connection object, which would otherwise keep
-    // throwing for every later test that resolves the same instance.
+    // Self-disarming: the callback stays registered on the shared Connection object.
     $armed = true;
 
     DB::connection()->beforeStartingTransaction(function () use (&$armed, $sentinel): void {

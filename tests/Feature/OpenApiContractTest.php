@@ -254,7 +254,6 @@ it('refuses both operations unauthenticated, exactly as the shared 401 documents
     foreach ($unauthenticated as [$path, $response]) {
         $response->assertStatus(401);
 
-        // `instance` echoes the requested path; every other member must match.
         expect($response->headers->get('Content-Type'))->toStartWith('application/problem+json')
             ->and((array) $response->json())->toBe([...$documented, 'instance' => $path]);
     }
@@ -318,8 +317,6 @@ it('replays a mismatched idempotency key exactly as the documented 409 says', fu
 
     Initiation::send(merchant: $merchant)->assertStatus(202);
 
-    // Sequential, same key, different payload. No race is involved: the first
-    // request's receipt is already committed when the second arbitrates against it.
     $response = Initiation::send(['amount_minor' => 9_900], merchant: $merchant);
 
     $response->assertStatus(409);
@@ -349,7 +346,6 @@ it('constrains currency to the case variants the request object normalises to US
 
     $pattern = '/'.$currency['pattern'].'/';
 
-    // The schema and the endpoint must agree on every case variant, in both directions.
     foreach (['USD', 'usd', 'Usd', 'uSd'] as $accepted) {
         expect((bool) preg_match($pattern, $accepted))->toBeTrue();
 

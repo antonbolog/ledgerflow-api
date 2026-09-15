@@ -12,8 +12,6 @@ return new class extends Migration
     {
         Schema::create('merchants', function (Blueprint $table): void {
             $table->id();
-            // The stable identity seeds, tests and the demo reference. Ids come
-            // from a sequence and are not a cross-environment contract.
             $table->string('slug')->unique();
             $table->string('name');
             $table->timestamps();

@@ -9,10 +9,7 @@ use Illuminate\Support\Facades\Process;
 use Symfony\Component\Console\Input\ArrayInput;
 use Symfony\Component\Console\Output\BufferedOutput;
 
-/*
-| Every probe refuses SQL before it executes, so a broken guard fails the test
-| instead of dropping ledgerflow_test underneath the rest of the Feature suite.
-*/
+// Refuses SQL before it executes, so a broken guard fails the test instead of dropping ledgerflow_test.
 function refuseSqlOnTestDatabase(string ...$connections): void
 {
     foreach (['pgsql', ...$connections] as $connection) {

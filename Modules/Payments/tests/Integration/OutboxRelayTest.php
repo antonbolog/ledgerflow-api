@@ -24,34 +24,6 @@ use Modules\Payments\Tests\Integration\RejectingQueue;
 use Modules\Payments\Tests\Support\RelayTransport;
 use RedisException;
 
-/*
-|--------------------------------------------------------------------------
-| The Payments outbox relay — lock through push
-|--------------------------------------------------------------------------
-|
-| WHY THIS FILE CANNOT LIVE IN THE FEATURE SUITE. RefreshDatabase wraps every
-| Feature test in a transaction, which turns the relay's explicit
-| beginTransaction()/commit() into a SAVEPOINT. At savepoint depth
-| TransactionCommitting never fires, no second connection can observe a commit,
-| and every claim about "published before COMMIT", "rolled back to the exact
-| pre-attempt row" and "committed despite the failure" would pass against a relay
-| that never opened a transaction at all.
-|
-| EVERY DURABLE CLAIM IS READ FROM THE OBSERVER, a second PostgreSQL backend. A
-| row it can see is a row that genuinely left the relay's transaction; a row it
-| cannot see, while the relay's own session can, is PostgreSQL's own statement
-| that the transaction is still open.
-|
-| NO SLEEPS. Contention is created with real locks and bounded by PostgreSQL's own
-| statement_timeout; the crash boundaries are real transaction events.
-|
-| T4 proved the platform permits this design, using a three-column surrogate table
-| and a spike attempt class. This file proves THIS implementation uses it, against
-| the real payment_outbox.
-|
-*/
-
-/** Every column of one envelope, read from the OBSERVER so only committed state counts. */
 function relaySnapshot(string $eventId): array
 {
     $row = DB::connection(IntegrationDatabase::OBSERVER)
@@ -64,13 +36,6 @@ function relaySnapshot(string $eventId): array
     return (array) $row;
 }
 
-/**
- * The four columns T8 owns and T7 must never write.
- *
- * Compared as a whole rather than one at a time: a relay that learned to write
- * exhausted_at would otherwise only be caught by whichever test happened to
- * mention that column.
- */
 function relayT8Columns(array $snapshot): array
 {
     return [
@@ -81,14 +46,6 @@ function relayT8Columns(array $snapshot): array
     ];
 }
 
-/**
- * One committed envelope, shaped exactly as PaymentOutboxWriter leaves it.
- *
- * Inserted directly rather than through POST /api/payments: payment_outbox carries
- * no foreign key to stored_events (a deliberate T5 decision), so the relay's
- * contract can be proved without a merchant, an aggregate or an HTTP request. All
- * three counters take their zero defaults, exactly as T6 leaves them.
- */
 function relayEnvelope(
     ?string $eventId = null,
     string $availableAt = 'now()',
@@ -128,18 +85,11 @@ function relayEnvelope(
     return $eventId;
 }
 
-/**
- * The relay as the application resolves it.
- *
- * Container-resolved rather than hand-built wherever a fake is not required, so
- * the provider binding is exercised by nearly every test rather than by one.
- */
 function relay(): OutboxRelay
 {
     return resolve(OutboxRelay::class);
 }
 
-/** The relay with a transport that refuses, and everything else real. */
 function relayWithRejectingTransport(RejectingQueue $queue): OutboxRelay
 {
     return new OutboxRelay(
@@ -154,14 +104,7 @@ function relayWithRejectingTransport(RejectingQueue $queue): OutboxRelay
     );
 }
 
-/**
- * Start capturing log records, and hand back the live collection.
- *
- * An ArrayObject rather than an array: an array returned here would be COPIED at
- * the moment of return, so every later assertion would read an empty snapshot
- * while the listener filled a different variable — a test that could only ever
- * pass by asserting nothing.
- */
+/** An ArrayObject, because a returned array would be a copy the listener never fills. */
 function relayCapturedLogs(): ArrayObject
 {
     $records = new ArrayObject;
@@ -173,12 +116,7 @@ function relayCapturedLogs(): ArrayObject
     return $records;
 }
 
-/**
- * One allowlisted context field from every captured record, for the records that
- * carry it.
- *
- * @return list<mixed>
- */
+/** @return list<mixed> */
 function relayLogField(ArrayObject $records, string $field): array
 {
     return array_values(array_column(array_column($records->getArrayCopy(), 'context'), $field));
@@ -192,16 +130,10 @@ beforeEach(function (): void {
 
     RelayTransport::configure();
 
-    // The transport override took, read from the server, before anything is
-    // published or deleted.
     expect(RelayTransport::databaseNumber())->toBe(RelayTransport::DATABASE);
     expect(RelayTransport::existingKeys())->toBe([]);
     expect(RelayTransport::existingKeys(RelayTransport::clientPrefix()))->toBe([]);
 
-    // Unwrapped, on both witnesses. transactionLevel() and the PDO can disagree
-    // after a commit-boundary failure, and this suite deliberately creates that
-    // state, so a leak from the previous test must be caught here rather than
-    // misattributed to whichever assertion notices first.
     expect(DB::transactionLevel())->toBe(0)
         ->and(DB::connection()->getPdo()->inTransaction())->toBeFalse()
         ->and(DB::table('payment_outbox')->count())->toBe(0);
@@ -216,12 +148,6 @@ afterEach(function (): void {
     IntegrationDatabase::disconnectAll();
 });
 
-/*
-|--------------------------------------------------------------------------
-| The accepted path
-|--------------------------------------------------------------------------
-*/
-
 it('reports a drained backlog without publishing or writing anything', function (): void {
     expect(relay()->relayOne())->toBe(RelayOutcome::NothingEligible);
 
@@ -232,15 +158,7 @@ it('reports a drained backlog without publishing or writing anything', function 
 });
 
 it('publishes to Redis while its PostgreSQL transaction is still open', function (): void {
-    // THE CROSS-STORE EVIDENCE, and the reason it is conclusive: uncommitted rows
-    // are visible only to the session that wrote them, so "Redis already holds the
-    // message while the OBSERVER still reads the pre-attempt row" is PostgreSQL's
-    // own statement that publication preceded the commit.
-    //
-    // Observed from a TransactionCommitting listener, which Connection::commit()
-    // fires BEFORE getPdo()->commit() — the last instant at which the transaction
-    // is provably still open. The listener does not throw; this test is about the
-    // successful path.
+    // Redis holding the message while the observer still reads the old row proves publication preceded COMMIT.
     $eventId = relayEnvelope();
 
     $insideCommit = [];
@@ -258,11 +176,9 @@ it('publishes to Redis while its PostgreSQL transaction is still open', function
 
     expect($insideCommit['redis_size'])->toBe(1)
         ->and($insideCommit['relay_transaction_level'])->toBe(1)
-        // Still the pre-attempt row, from the second backend.
         ->and($insideCommit['observed']['last_published_at'])->toBeNull()
         ->and((int) $insideCommit['observed']['publish_count'])->toBe(0);
 
-    // And afterwards the observer sees the committed transport state.
     expect((int) relaySnapshot($eventId)['publish_count'])->toBe(1);
 });
 
@@ -279,9 +195,7 @@ it('commits the accepted transport state with the reconciliation grace applied e
         ->and((int) $after['consecutive_transport_failures'])->toBe(0)
         ->and($after['last_transport_error'])->toBeNull();
 
-    // EXACT, not approximate. Both timestamps come from one PostgreSQL now(), which
-    // is transaction_timestamp() and therefore constant for the life of the
-    // transaction — so the grace is arithmetic rather than a race with the clock.
+    // Exact: both timestamps come from one transaction-constant now().
     $gap = DB::connection(IntegrationDatabase::OBSERVER)->selectOne(
         'select extract(epoch from (available_at - last_published_at)) as seconds
            from payment_outbox where event_id = ?',
@@ -290,8 +204,6 @@ it('commits the accepted transport state with the reconciliation grace applied e
 
     expect((float) $gap->seconds)->toBe(30.0);
 
-    // T8's columns are untouched, including exhausted_at: an accepted publication
-    // is not a projection outcome.
     expect(relayT8Columns($after))->toBe(relayT8Columns($before));
 });
 
@@ -306,21 +218,15 @@ it('publishes an identifier rather than an envelope', function (): void {
     expect($job->payload['data']['commandName'])->toBe(ProjectPaymentEvent::class)
         ->and($raw)->toContain($eventId);
 
-    // The canonical envelope stays in PostgreSQL. Anything below appearing on the
-    // wire would make Redis a second source of business truth.
     foreach (['amountMinor', 'currency', 'merchantId', 'occurredAt', 'aggregate', 'payment_outbox'] as $business) {
         expect($raw)->not->toContain($business);
     }
 });
 
 it('takes the oldest eligible row first and cannot see an ineligible one', function (): void {
-    // Ordered by (available_at, event_id) — the same order as
-    // payment_outbox_eligible_index, so the partial index serves the hot path
-    // rather than merely existing.
     $older = relayEnvelope(availableAt: "now() - interval '10 seconds'");
     $newer = relayEnvelope(availableAt: "now() - interval '1 second'");
 
-    // The three ways a row is invisible, one per predicate.
     $future = relayEnvelope(availableAt: "now() + interval '1 hour'");
     $completed = relayEnvelope(projectionCompletedAt: 'now()');
     $exhausted = relayEnvelope(exhaustedAt: 'now()');
@@ -332,7 +238,6 @@ it('takes the oldest eligible row first and cannot see an ineligible one', funct
     expect(relay()->relayOne())->toBe(RelayOutcome::Published);
     expect((int) relaySnapshot($newer)['publish_count'])->toBe(1);
 
-    // Nothing else is reachable, however many passes run.
     expect(relay()->relayOne())->toBe(RelayOutcome::NothingEligible);
 
     foreach ([$future, $completed, $exhausted] as $invisible) {
@@ -341,11 +246,7 @@ it('takes the oldest eligible row first and cannot see an ineligible one', funct
 });
 
 it('skips a row another session holds and publishes the next one instead', function (): void {
-    // M-2. FOR UPDATE alone would BLOCK here until the holder released, and with
-    // the relay's 500 ms statement_timeout that block would surface as a real
-    // 57014 rather than as progress. SKIP LOCKED is what turns a concurrent relay
-    // from a queue into parallel progress, and it is the reason overlapping
-    // invocations need no scheduler mutex.
+    // FOR UPDATE alone would block into a statement timeout; SKIP LOCKED lets overlapping passes progress.
     $held = relayEnvelope(availableAt: "now() - interval '10 seconds'");
     $free = relayEnvelope(availableAt: "now() - interval '1 second'");
 
@@ -353,7 +254,6 @@ it('skips a row another session holds and publishes the next one instead', funct
     $lock->beginTransaction();
     $lock->select('select 1 from payment_outbox where event_id = ? for update', [$held]);
 
-    // No sleep, no retry: one pass, and it must return the OTHER row.
     expect(relay()->relayOne())->toBe(RelayOutcome::Published);
 
     expect((int) relaySnapshot($free)['publish_count'])->toBe(1)
@@ -361,7 +261,6 @@ it('skips a row another session holds and publishes the next one instead', funct
 
     $lock->rollBack();
 
-    // Released, so the previously locked row is reachable again.
     expect(relay()->relayOne())->toBe(RelayOutcome::Published);
     expect((int) relaySnapshot($held)['publish_count'])->toBe(1);
 });
@@ -371,13 +270,8 @@ it('makes an accepted row eligible again only after the grace has passed', funct
 
     expect(relay()->relayOne())->toBe(RelayOutcome::Published);
 
-    // Inside the grace: invisible, so a consumer has time to write its receipt.
     expect(relay()->relayOne())->toBe(RelayOutcome::NothingEligible);
 
-    // Past the grace with no projection_completed_at — which is what a missing
-    // projector receipt looks like from T7's side — the row returns to the active
-    // index and is redelivered. T7 SCHEDULES that redelivery; T8's receipt is what
-    // ends the cycle.
     DB::statement("update payment_outbox set available_at = now() - interval '1 second' where event_id = ?", [$eventId]);
 
     expect(relay()->relayOne())->toBe(RelayOutcome::Published);
@@ -385,12 +279,6 @@ it('makes an accepted row eligible again only after the grace has passed', funct
     expect((int) relaySnapshot($eventId)['publish_count'])->toBe(2)
         ->and(RelayTransport::size())->toBe(2);
 });
-
-/*
-|--------------------------------------------------------------------------
-| Transport rejection — retryable, never poison
-|--------------------------------------------------------------------------
-*/
 
 it('records a transport rejection as retryable state and leaves publication state alone', function (): void {
     $eventId = relayEnvelope();
@@ -402,17 +290,12 @@ it('records a transport rejection as retryable state and leaves publication stat
 
     $after = relaySnapshot($eventId);
 
-    // COMMITTED, not rolled back. Redis refusing a command says nothing about
-    // PostgreSQL, and discarding the failure state would lose the backoff and let
-    // the row hammer a dead transport once a second forever.
+    // Committed, not rolled back: losing the backoff would hammer a dead transport every pass.
     expect((int) $after['consecutive_transport_failures'])->toBe(1)
         ->and($after['last_transport_error'])->toBe('redis_transport_rejected')
-        // Publication state is untouched: nothing was published.
         ->and($after['last_published_at'])->toBeNull()
         ->and((int) $after['publish_count'])->toBe(0);
 
-    // AN ARBITRARILY LONG OUTAGE MUST NEVER EXHAUST A ROW. exhausted_at and the
-    // projection counter belong to T8 and stay exactly as they were.
     expect(relayT8Columns($after))->toBe(relayT8Columns($before));
 
     expect(RelayTransport::size())->toBe(0);
@@ -424,8 +307,6 @@ it('backs off further on each consecutive rejection and clears the state on the 
     $delays = [];
 
     foreach ([1, 2, 3] as $attempt) {
-        // Each pass needs the row eligible again; the backoff itself is what is
-        // being measured, so available_at is read before it is reset.
         DB::statement("update payment_outbox set available_at = now() - interval '1 second' where event_id = ?", [$eventId]);
 
         expect(relayWithRejectingTransport(RejectingQueue::redis())->relayOne())
@@ -445,8 +326,6 @@ it('backs off further on each consecutive rejection and clears the state on the 
 
     expect($delays)->toBe([1, 2, 4]);
 
-    // One acceptance clears the whole transport-failure state, so a recovered
-    // transport does not carry a stale count into its next rejection.
     DB::statement("update payment_outbox set available_at = now() - interval '1 second' where event_id = ?", [$eventId]);
 
     expect(relay()->relayOne())->toBe(RelayOutcome::Published);
@@ -458,18 +337,8 @@ it('backs off further on each consecutive rejection and clears the state on the 
         ->and((int) $recovered['publish_count'])->toBe(1);
 });
 
-/*
-|--------------------------------------------------------------------------
-| Everything that is NOT a transport rejection
-|--------------------------------------------------------------------------
-*/
-
 it('rolls the row back and aborts the pass when PostgreSQL fails inside the transaction', function (): void {
-    // A REAL PostgreSQL failure, not an injected exception: the lock connection
-    // takes ACCESS EXCLUSIVE on payment_outbox, the relay's SELECT queues behind
-    // it, and the relay's own `set local statement_timeout` cancels the statement.
-    // This is simultaneously the only proof that the statement timeout is applied
-    // at all.
+    // The relay's own statement_timeout cancels its SELECT behind ACCESS EXCLUSIVE, proving the timeout is applied.
     $eventId = relayEnvelope();
     $before = relaySnapshot($eventId);
 
@@ -481,13 +350,8 @@ it('rolls the row back and aborts the pass when PostgreSQL fails inside the tran
 
     $lock->rollBack();
 
-    // 57014 query_canceled — the statement timeout, not a lock timeout and not a
-    // concurrency error. It is deliberately NOT on the retry allowlist: the relay
-    // does not retry, its retry is the next scheduled pass.
-    // (Asserted through the row state below rather than by catching twice.)
     expect(relaySnapshot($eventId))->toBe($before);
 
-    // Both witnesses clean, so the connection is reusable.
     expect(DB::transactionLevel())->toBe(0)
         ->and(DB::connection()->getPdo()->inTransaction())->toBeFalse();
 
@@ -495,14 +359,6 @@ it('rolls the row back and aborts the pass when PostgreSQL fails inside the tran
 });
 
 it('lets a non-transport publication failure escape instead of recording a transport rejection', function (): void {
-    // THE CATCH BOUNDARY, IN THE DIRECTION THAT IS EASY TO GET WRONG. A relay that
-    // caught Throwable around the push would convert a serialisation fault, a
-    // configuration error or a lost connection into a durable "transport rejected"
-    // backoff — putting a permanent defect on a retry schedule, reporting a healthy
-    // pass, and leaving publish_count at zero forever with no error anyone reads.
-    //
-    // Found by mutation: `catch (RedisException)` -> `catch (Throwable)` broke no
-    // test until this one existed.
     $eventId = relayEnvelope();
     $before = relaySnapshot($eventId);
 
@@ -511,7 +367,6 @@ it('lets a non-transport publication failure escape instead of recording a trans
     expect(fn () => relayWithRejectingTransport(RejectingQueue::programming())->relayOne())
         ->toThrow(RuntimeException::class, 'unserializable job payload');
 
-    // Nothing was recorded as a transport failure, and nothing was committed.
     expect(relaySnapshot($eventId))->toBe($before)
         ->and((int) relaySnapshot($eventId)['consecutive_transport_failures'])->toBe(0)
         ->and(relaySnapshot($eventId)['last_transport_error'])->toBeNull();
@@ -519,7 +374,6 @@ it('lets a non-transport publication failure escape instead of recording a trans
     expect(DB::transactionLevel())->toBe(0)
         ->and(DB::connection()->getPdo()->inTransaction())->toBeFalse();
 
-    // It is reported as a failed pass, not as a rejection.
     $categories = relayLogField($records, 'category');
 
     expect($categories)->toContain('relay_failed_before_commit')
@@ -527,19 +381,12 @@ it('lets a non-transport publication failure escape instead of recording a trans
 });
 
 it('classifies a failure before BEGIN as pre-commit rather than inferring it from an idle connection', function (): void {
-    // The end state of a failure BEFORE the transaction ever opened is identical to
-    // the end state of a failure AFTER a successful commit: level 0, PDO idle.
-    // Inferring the outcome from that state would report a durable commit for work
-    // that never started. The relay tracks the phase instead.
     $eventId = relayEnvelope();
     $before = relaySnapshot($eventId);
 
     $records = relayCapturedLogs();
 
-    // SELF-DISARMING. The callback is registered on the Connection object, which
-    // outlives this test body; left armed it would make every later
-    // beginTransaction() throw, including the ones this file's own teardown and
-    // successor tests depend on.
+    // Self-disarming: the callback stays registered on the shared Connection object.
     $armed = true;
 
     DB::connection()->beforeStartingTransaction(function () use (&$armed): void {
@@ -565,9 +412,7 @@ it('classifies a failure before BEGIN as pre-commit rather than inferring it fro
 });
 
 it('leaves Laravel and the PDO clean after a commit-boundary failure, and relays again on the same connection', function (): void {
-    // Connection::commit() fires `committing` BEFORE getPdo()->commit(), so a
-    // throwing listener fails the boundary with the transaction still genuinely
-    // open — the case where the relay must roll back rather than guess.
+    // `committing` fires before the PDO commit, so the transaction is still genuinely open.
     $first = relayEnvelope(availableAt: "now() - interval '10 seconds'");
     $second = relayEnvelope(availableAt: "now() - interval '1 second'");
 
@@ -579,28 +424,19 @@ it('leaves Laravel and the PDO clean after a commit-boundary failure, and relays
 
     expect(fn () => relay()->relayOne())->toThrow(RuntimeException::class, 'commit boundary failed');
 
-    // Observed from the second backend: nothing durable happened.
     expect(relaySnapshot($first))->toBe($before);
 
-    // BOTH WITNESSES. T4 measured that they can disagree, and a connection left
-    // `idle in transaction` would hold its row lock and wedge the next pass.
     expect(DB::transactionLevel())->toBe(0)
         ->and(DB::connection()->getPdo()->inTransaction())->toBeFalse();
 
     Event::forget(TransactionCommitting::class);
 
-    // THE CONNECTION IS STILL USABLE. Cleanliness that could not be followed by a
-    // successful relay on the same connection would be a claim about counters, not
-    // about the connection.
     expect(relay()->relayOne())->toBe(RelayOutcome::Published);
     expect((int) relaySnapshot($first)['publish_count'])->toBe(1)
         ->and((int) relaySnapshot($second)['publish_count'])->toBe(0);
 });
 
 it('restores the exact pre-attempt row after a crash between the accepted push and the commit', function (): void {
-    // The documented safe duplicate. Redis has already accepted the message when
-    // the process dies, so the message survives while the row does not — and the
-    // next pass republishes it.
     $eventId = relayEnvelope();
     $before = relaySnapshot($eventId);
 
@@ -610,23 +446,17 @@ it('restores the exact pre-attempt row after a crash between the accepted push a
 
     expect(fn () => relay()->relayOne())->toThrow(RuntimeException::class, 'crashed after the push');
 
-    // Redis kept the message; PostgreSQL kept nothing.
     expect(RelayTransport::size())->toBe(1);
 
-    // EXACT, column by column, not a spot check on two of them: available_at
-    // included, so a partially applied update would fail here.
     expect(relaySnapshot($eventId))->toBe($before);
 
     Event::forget(TransactionCommitting::class);
 
-    // The later pass, with only the crash removed.
     expect(relay()->relayOne())->toBe(RelayOutcome::Published);
 
     expect(RelayTransport::size())->toBe(2)
         ->and((int) relaySnapshot($eventId)['publish_count'])->toBe(1);
 
-    // Both messages carry the same identifier — one safe duplicate, not two
-    // different payments.
     $ids = RelayTransport::pendingJobs()
         ->map(fn ($job): string => (string) json_encode($job->payload))
         ->filter(fn (string $payload): bool => str_contains($payload, $eventId));
@@ -635,10 +465,7 @@ it('restores the exact pre-attempt row after a crash between the accepted push a
 });
 
 it('reports an ambiguous commit outcome instead of claiming the work rolled back', function (): void {
-    // Connection::commit() fires `committed` AFTER getPdo()->commit() has already
-    // succeeded, so a throwing listener leaves durable work behind while the
-    // connection looks exactly like one that never committed: level 0, PDO idle.
-    // The relay cannot distinguish the two and must not pretend it can.
+    // `committed` fires after the PDO commit, so durable work exists while the connection looks rolled back.
     $eventId = relayEnvelope();
 
     $records = relayCapturedLogs();
@@ -651,23 +478,14 @@ it('reports an ambiguous commit outcome instead of claiming the work rolled back
 
     Event::forget(TransactionCommitted::class);
 
-    // ONE POSSIBLE CASE, PROVED COMMITTED FROM THE OBSERVER. This is evidence that
-    // the ambiguity is real, not a claim that every such failure commits.
     expect((int) relaySnapshot($eventId)['publish_count'])->toBe(1);
 
     expect(relayLogField($records, 'category'))->toContain('commit_outcome_unknown');
 
-    // AND THE PASS DOES NOT REPUBLISH. The committed grace is now on the row, so
-    // the next pass sees nothing eligible and the reconciliation is left to a later
-    // scheduled process reading canonical state.
     expect(relay()->relayOne())->toBe(RelayOutcome::NothingEligible);
 });
 
 it('preserves the original failure when the rollback cleanup also throws', function (): void {
-    // Connection::rollBack() fires `rollingBack` at the very end, so a throwing
-    // listener makes the cleanup itself fail after the rollback has happened. A
-    // cleanup exception replacing the primary one would delete the only
-    // information that explains what went wrong.
     $eventId = relayEnvelope();
     $before = relaySnapshot($eventId);
 
@@ -687,16 +505,7 @@ it('preserves the original failure when the rollback cleanup also throws', funct
     expect(relaySnapshot($eventId))->toBe($before);
 });
 
-/*
-|--------------------------------------------------------------------------
-| Wiring and log safety
-|--------------------------------------------------------------------------
-*/
-
 it('resolves onto the same connection the rest of Payments writes through', function (): void {
-    // Connection affinity, which the relay depends on completely: the lock, the
-    // publication and the update must all be one backend, or FOR UPDATE protects
-    // nothing the UPDATE then changes.
     $relay = relay();
 
     $property = new ReflectionProperty(OutboxRelay::class, 'connection');
@@ -704,15 +513,10 @@ it('resolves onto the same connection the rest of Payments writes through', func
     expect($property->getValue($relay))->toBe(DB::connection())
         ->and($property->getValue($relay))->toBeInstanceOf(Connection::class);
 
-    // And the container hands out the same relay within one resolution scope.
     expect(relay())->toBe($relay);
 });
 
 it('keeps raw exception detail out of every relay log record', function (): void {
-    // A driver exception message is written by the transport, not by us: it can
-    // carry a DSN, a password, a host or whatever the server echoed back. Only
-    // allowlisted structured fields are recorded, and the persisted
-    // last_transport_error is a fixed category rather than a message.
     $sentinel = 'S3CRET-sentinel-do-not-log';
 
     $eventId = relayEnvelope();
@@ -729,16 +533,12 @@ it('keeps raw exception detail out of every relay log record', function (): void
             ->and($rendered)->not->toContain('connection refused');
     }
 
-    // The exception CLASS is allowlisted and useful; the message is not.
     expect(relayLogField($records, 'exception_class'))->toContain(RedisException::class);
 
     expect(relaySnapshot($eventId)['last_transport_error'])->toBe('redis_transport_rejected');
 });
 
 it('does not retry a failed row inside the same pass', function (): void {
-    // One attempt, deliberately. The relay's retry is the next scheduled pass one
-    // second later; a loop here would hammer a failing row and could not tell a
-    // transient failure from a permanent one.
     $eventId = relayEnvelope();
 
     $begins = 0;
@@ -756,22 +556,9 @@ it('does not retry a failed row inside the same pass', function (): void {
     expect($begins)->toBe(1)
         ->and((int) relaySnapshot($eventId)['publish_count'])->toBe(0);
 
-    // The classifier the rest of Payments uses agrees this is not a concurrency
-    // error, so nothing on the retry allowlist could have made the relay loop.
     expect(RetryingAtomicTransaction::sqlStateOf(new RuntimeException('failed once')))->toBeNull();
 });
 
-/*
-|--------------------------------------------------------------------------
-| T11's shared projection gate
-|--------------------------------------------------------------------------
-|
-| Only the CLOSED-gate behaviour belongs here. The OPEN-gate case is every test
-| above this section: they all ran with a `ready` control row and nothing
-| about them changed, which is the regression boundary Slice 2 promises.
-*/
-
-/** Close the gate as a rebuild-shaped holder of the durable row would. */
 function relayCloseGate(): void
 {
     DB::table('payment_projection_controls')->where('projection', 'payment_details')->update([
@@ -783,7 +570,6 @@ function relayCloseGate(): void
     ]);
 }
 
-/** Reopen it, exactly as a completed rebuild would. */
 function relayReopenGate(): void
 {
     DB::table('payment_projection_controls')->where('projection', 'payment_details')->update([
@@ -804,9 +590,6 @@ it('reports a closed gate without selecting a row, publishing or writing anythin
 
     expect(relay()->relayOne())->toBe(RelayOutcome::GateClosed);
 
-    // NO ROW SELECTED, so nothing T7 owns moved: available_at,
-    // consecutive_transport_failures and last_transport_error are untouched by
-    // construction, not by rule.
     expect(relaySnapshot($eventId))->toBe($before)
         ->and(RelayTransport::size())->toBe(0)
         ->and(DB::transactionLevel())->toBe(0)
@@ -816,8 +599,6 @@ it('reports a closed gate without selecting a row, publishing or writing anythin
 });
 
 it('is a distinct outcome from a drained backlog, and the pass log agrees', function (): void {
-    // THE NON-VACUOUS CONTROL for the whole point of GateClosed existing as its
-    // own case: an operator must never read a closed gate as an empty backlog.
     relayCloseGate();
 
     expect(relay()->relayOne())->toBe(RelayOutcome::GateClosed)
@@ -825,14 +606,10 @@ it('is a distinct outcome from a drained backlog, and the pass log agrees', func
 
     relayReopenGate();
 
-    // The gate reopened is the mutation: with nothing eligible, the SAME call now
-    // answers the other case.
     expect(relay()->relayOne())->toBe(RelayOutcome::NothingEligible);
 });
 
 it('holds the gate lock on its own connection while the pass is refused by the control row', function (): void {
-    // A row-shaped fixture exists, so a relay that skipped the gate check would
-    // proceed to select and publish it instead of refusing.
     relayEnvelope();
     relayCloseGate();
 
@@ -849,24 +626,13 @@ it('holds the gate lock on its own connection while the pass is refused by the c
 
     Event::forget(TransactionCommitting::class);
 
-    // GRANTED, ON ONE BACKEND. The control row is what refused the pass, not the
-    // lock: the shared try-lock genuinely succeeded, which is D3's point - both
-    // checks are load-bearing, for different failures.
     expect($lockDuringCommit)->toHaveCount(1)
         ->and($lockDuringCommit[0]['mode'])->toBe('ShareLock')
         ->and($lockDuringCommit[0]['granted'])->toBeTrue();
 
-    // THE SAME BACKEND THE REST OF THE RELAY'S TRANSACTION RUNS ON, proved by
-    // object identity rather than a second live pid read from the holder - T4's
-    // rule treats a holder's self-report of lock possession as no observation at
-    // all. OutboxRelay resolves the IDENTICAL Connection object ProjectionGate
-    // does (see "resolves onto the same connection..." below and the shared
-    // binding in PaymentsServiceProvider), so two different backends is not
-    // reachable here.
     $relayConnection = new ReflectionProperty(OutboxRelay::class, 'connection')->getValue(relay());
     expect($relayConnection)->toBe(DB::connection());
 
-    // Gone once the (empty) transaction ended.
     expect(ProjectionGateLocks::onKey(ProjectionGate::CLASS_ID, ProjectionGate::PAYMENT_DETAILS_OBJECT_ID))
         ->toBe([]);
 
@@ -874,9 +640,6 @@ it('holds the gate lock on its own connection while the pass is refused by the c
 });
 
 it('republishes the deferred event once the gate reopens, on the ordinary reconciliation path', function (): void {
-    // NOT BY RE-QUEUEING. Nothing was published while the gate was closed, so the
-    // row is simply still eligible once it reopens - the same mechanism T7 already
-    // owns for any other missed delivery.
     $eventId = relayEnvelope();
 
     relayCloseGate();

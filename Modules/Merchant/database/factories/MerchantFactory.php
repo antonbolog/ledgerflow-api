@@ -17,8 +17,6 @@ class MerchantFactory extends Factory
     protected $model = Merchant::class;
 
     /**
-     * Define the model's default state.
-     *
      * @return array<string, mixed>
      */
     public function definition(): array

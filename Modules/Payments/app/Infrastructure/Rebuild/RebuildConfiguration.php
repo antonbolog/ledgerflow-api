@@ -6,14 +6,6 @@ namespace Modules\Payments\Infrastructure\Rebuild;
 
 use InvalidArgumentException;
 
-/**
- * `config('payments.rebuild')`, converted once and validated once.
- *
- * VALIDATED AT CONTAINER RESOLUTION, before the exclusive lock is even
- * requested - the same reason every other Payments configuration object is:
- * a zero batch size discovered on the first replay loop would already have
- * cleared `payment_details`.
- */
 final readonly class RebuildConfiguration
 {
     private function __construct(
@@ -32,20 +24,12 @@ final readonly class RebuildConfiguration
         );
     }
 
-    /**
-     * The session-level bound on phase 1's exclusive acquisition.
-     *
-     * SESSION-LEVEL, NOT `SET LOCAL`: phase 1 runs before any transaction is
-     * open, so there is nothing for a local setting to be scoped to. The caller
-     * resets it to `default` immediately after acquiring the lock, so it never
-     * leaks into the short transactions that follow.
-     */
+    // Session-level, not SET LOCAL: phase 1 runs before any transaction exists; the caller resets it.
     public function lockTimeoutStatement(): string
     {
         return "set lock_timeout = '".$this->lockTimeoutMs.'ms\'';
     }
 
-    /** Every later transaction's own bound, as `SET LOCAL`. */
     public function statementTimeoutStatement(): string
     {
         return 'set local statement_timeout = '.$this->statementTimeoutMs;
@@ -54,8 +38,6 @@ final readonly class RebuildConfiguration
     /** @param array<array-key, mixed> $config */
     private static function between(array $config, string $key, int $minimum, int $maximum): int
     {
-        // array_key_exists, not isset: a null must be reported as the wrong type
-        // for its key rather than as a missing key, and neither may be defaulted.
         if (! array_key_exists($key, $config)) {
             throw new InvalidArgumentException(
                 "payments.rebuild.{$key} is missing. Every rebuild bound is declared in "

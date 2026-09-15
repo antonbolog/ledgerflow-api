@@ -6,26 +6,8 @@ namespace Modules\Payments\Infrastructure\Projectors;
 
 use RuntimeException;
 
-/**
- * The outbox envelope could not be derived from the event it was handed.
- *
- * A bug signal, never a client condition: it means the projector ran somewhere its
- * contract does not hold. ProblemDetailsMapper renders it as a generic 500, and the
- * message reaches the log rather than the caller.
- */
 final class OutboxEnvelopeNotDerivable extends RuntimeException
 {
-    /**
-     * The condition NEITHER other factory can report.
-     *
-     * A replayed event is fully derivable — EloquentStoredEventRepository::persist()
-     * writes `stored-event-id` into meta_data and StoredEvent::instantiateEvent()
-     * restores it, so storedEventId() is non-null and its row is readable. Both other
-     * guards pass and the writer would happily re-create envelopes, or die on
-     * payment_outbox's unique constraint naming the wrong problem. Only
-     * Projectionist::isReplaying() can tell this apart, and T6 refuses it rather than
-     * deciding rebuild semantics by accident.
-     */
     public static function duringReplay(string $eventId): self
     {
         return new self(

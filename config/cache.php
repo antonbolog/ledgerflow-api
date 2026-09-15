@@ -6,33 +6,7 @@ use Illuminate\Support\Str;
 
 return [
 
-    /*
-    |--------------------------------------------------------------------------
-    | Default Cache Store
-    |--------------------------------------------------------------------------
-    |
-    | This option controls the default cache store that will be used by the
-    | framework. This connection is utilized if another isn't explicitly
-    | specified when running a cache operation inside the application.
-    |
-    */
-
     'default' => env('CACHE_STORE', 'database'),
-
-    /*
-    |--------------------------------------------------------------------------
-    | Cache Stores
-    |--------------------------------------------------------------------------
-    |
-    | Here you may define all of the cache "stores" for your application as
-    | well as their drivers. You may even define multiple stores for the
-    | same cache driver to group types of items stored in your caches.
-    |
-    | Supported drivers: "array", "database", "file", "memcached",
-    |                    "redis", "dynamodb", "storage", "octane",
-    |                    "session", "failover", "null"
-    |
-    */
 
     'stores' => [
 
@@ -68,9 +42,7 @@ return [
                 env('MEMCACHED_USERNAME'),
                 env('MEMCACHED_PASSWORD'),
             ],
-            'options' => [
-                // Memcached::OPT_CONNECT_TIMEOUT => 2000,
-            ],
+            'options' => [],
             'servers' => [
                 [
                     'host' => env('MEMCACHED_HOST', '127.0.0.1'),
@@ -86,20 +58,7 @@ return [
             'lock_connection' => env('REDIS_CACHE_LOCK_CONNECTION', 'default'),
         ],
 
-        /*
-        | The relay's heartbeat store.
-        |
-        | NEVER THE DEFAULT STORE. The default driver and its Redis connection are
-        | env-driven and carry the inherited client retries; a heartbeat write that
-        | retried or blocked would delay the relay pass it is supposed to describe.
-        | This store is pinned to the bounded `payments` connection defined in
-        | config/database.php.
-        |
-        | ITS OWN LITERAL PREFIX, not the env-derived cache.prefix. The heartbeat
-        | key must be one stable literal an operator can read with redis-cli and a
-        | test can delete by name; deriving it from APP_NAME would make the key
-        | change with a display string.
-        */
+        // Pinned to the bounded payments connection with a literal prefix, never the env-driven default store.
         'payments-relay' => [
             'driver' => 'redis',
             'connection' => 'payments',
@@ -130,29 +89,7 @@ return [
 
     ],
 
-    /*
-    |--------------------------------------------------------------------------
-    | Cache Key Prefix
-    |--------------------------------------------------------------------------
-    |
-    | When utilizing the APC, database, memcached, Redis, and DynamoDB cache
-    | stores, there might be other applications using the same cache. For
-    | that reason, you may prefix every cache key to avoid collisions.
-    |
-    */
-
     'prefix' => env('CACHE_PREFIX', Str::slug((string) env('APP_NAME', 'laravel')).'-cache-'),
-
-    /*
-    |--------------------------------------------------------------------------
-    | Serializable Classes
-    |--------------------------------------------------------------------------
-    |
-    | This value determines the classes that can be unserialized from cache
-    | storage. By default, no PHP classes will be unserialized from your
-    | cache to prevent gadget chain attacks if your APP_KEY is leaked.
-    |
-    */
 
     'serializable_classes' => false,
 

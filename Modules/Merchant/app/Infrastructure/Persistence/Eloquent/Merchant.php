@@ -11,12 +11,6 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 use Modules\Merchant\Database\Factories\MerchantFactory;
 
 /**
- * The merchant a payment belongs to.
- *
- * Plain Eloquent, deliberately: this context has no invariant beyond the
- * database's own, and a domain entity, identifier value object or repository
- * interface with no use case behind it would be structure without meaning.
- *
  * @property int $id
  * @property string $slug
  * @property string $name
@@ -33,10 +27,6 @@ class Merchant extends Model
         return $this->hasMany(User::class);
     }
 
-    /**
-     * Module models cannot use the framework's Database\Factories guess, which
-     * assumes a single root factory namespace.
-     */
     protected static function newFactory(): MerchantFactory
     {
         return MerchantFactory::new();
