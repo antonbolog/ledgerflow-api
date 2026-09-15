@@ -10,38 +10,13 @@ use LogicException;
 use Throwable;
 
 /**
- * A ConnectionInterface whose only real methods are transaction() and the two
- * T11's projection gate touches.
- *
- * WHY A HAND-WRITTEN FAKE AND NOT A MOCK: the retry contract is about COUNTING and
- * about the second argument to transaction(). A fake records both as ordinary
- * assertable state, and the seventeen still-unused methods throw rather than
- * returning a plausible null — so a future change that makes the runner touch the
- * connection for anything else fails loudly here instead of silently passing.
- *
- * The outcome queue is what lets one test say "fail, fail, fail, then succeed":
- * each call consumes one entry, a Throwable is thrown and null runs the callback.
- * WHEN THE QUEUE IS EMPTY THE CALL SUCCEEDS. That is deliberate — it means a runner
- * that took a fourth attempt would RETURN a value instead of throwing, so
- * "at most three attempts" is proved by the exhaustion assertion itself rather than
- * only by a call count.
- *
- * transactionLevel() AND selectOne() ARE NOW REAL, NOT UNUSED. RetryingAtomicTransaction
- * wraps the caller's work in a ProjectionGate check on every attempt, and this
- * file's suite is about retry classification, not the gate — every test here needs
- * the gate to answer OPEN without touching a real PostgreSQL connection. Both
- * methods answer exactly what ProjectionGate::inspectPaymentDetails() needs to
- * read an open gate: level 1 (inside the caller's transaction), then the lock
- * acquired, then the control row saying `ready`. No test in this file configures
- * a closed gate; that behaviour belongs to the Integration suite, which runs
- * against real advisory locks.
+ * Each transaction() consumes one queued outcome; an empty queue succeeds, so a fourth attempt would return instead of throwing.
+ * selectOne() and transactionLevel() always answer an open projection gate.
  */
 final class RecordingConnection implements ConnectionInterface
 {
-    /** How many selectOne() calls this connection has answered. */
     private int $selectOneCalls = 0;
 
-    /** Every value passed as transaction()'s $attempts argument, in order. */
     public array $attemptArguments = [];
 
     public int $calls = 0;
@@ -79,9 +54,7 @@ final class RecordingConnection implements ConnectionInterface
     }
 
     /**
-     * The gate's two reads, in the fixed order it makes them: the advisory
-     * try-lock first, the control row second. Odd calls answer the lock, even
-     * calls answer the row — both saying the gate is open.
+     * Odd calls answer the gate's advisory lock read, even calls its control row read.
      *
      * @param  array<mixed>  $bindings
      */
@@ -174,11 +147,7 @@ final class RecordingConnection implements ConnectionInterface
         throw $this->unused(__FUNCTION__);
     }
 
-    /**
-     * Always 1: ProjectionGate::inspect() requires a level of at least 1 before it
-     * will check the gate at all, and this fake's transaction() never opens a real
-     * one for the gate to count.
-     */
+    /** ProjectionGate checks the gate only inside a transaction. */
     public function transactionLevel(): int
     {
         return 1;

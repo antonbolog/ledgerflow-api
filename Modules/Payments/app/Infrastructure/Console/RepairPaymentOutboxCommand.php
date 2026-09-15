@@ -16,26 +16,6 @@ use Symfony\Component\Console\Exception\ExceptionInterface;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Output\OutputInterface;
 
-/**
- * The operator-facing surface of targeted repair: one JSON object, one exit code.
- *
- * A CONSOLE ADAPTER AND NOTHING ELSE. It mints the correlation id, measures the
- * wall clock, passes the acknowledgement through, renders the result and returns
- * the exit code the result derived. Every decision about what a repair means
- * belongs to RepairOutcome, so a future caller of the port and
- * `payments:outbox:repair | jq` cannot disagree about whether one succeeded.
- *
- * THE ACKNOWLEDGEMENT IS AN OPTION, NOT A CONFIRMATION PROMPT. It has to survive
- * being written down in a runbook and read back in a log, which a keystroke does
- * not. It is the operator's assertion that every delivery and failure-recorder
- * process has stopped - including standalone consumers, manual commands and
- * processes on other hosts - and it is recorded as an assertion, never as
- * machine-verified proof. This command starts and stops nothing itself.
- *
- * IT PRINTS NO SUPPLIED IDENTIFIER IT HAS NOT VALIDATED. A malformed event id is
- * refused with a null `event_id`, because echoing operator input into stdout and
- * the audit is how unvalidated data ends up in whatever collects them.
- */
 final class RepairPaymentOutboxCommand extends Command
 {
     protected $signature = 'payments:outbox:repair
@@ -44,7 +24,7 @@ final class RepairPaymentOutboxCommand extends Command
 
     protected $description = 'Reconstruct or correct one outbox envelope from canonical history, with an audit record';
 
-    /** The output contract's version, bumped only by a breaking change to its shape. */
+    // Bump only for a breaking change to the JSON output shape.
     public const int SCHEMA_VERSION = 1;
 
     public const string COMMAND = 'payments:outbox:repair';
@@ -82,8 +62,6 @@ final class RepairPaymentOutboxCommand extends Command
 
     public function handle(): int
     {
-        // hrtime(), not microtime(): a duration that survives an NTP step or a
-        // daylight-saving jump, for the reason the relay command records.
         $startedAt = ($this->clock)();
         $operationId = (string) Str::uuid7();
 

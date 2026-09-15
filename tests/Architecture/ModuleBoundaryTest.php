@@ -12,33 +12,11 @@ use Spatie\EventSourcing\EventHandlers\Projectors\Projector;
 use Spatie\EventSourcing\StoredEvents\ShouldBeStored;
 use Symfony\Component\Finder\Finder;
 
-/*
-|--------------------------------------------------------------------------
-| Module layer and cross-module dependencies
-|--------------------------------------------------------------------------
-|
-| A filesystem scan rather than Pest arch() expectations, deliberately: arch()
-| resolves a namespace through the autoloader and errors when it holds no
-| classes, and Domain is legitimately empty in T2 for both modules. A rule that
-| cannot be stated until the first class exists is a rule that gets written
-| after the first violation.
-|
-| Honest about its limits: a dynamic class string (app('Some\Class')) still
-| escapes this, and so does a helper called through a variable. It catches what
-| a developer writes by habit, not what one writes to evade it.
-|
-*/
-
+// Token scans, not arch(): arch() errors on a namespace with no classes. Dynamic class strings escape these rules.
 const LEDGERFLOW_MODULES_PATH = __DIR__.'/../../Modules';
 
 /**
- * Fully-qualified class names a module's Domain may reference besides its own
- * namespace. EXACT matches, never prefixes: a prefix of Spatie\EventSourcing\
- * would admit Projector, StoredEvent and the Eloquent models alongside the two
- * types ADR 0002 permits.
- *
- * Recorded in docs/adr/0002-payments-domain-event-sourcing-allowlist.md. That
- * document explains the decision; this constant is what enforces it.
+ * Exact names, never prefixes; see docs/adr/0002-payments-domain-event-sourcing-allowlist.md.
  *
  * @var array<string, list<string>>
  */
@@ -68,12 +46,7 @@ function ledgerflowModules(): array
     return $modules;
 }
 
-/**
- * Tokenised source for every PHP file under a directory, memoised because seven
- * rules scan overlapping trees.
- *
- * @return array<string, list<array{0: int, 1: string, 2: int}|string>>
- */
+/** @return array<string, list<array{0: int, 1: string, 2: int}|string>> */
 function ledgerflowTokens(string $directory): array
 {
     static $cache = [];
@@ -98,11 +71,7 @@ function ledgerflowTokens(string $directory): array
     return $cache[$directory] = $files;
 }
 
-/**
- * Namespaced names a file depends on.
- *
- * @return array<string, list<string>>
- */
+/** @return array<string, list<string>> */
 function ledgerflowReferences(string $directory): array
 {
     $references = [];
@@ -115,18 +84,13 @@ function ledgerflowReferences(string $directory): array
                 continue;
             }
 
-            // The file's own `namespace X\Y;` is where it lives, not something
-            // it depends on. Counting it would make every Domain file fail the
-            // Domain rule the moment one exists.
             if (ledgerflowPreviousToken($tokens, $index) === T_NAMESPACE) {
                 continue;
             }
 
             $name = ltrim($token[1], '\\');
 
-            // Single-segment names are global (RuntimeException,
-            // DateTimeImmutable). Without this, `\RuntimeException` fails while
-            // `use RuntimeException;` passes, and the rule measures spelling.
+            // Single-segment names are global, so `\RuntimeException` and `use RuntimeException;` stay equivalent.
             if (! str_contains($name, '\\')) {
                 continue;
             }
@@ -140,12 +104,7 @@ function ledgerflowReferences(string $directory): array
     return $references;
 }
 
-/**
- * Laravel global helper calls, which emit no name token and therefore escape
- * every namespace rule above.
- *
- * @return array<string, list<string>>
- */
+/** @return array<string, list<string>> */
 function ledgerflowHelperCalls(string $directory): array
 {
     $helpers = [
@@ -168,7 +127,6 @@ function ledgerflowHelperCalls(string $directory): array
                 continue;
             }
 
-            // A call, not a method, a static call, or a declaration.
             if (ledgerflowNextSymbol($tokens, $index) !== '(') {
                 continue;
             }
@@ -191,10 +149,6 @@ function ledgerflowHelperCalls(string $directory): array
 }
 
 /**
- * The Domain rule as a pure function over a reference map, so it can be run
- * against fabricated input. A rule that can only run against the current tree
- * is a rule whose failure path is never tested.
- *
  * @param  array<string, list<string>>  $references
  * @return list<string>
  */
@@ -231,11 +185,7 @@ function ledgerflowPreviousToken(array $tokens, int $index): int|string|null
     return null;
 }
 
-/**
- * First argument of the call opening at $index, when it is a string literal.
- *
- * @param  list<array{0: int, 1: string, 2: int}|string>  $tokens
- */
+/** @param  list<array{0: int, 1: string, 2: int}|string>  $tokens */
 function ledgerflowFirstStringArgument(array $tokens, int $index): ?string
 {
     $opened = false;
@@ -296,7 +246,6 @@ function ledgerflowCallReceiver(array $tokens, int $index): ?string
             continue;
         }
 
-        // `app()->environment()`: step back over the argument list to the callee.
         if ($token === ')') {
             $depth = 1;
 
@@ -332,14 +281,6 @@ function ledgerflowNextSymbol(array $tokens, int $index): ?string
 
 dataset('modules', ledgerflowModules(...));
 
-/*
-| Each rule below collects violations and asserts once, rather than asserting
-| per reference inside the loop. Two reasons, both learned from running it: an
-| empty Domain makes a per-reference assertion perform no assertions at all, so
-| PHPUnit marks the rule risky and it enforces nothing it can prove; and a
-| failure reports every violation at once instead of stopping at the first.
-*/
-
 it('lets Domain reference nothing outside its own namespace and the ADR 0002 allowlist', function (string $module): void {
     $violations = ledgerflowDomainViolations(
         $module,
@@ -349,18 +290,7 @@ it('lets Domain reference nothing outside its own namespace and the ADR 0002 all
     expect($violations)->toBeEmpty(implode(PHP_EOL, $violations));
 })->with('modules');
 
-/*
-| The rule above passes vacuously while a Domain is empty, and it will keep
-| passing for Merchant forever. The tests below exercise the SAME function
-| against fabricated references, so the allowlist's failure path is tested
-| rather than assumed.
-*/
-
 it('grants the ADR 0002 exception to exactly two classes in exactly one module', function (): void {
-    // The behavioural tests below prove what the rule DOES with the allowlist.
-    // This one pins the allowlist itself, by value: a third entry, a second
-    // module key, or a substitution is a change to the ADR 0002 decision and has
-    // to fail here rather than quietly widen what Domain may reference.
     expect(LEDGERFLOW_DOMAIN_ALLOWLIST)->toBe([
         'Payments' => [
             AggregateRoot::class,
@@ -378,8 +308,6 @@ it('admits exactly the two ADR 0002 base types into Payments Domain', function (
 });
 
 it('refuses every other event-sourcing type in Payments Domain', function (string $forbidden): void {
-    // The projector is the one a careless allowlist admits: it is the third type
-    // the spike extended, and a namespace-prefix rule would let it through.
     expect(ledgerflowDomainViolations('Payments', ['Fake.php' => [$forbidden]]))->not->toBeEmpty();
 })->with([
     Projector::class,
@@ -388,8 +316,6 @@ it('refuses every other event-sourcing type in Payments Domain', function (strin
 ]);
 
 it('grants the allowlist to Payments only', function (): void {
-    // Merchant has no event-sourced aggregate and no exception. If this passes,
-    // the allowlist has gone global and ADR 0002 is misdescribed.
     expect(ledgerflowDomainViolations('Merchant', ['Fake.php' => [
         AggregateRoot::class,
     ]]))->not->toBeEmpty();
@@ -413,10 +339,6 @@ it('lets Application reference its own module and other modules Application cont
         "Modules\\{$module}\\Application\\",
     ];
 
-    // Cross-context work goes through a published Application contract. This is
-    // the whole reason MerchantContext lives in Application: Payments
-    // Application must be able to import it, and an allowlist that forbade that
-    // would make the contract unusable by the only consumer it exists for.
     foreach (ledgerflowModules() as $other) {
         if ($other !== $module) {
             $allowed[] = "Modules\\{$other}\\Application\\";
@@ -439,8 +361,6 @@ it('lets Application reference its own module and other modules Application cont
 })->with('modules');
 
 it('reaches another module only through its Application namespace', function (string $module): void {
-    // Derived from disk over every discovered pair, so a third module is
-    // governed the moment it exists rather than when someone edits this file.
     $violations = [];
 
     foreach (ledgerflowModules() as $other) {
@@ -465,9 +385,6 @@ it('reaches another module only through its Application namespace', function (st
 })->with('modules');
 
 it('keeps Merchant unaware of Payments entirely', function (): void {
-    // Stricter than the general rule above, and directional on purpose: the
-    // event-sourced context may ask Merchant who owns a payment; Merchant has
-    // no business knowing payments exist.
     $violations = [];
 
     foreach (ledgerflowReferences(ledgerflowModulePath('Merchant')) as $file => $names) {
@@ -496,28 +413,12 @@ it('keeps app/ out of module internals', function (): void {
 });
 
 it('never delegates concurrency classification to laravel', function (): void {
-    // Laravel's ConcurrencyErrorDetector matches 40001 by code and 40P01 only
-    // through the English message 'deadlock detected', and does not recognise
-    // 55P03 AT ALL — T3 measured it returning false for a real PostgreSQL 18.4
-    // lock conflict, the case this specification cares most about. Adopting it
-    // later would silently narrow the allowlist RetryingAtomicTransaction owns,
-    // and nothing else in the suite would notice: the runner would still retry
-    // two of the three states and simply stop retrying the third.
-    //
-    // EXACT NAMES, NOT PREFIXES, matching the ADR 0002 allowlist's discipline: a
-    // prefix of Illuminate\Database\ would forbid the ConnectionInterface and
-    // DeadlockException the Infrastructure layer legitimately depends on.
-    // ::class, not string literals — the same idiom as the ADR 0002 allowlist at
-    // the top of this file, and it means a Laravel rename cannot leave this rule
-    // silently matching a name that no longer exists.
+    // Laravel's detector does not recognise 55P03 (ADR 0003). Exact names keep ConnectionInterface and DeadlockException allowed.
     $forbidden = [
         DetectsConcurrencyErrors::class,
         ConcurrencyErrorDetector::class,
     ];
 
-    // Derived from disk over every module, so a third module is governed the
-    // moment it exists. ledgerflowTokens() excludes tests/, so this rule is about
-    // production source — a test may still NAME the detector to describe it.
     $violations = [];
 
     foreach (ledgerflowModules() as $module) {
@@ -535,10 +436,7 @@ it('never delegates concurrency classification to laravel', function (): void {
 });
 
 it('gives every module all four layers', function (string $module): void {
-    // Required, not merely permitted. A module missing a layer directory is a
-    // module whose layer rules scan nothing, so its boundaries pass vacuously
-    // and forever. An empty Domain is a deliberate state; an absent one hides
-    // the rule that governs it.
+    // A missing layer directory would make its boundary rules pass vacuously.
     $missing = [];
 
     foreach (['Domain', 'Application', 'Infrastructure', 'Http'] as $layer) {
@@ -553,8 +451,6 @@ it('gives every module all four layers', function (string $module): void {
 })->with('modules');
 
 it('organises module application code into the permitted directories only', function (string $module): void {
-    // Providers is framework wiring the module manager discovers, kept beside
-    // the layers rather than inside one.
     $permitted = ['Domain', 'Application', 'Infrastructure', 'Http', 'Providers'];
     $appPath = ledgerflowModulePath($module).'/app';
 
@@ -562,8 +458,6 @@ it('organises module application code into the permitted directories only', func
         expect($directory->getFilename())->toBeIn($permitted);
     }
 
-    // A class dropped straight into app/ would be governed by no layer rule at
-    // all, which is a quieter hole than an unexpected directory.
     $strays = [];
 
     foreach (Finder::create()->files()->depth(0)->in($appPath) as $file) {
@@ -583,47 +477,9 @@ it('carries no frontend, module config or example routing', function (string $mo
     }
 })->with('modules');
 
-/*
-|--------------------------------------------------------------------------
-| Payments relay source must never opt into after-commit dispatch
-|--------------------------------------------------------------------------
-|
-| Queue::shouldDispatchAfterCommit() checks ShouldQueueAfterCommit and a truthy
-| $afterCommit property BEFORE it reads the connection's after_commit config
-| (Queue/Queue.php:396-408). Either would silently override the literal
-| after_commit => false on the payments-projection connection, and the third
-| spelling — ->afterCommit() at the dispatch site — would do the same while
-| leaving NO runtime trace for a reflection test to find.
-|
-| Immediate publication inside the still-open transaction is what turns a crash
-| before COMMIT into one documented safe duplicate instead of a lost projection,
-| so this is a correctness rule.
-|
-| SCOPED TO ONE DIRECTORY, DELIBERATELY. A repository-wide ban would also forbid a
-| future job that legitimately wants after-commit dispatch, which is a decision no
-| architecture test owns. Modules/Payments/app/Infrastructure/Relay is the whole
-| publisher — the message AND the dispatch site — and it is exactly where the third
-| spelling will appear, because ->afterCommit() is written at the push, not on the
-| message. Scanning only the message class would leave that spelling unguarded in
-| the one file most likely to carry it.
-|
-*/
-
+// Any after-commit opt-in would defer relay publication past COMMIT (ADR 0004); ->afterCommit() leaves no runtime trace.
 const LEDGERFLOW_RELAY_SOURCE = __DIR__.'/../../Modules/Payments/app/Infrastructure/Relay';
 
-/**
- * The consumer side, added with T8's dispatch-adjacent code.
- *
- * SCANNED FOR THE SAME THREE SPELLINGS, because the ban is about the DISPATCH of
- * ProjectPaymentEvent and dispatch sites are not confined to the publisher. A
- * future repair command, a rebuild path or a retry that re-published an envelope
- * would most naturally be written here, and ->afterCommit() at such a site leaves
- * no runtime trace for a reflection test to find.
- *
- * The Console directory joins them for the same reason: `payments:outbox:retry`
- * makes a row eligible again, and the obvious next step someone adds to it is a
- * dispatch.
- */
 const LEDGERFLOW_DISPATCH_ADJACENT_SOURCE = [
     __DIR__.'/../../Modules/Payments/app/Infrastructure/Relay',
     __DIR__.'/../../Modules/Payments/app/Infrastructure/Projection',
@@ -631,14 +487,6 @@ const LEDGERFLOW_DISPATCH_ADJACENT_SOURCE = [
 ];
 
 /**
- * The three spellings, found in a token stream.
- *
- * A pure function over tokens rather than a scan of the real file, so the failure
- * path is exercised against fabricated input — the same discipline
- * ledgerflowDomainViolations() already follows. Comments cannot trigger it:
- * token_get_all() yields one T_COMMENT/T_DOC_COMMENT token for a whole comment, so
- * the docblock naming all three traps is invisible here.
- *
  * @param  list<array{0: int, 1: string, 2: int}|string>  $tokens
  * @return list<string>
  */
@@ -660,16 +508,13 @@ function ledgerflowAfterCommitOptIns(array $tokens): array
             continue;
         }
 
-        // $afterCommit, declared or assigned.
         if ($type === T_VARIABLE && strtolower($text) === '$aftercommit') {
             $found[] = '$afterCommit property';
 
             continue;
         }
 
-        // ->afterCommit(). PHP method names are case-insensitive, so the comparison
-        // is too; a rule that matched only the canonical casing would measure
-        // spelling rather than behaviour.
+        // PHP method names are case-insensitive.
         if ($type === T_STRING
             && strtolower($text) === 'aftercommit'
             && ledgerflowNextSymbol($tokens, $index) === '('
@@ -705,10 +550,7 @@ it('keeps every Payments dispatch-adjacent source file clear of after-commit opt
 
     expect($violations)->toBeEmpty(implode(PHP_EOL, $violations));
 
-    // A DIRECTORY SCAN CAN GO EMPTY WITHOUT THE PATH BEING WRONG — a rename inside
-    // it, a move to another layer — and an empty scan reports success. The two
-    // files guaranteed to be here are named; the count catches the rest
-    // disappearing.
+    // An emptied scan would pass, so known files and a minimum count guard the scan itself.
     expect($scanned)->toContain('ProjectPaymentEvent.php')
         ->toContain('PaymentProjectionConsumer.php');
 
@@ -721,8 +563,6 @@ it('keeps every Payments dispatch-adjacent source file clear of after-commit opt
 });
 
 it('detects each after-commit spelling in fabricated source', function (string $source, string $expected): void {
-    // Without these, a rule that returned a constant empty array would leave the
-    // test above green forever.
     expect(ledgerflowAfterCommitOptIns(token_get_all($source)))->toBe([$expected]);
 })->with([
     ['<?php class M implements \Illuminate\Contracts\Queue\ShouldQueueAfterCommit {}', 'implements ShouldQueueAfterCommit'],
@@ -732,8 +572,6 @@ it('detects each after-commit spelling in fabricated source', function (string $
 ]);
 
 it('does not mistake a comment or an unrelated name for an opt-in', function (): void {
-    // The real file's docblock names all three traps in prose. If comments counted,
-    // the rule above would fail on the very documentation that explains it.
     expect(ledgerflowAfterCommitOptIns(token_get_all(
         '<?php /** never use $afterCommit, ->afterCommit() or ShouldQueueAfterCommit */ final class M {}'
     )))->toBeEmpty();
@@ -743,36 +581,9 @@ it('does not mistake a comment or an unrelated name for an opt-in', function ():
     )))->toBeEmpty();
 });
 
-/*
-|--------------------------------------------------------------------------
-| Production module code must not branch on the environment
-|--------------------------------------------------------------------------
-|
-| The resilience evidence rests on production code taking the SAME path under
-| test that it takes in production. A fault reachable only behind an environment
-| check proves nothing about the failure boundary, and it is the one defect the
-| suite itself cannot detect: every crash step would still pass.
-|
-| Scoped to app/, which the layer rules above already establish as where a
-| module's production code lives. config/ reads env() by design, and
-| ledgerflowTokens() already excludes tests/.
-|
-| database/seeders is out of scope on purpose: MerchantDatabaseSeeder refuses to
-| run outside local and testing, which is a guard that makes production safer and
-| fails loudly, not a branch that changes behaviour under test. It is also not on
-| any delivery path a resilience claim rests on.
-|
-*/
-
 /**
- * Environment-conditioned branches, found in a token stream.
- *
- * A pure function over tokens rather than a scan of the real files, so the
- * failure path is exercised against fabricated input.
- *
- * runningInConsole() is deliberately absent: it answers "console or HTTP", not
- * "test or production", and PaymentsServiceProvider registers its commands
- * behind it.
+ * Scoped to module app/ code: tests must exercise the same path production takes. The seeder's environment guard is out of scope.
+ * runningInConsole() is absent because it separates console from HTTP, not test from production.
  *
  * @param  list<array{0: int, 1: string, 2: int}|string>  $tokens
  * @return list<string>
@@ -782,8 +593,7 @@ function ledgerflowEnvironmentBranches(array $tokens): array
     $methods = ['environment', 'runningunittests', 'isproduction', 'islocal'];
     $functions = ['env', 'getenv'];
 
-    // Receiver => call => the argument that makes it an environment read. Both
-    // halves are required: `$collection->get('app.env')` is not a config read.
+    // Receiver => call => argument: both are required, since `$collection->get('app.env')` is not a config read.
     $keyed = [
         '' => ['config' => 'app.env', 'app' => 'env', 'resolve' => 'env'],
         'app' => ['make' => 'env', 'get' => 'env'],
@@ -805,8 +615,6 @@ function ledgerflowEnvironmentBranches(array $tokens): array
             continue;
         }
 
-        // Both spellings: the bare constant and the defined('...') string a
-        // test-runner probe is normally written as.
         if (in_array($type, [T_STRING, T_CONSTANT_ENCAPSED_STRING], true) && str_contains($text, 'PHPUNIT')) {
             $found[] = 'PHPUNIT constant';
 
@@ -855,13 +663,10 @@ it('keeps production module code free of environment-conditioned branches', func
 
     expect($violations)->toBeEmpty(implode(PHP_EOL, $violations));
 
-    // An empty scan reports success, so a moved tree cannot pass silently.
     expect($scanned)->not->toBeEmpty("Modules/{$module}/app produced no scannable production source.");
 })->with('modules');
 
 it('detects each environment-conditioned spelling in fabricated source', function (string $source, string $expected): void {
-    // Without these, a rule that returned a constant empty array would leave the
-    // rule above green forever.
     expect(ledgerflowEnvironmentBranches(token_get_all($source)))->toBe([$expected]);
 })->with([
     ['<?php if (app()->environment("testing")) { throw new RuntimeException("boom"); }', 'environment() call'],
@@ -886,48 +691,38 @@ it('detects each environment-conditioned spelling in fabricated source', functio
 ]);
 
 it('does not mistake a comment or console detection for an environment branch', function (): void {
-    // RelayConfiguration's docblock says "not env()" and two configuration classes
-    // discuss env() in prose. If comments counted, the rule would fail on the very
-    // documentation that explains it.
     expect(ledgerflowEnvironmentBranches(token_get_all(
         '<?php /** THE THREE NAMES ARE LITERALS IN config/payments.php, not env(). */ final class M {}'
     )))->toBeEmpty();
 
-    // The one environment-adjacent call production code legitimately makes.
     expect(ledgerflowEnvironmentBranches(token_get_all(
         '<?php if ($this->app->runningInConsole()) { $this->commands([]); }'
     )))->toBeEmpty();
 
-    // Declaring the method is not calling it.
     expect(ledgerflowEnvironmentBranches(token_get_all(
         '<?php final class M { public function isProduction(): bool { return true; } }'
     )))->toBeEmpty();
 
-    // Only the environment key makes an ordinary config or container read one.
     expect(ledgerflowEnvironmentBranches(token_get_all(
         '<?php $ms = config("payments.relay.statement_timeout_ms"); $c = app("db.connection");'
     )))->toBeEmpty();
 
-    // Receiver, not spelling: these carry the exact literals the rule looks for.
     expect(ledgerflowEnvironmentBranches(token_get_all(
         '<?php $a = $collection->get("app.env"); $b = $factory->make("env"); $c = $resolver->resolve("env");'
     )))->toBeEmpty();
 
-    // Same method names on a domain receiver, which is not the application.
     expect(ledgerflowEnvironmentBranches(token_get_all(
         '<?php $a = $warehouse->isLocal(); $b = $release->isProduction();'
         .' $c = $deployment->environment(); $d = $runner->runningUnitTests();'
     )))->toBeEmpty();
 
-    // A dynamic key escapes the rule, per the limits declared at the top.
+    // A dynamic key is a known limit of the rule.
     expect(ledgerflowEnvironmentBranches(token_get_all(
         '<?php $rows = $collection->get($key);'
     )))->toBeEmpty();
 });
 
 it('would still catch the seeder guard, which is excluded by scope rather than by spelling', function (): void {
-    // The exclusion is the directory, not a hole in the rule. If someone moves a
-    // seeder-style environment guard into app/, this proves the rule sees it.
     expect(ledgerflowEnvironmentBranches(token_get_all(
         '<?php if (! app()->environment(["local", "testing"])) { throw new RuntimeException("no"); }'
     )))->toBe(['environment() call']);

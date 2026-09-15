@@ -4,56 +4,16 @@ declare(strict_types=1);
 
 namespace Modules\Payments\Application\Verification;
 
-/**
- * What one audit run observed, and the single answer it exits with.
- *
- * THE EXIT CODE IS DERIVED HERE, NOT AT THE CONSOLE, because the precedence is
- * a contract rather than a formatting choice:
- *
- *     2 (incomplete) > 1 (inconsistent) > 3 (attention) > 0 (consistent)
- *
- * and it is NOT numerical ordering. A run that found an inconsistency and then
- * lost its connection has not proved anything about the rest of history, so it
- * must exit 2 even though 1 is "worse-looking"; and overdue delivery must not
- * outrank a real contradiction just because 3 is a larger number. Deriving it
- * from the counts in one place is what stops a caller from reassembling it
- * differently.
- *
- * Contradiction findings decide exit 1, including reverse-pass orphans that belong
- * to no canonical event classification. Operational findings are distinguished by
- * VerificationFinding::isContradiction(). Counts describe facts, not unique payments.
- *
- * `scanned` NAMES THE PASSES THAT ACTUALLY RAN, and that is the scope statement.
- * A COMPLETE REPORT MUST CARRY ALL FOUR, which completed() refuses to build
- * without: full-scope completion is claimable only when canonical history and
- * each of the three derived tables have been walked in the same snapshot. A run
- * that finished three of them is an incomplete run, not a clean one with a
- * smaller scope.
- *
- * AN INCOMPLETE RUN KEEPS ITS FINDINGS AND SAYS SO. `complete` is false, the
- * reason names the safe category that stopped it, and the counts describe only
- * what was examined before that point — never a clean bill of health for
- * history the audit never reached.
- */
 final readonly class VerificationReport
 {
-    /** The canonical forward pass over `stored_events`. */
     public const string PASS_CANONICAL_EVENTS = 'canonical_events';
 
-    /** The reverse pass over the named projector's receipts. */
     public const string PASS_PROJECTOR_RECEIPTS = 'projector_receipts';
 
-    /** The reverse pass over the read model. */
     public const string PASS_READ_ROWS = 'payment_details';
 
-    /** The reverse pass over delivery envelopes. */
     public const string PASS_OUTBOX_ENVELOPES = 'payment_outbox';
 
-    /**
-     * Every pass a complete audit has to have finished, in report order.
-     *
-     * @var list<string>
-     */
     public const array REQUIRED_PASSES = [
         self::PASS_CANONICAL_EVENTS,
         self::PASS_PROJECTOR_RECEIPTS,
@@ -114,11 +74,6 @@ final readonly class VerificationReport
         bool $examplesTruncated,
         ?string $projectionControlState = null,
     ): self {
-        // FULL SCOPE OR NOT COMPLETE, ENFORCED HERE RATHER THAN TRUSTED. An
-        // adapter that grew a fifth pass, or lost one to an early return, would
-        // otherwise keep reporting `complete: true` over a scope that had quietly
-        // shrunk - and a clean audit that skipped a table is the one answer this
-        // command must never give.
         $missing = array_values(array_diff(self::REQUIRED_PASSES, array_keys($scanned)));
 
         if ($missing !== []) {
@@ -143,12 +98,6 @@ final readonly class VerificationReport
     }
 
     /**
-     * A run that stopped, carrying what it had already seen.
-     *
-     * $auditAt IS NULLABLE HERE AND NOWHERE ELSE: a failure that happened before
-     * the snapshot was established has no audit timestamp, and inventing one
-     * would date findings that do not exist to a moment the audit never reached.
-     *
      * @param  array<string, int>  $scanned
      * @param  array<string, int>  $classificationCounts
      * @param  array<string, int>  $findingCounts
@@ -179,6 +128,7 @@ final readonly class VerificationReport
         );
     }
 
+    // Precedence is incomplete > inconsistent > attention > consistent, not numeric exit-code order.
     public function outcome(): string
     {
         if (! $this->complete) {
@@ -202,18 +152,7 @@ final readonly class VerificationReport
         };
     }
 
-    /**
-     * How many contradictions were found, in either direction.
-     *
-     * COUNTED FROM FINDINGS, NOT FROM CLASSIFICATIONS, because only canonical
-     * events get classified: a reverse pass finds an orphan that belongs to no
-     * canonical event, so there is nothing to mark `inconsistent`. Reading exit 1
-     * off the classifications would have made every orphan exit 0.
-     *
-     * The two agree on the forward path by construction - a canonical event is
-     * classified `inconsistent` exactly when it recorded a contradiction - so this
-     * widens the rule rather than changing it.
-     */
+    // Counted from findings: reverse-pass orphans have no canonical classification.
     private function contradictionCount(): int
     {
         $total = 0;
@@ -229,13 +168,6 @@ final readonly class VerificationReport
         return $total;
     }
 
-    /**
-     * Overdue delivery, exhaustion, or the event-time anomaly.
-     *
-     * NONE OF THE THREE IS CORRUPTION, and none of them may be silent either.
-     * Exhaustion in particular is a stopped delivery that only an operator can
-     * restart, so a run reporting it must not exit 0 beside a genuinely clean one.
-     */
     private function needsAttention(): bool
     {
         $overdue = $this->classificationCounts[VerificationClassification::DeliveryOverdue->value] ?? 0;

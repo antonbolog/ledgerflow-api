@@ -1,33 +1,3 @@
-# Ledgerflow local development stack.
-#
-#   web (nginx) ──FastCGI──> app (php-fpm) ──┬──> postgres  ledgerflow
-#        :8080                                │              ledgerflow_test
-#     loopback only                           └──> redis
-#
-# Docker-first and editor-neutral: PhpStorm, VS Code, Cursor or a plain
-# terminal all drive the same services from the same host checkout. Laravel
-# Sail is deliberately not used; the application owns its production-oriented
-# Dockerfile.
-#
-# Every image is patch-pinned. Floating tags would make a clean checkout
-# irreproducible over time, which the development environment specification
-# forbids.
-#
-# Worker processes beyond `scheduler` are NOT defined here. They arrive with
-# their own milestones and will reuse the `app` image with a `command:`
-# override, which the entrypoint's `exec "$@"` already supports.
-#
-# `scheduler` and `horizon` ARE defined, both opt-in behind the SAME
-# `projection` profile. A profiled service is excluded from every plain
-# `up`/`start`/`stop`/`destroy` unless `--profile projection` is passed, so a
-# clean install's four default services never change.
-#
-# ONE PROFILE FOR BOTH, AND NO TARGET FOR EITHER ALONE. The relay publishes into
-# `payments-projection` and Horizon is the only thing that drains it, so a
-# scheduler without a consumer produces a growing backlog that looks like a
-# consumer fault rather than a missing process. Activation is therefore a paired
-# operator action: `make projection-start` / `make projection-stop`.
-
 name: ${COMPOSE_PROJECT_NAME:-ledgerflow}
 
 services:
@@ -38,22 +8,13 @@ services:
       app:
         condition: service_healthy
     ports:
-      # Loopback by default. An unauthenticated application should not be
-      # reachable from the local network by accident; override APP_BIND
-      # deliberately if you need that.
+      # Loopback by default: override APP_BIND deliberately to expose it.
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8080}:80"
     volumes:
       - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
-      # ONLY public/, and at the same absolute path the app service sees it.
-      # nginx computes SCRIPT_FILENAME and php-fpm opens that path in its own
-      # container, so /var/www/html/public/index.php must resolve in both — but
-      # nginx has no business holding .env, vendor/, config/ or the rest of the
-      # repository. Mounting the whole tree here would put the application's
-      # secrets one nginx misconfiguration away from being served.
+      # Only public/, at the app's path: nginx must never be able to serve .env or the rest of the repository.
       - ./public:/var/www/html/public:ro
     healthcheck:
-      # Port 80 is the container's own listener. Probing the published port
-      # would test the host's port mapping instead of this container.
       test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:80/up || exit 1"]
       interval: 10s
       timeout: 3s
@@ -66,8 +27,6 @@ services:
       context: .
       target: dev
       args:
-        # Supplied by the Makefile in slice 3. Declared here so that EVERY
-        # build path picks them up, not just an explicit build command.
         HOST_UID: ${HOST_UID:-1000}
         HOST_GID: ${HOST_GID:-1000}
     restart: unless-stopped
@@ -77,21 +36,14 @@ services:
       redis:
         condition: service_healthy
     env_file:
-      # Not required: a clean checkout has no .env until `make install` creates
-      # it, and `docker compose config` must still work before that.
+      # Optional: docker compose config must work before make install creates .env.
       - path: .env
         required: false
     environment:
-      # Derived from the same two variables that publish the port, so changing
-      # APP_PORT cannot leave APP_URL pointing at the old one. `environment`
-      # wins over `env_file`, and compose expands these while env_file would
-      # pass a "${...}" reference through literally.
       APP_URL: "http://${APP_BIND:-127.0.0.1}:${APP_PORT:-8080}"
     volumes:
       - ./:/var/www/html
     healthcheck:
-      # cgi-fcgi speaks FastCGI directly to the pool. A plain TCP check would
-      # pass for a pool that has stopped serving; ping.path proves it responds.
       test:
         - CMD-SHELL
         - >-
@@ -109,17 +61,11 @@ services:
       POSTGRES_DB: ${DB_DATABASE:-ledgerflow}
       POSTGRES_USER: ${DB_USERNAME:-ledgerflow}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-ledgerflow}
-      # Explicit, and a subdirectory of the mount point. Pointing PGDATA at the
-      # mount root itself is what leaves a cluster initialised outside the
-      # volume when the image's default layout changes between major versions.
+      # A subdirectory of the mount, so the cluster never initialises outside the volume.
       PGDATA: /var/lib/postgresql/data/pgdata
-      # Deterministic collation, so index ordering does not depend on the host.
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      # Runs ONLY on first initialisation of an empty data directory. Slice 3
-      # adds an idempotent create in `make install` so editing this file later
-      # does not silently do nothing.
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test:
@@ -143,11 +89,6 @@ services:
       retries: 5
       start_period: 10s
 
-  # Opt-in only: `profiles` keeps this out of every plain `up`, including the
-  # ones `install`/`start` run. It is started and stopped only as HALF OF A PAIR,
-  # by `projection-start`/`projection-stop`, which name it alongside `horizon` on
-  # one command line — see the header comment on why there is no target for
-  # either alone.
   scheduler:
     profiles: ["projection"]
     image: ${LEDGERFLOW_APP_IMAGE:-ledgerflow-app:latest}
@@ -158,8 +99,6 @@ services:
         HOST_UID: ${HOST_UID:-1000}
         HOST_GID: ${HOST_GID:-1000}
     restart: unless-stopped
-    # The SAME image the entrypoint's `exec "$@"` contract already documents —
-    # only the command differs from `app`'s default `php-fpm`.
     command: ["php", "artisan", "schedule:work"]
     depends_on:
       postgres:
@@ -172,35 +111,13 @@ services:
     volumes:
       - ./:/var/www/html
     healthcheck:
-      # NOT mere process existence. payments:outbox:status exits 0 only when
-      # the scheduler heartbeat is fresh AND the PostgreSQL backlog query
-      # succeeds, so a wedged loop or a lost database both fail this check
-      # rather than a `schedule:work` process that is merely still running.
-      #
-      # start_period 75s, MEASURED, not guessed. Laravel's ScheduleWorkCommand
-      # spawns a fresh `schedule:run` subprocess only at second === 0 of each
-      # minute (ScheduleWorkCommand::work()); that subprocess is what actually
-      # loops every 100ms checking repeatable (everySecond()) events until the
-      # end of the minute (ScheduleRunCommand::runDueEventsWithinAMinute()). A
-      # container that starts right after a minute boundary can therefore wait
-      # up to ~60 real seconds before its first tick, independent of anything
-      # this project controls — the disposable T7 evidence run reproduced a
-      # `docker compose up --wait` failure at a 20s start_period for exactly
-      # this reason, with an inherited-from-Redis STALE (not missing) heartbeat
-      # on screen the whole time. Once the first tick lands, every later one is
-      # ~1s apart, so this margin is for the one cold first tick only.
+      # start_period 75s: schedule:work first ticks at the next minute boundary, up to 60 seconds after start.
       test: ["CMD", "php", "artisan", "payments:outbox:status"]
       interval: 5s
       timeout: 3s
       retries: 3
       start_period: 75s
 
-  # The consumer half of the `projection` pair. It is in the SAME profile as the
-  # scheduler and has no Make target of its own, because a scheduler running
-  # without a consumer is the one state this project must not be able to reach by
-  # accident: the relay would publish into a queue nothing drains, every envelope
-  # would sit out its reconciliation grace, and the backlog would look like a
-  # consumer problem rather than a missing process.
   horizon:
     profiles: ["projection"]
     image: ${LEDGERFLOW_APP_IMAGE:-ledgerflow-app:latest}
@@ -211,7 +128,6 @@ services:
         HOST_UID: ${HOST_UID:-1000}
         HOST_GID: ${HOST_GID:-1000}
     restart: unless-stopped
-    # The same image again; only the command differs, exactly as `scheduler` does.
     command: ["php", "artisan", "horizon"]
     depends_on:
       postgres:
@@ -223,23 +139,13 @@ services:
         required: false
     volumes:
       - ./:/var/www/html
-    # SIGTERM REACHES HORIZON DIRECTLY, so it can finish the job in flight before
-    # exiting. Compose's default 10s is below the 15s worker timeout, which would
-    # SIGKILL a worker mid-projection — the one failure the classification cannot
-    # attribute to an envelope. 20s leaves margin above that timeout.
+    # Above the 15s worker timeout, so SIGTERM lets Horizon finish the projection in flight.
     stop_grace_period: 20s
     healthcheck:
-      # NOT mere process existence. `horizon:status` reads the master supervisor
-      # record out of Redis and exits 0 only while Horizon is RUNNING: 2 when no
-      # master is registered at all, 1 when every master is paused. A supervisor
-      # that died, or one an operator paused, therefore fails this check while its
-      # container is still very much alive.
       test: ["CMD", "php", "artisan", "horizon:status"]
       interval: 5s
       timeout: 3s
       retries: 3
-      # Far below the scheduler's 75s: Horizon registers its master supervisor
-      # within a second or two of starting, with no minute boundary to wait for.
       start_period: 20s
 
 volumes:

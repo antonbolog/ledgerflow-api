@@ -18,14 +18,9 @@ class UserFactory extends Factory
     /** @var class-string<User> */
     protected $model = User::class;
 
-    /**
-     * The current password being used by the factory.
-     */
     protected static ?string $password;
 
     /**
-     * Define the model's default state.
-     *
      * @return array<string, mixed>
      */
     public function definition(): array
@@ -36,15 +31,10 @@ class UserFactory extends Factory
             'email_verified_at' => now(),
             'password' => static::$password ??= Hash::make('password'),
             'remember_token' => Str::random(10),
-            // Required by the schema, so the factory must satisfy it: a bare
-            // User::factory()->create() has to produce a valid row.
             'merchant_id' => Merchant::factory(),
         ];
     }
 
-    /**
-     * Indicate that the model's email address should be unverified.
-     */
     public function unverified(): static
     {
         return $this->state(fn (array $attributes) => [

@@ -1,22 +1,6 @@
-# Ledgerflow — public command interface.
-#
-# This Makefile is the sole interface for three categories of work:
-#
-#   environment lifecycle   install  start  stop  destroy
-#   database lifecycle      db-migrate  db-seed
-#   projection runtime      projection-start  projection-stop
-#   validation              quality  test-unit  test-integration  test  check  ci
-#   images                  build-runtime  build-nginx
-#
-# CI derives all validation from these targets. Ad-hoc `artisan`, `tinker` and
-# `psql` access is ordinary developer work and is not a violation of that rule.
-#
-# Written for GNU Make 3.81, the version macOS ships. No .ONESHELL, no
-# $(file ...), no != assignment: CI runners have 4.x, so the older one is the
-# binding constraint.
+# Written for GNU Make 3.81, as shipped by macOS: no .ONESHELL, $(file ...) or != assignment.
 
-# .NOTPARALLEL because several recipes are ordered sequences and a guard must
-# never run concurrently with the recipe it guards.
+# Several recipes are ordered sequences, and a guard must never run concurrently with what it guards.
 .NOTPARALLEL:
 
 .DEFAULT_GOAL := help
@@ -24,41 +8,18 @@
 DC     := docker compose
 RUN    := $(DC) run --rm -T --no-deps app
 RUN_DB := $(DC) run --rm -T app
-# Service name is supplied per call, because compose options must precede it.
 EXEC   := $(DC) exec -T
 
-# Exported so compose picks them up as build args for the dev stage on EVERY
-# build path, not only an explicit `make install`.
 export HOST_UID := $(shell id -u)
 export HOST_GID := $(shell id -g)
 
-# Hardcoded, deliberately. These are the only databases any target in this file
-# may touch. They are not read from .env: the whole point of the allowlist is
-# that editing .env cannot widen it.
+# Hardcoded allowlist: editing .env must never widen the databases these targets may touch.
 DEV_DB  := ledgerflow
 TEST_DB := ledgerflow_test
 
-# ---------------------------------------------------------------------------
-# assert_local_db - refuse to mutate anything that is not the local project
-# development database.
-#
-# Resolves the EFFECTIVE target the way Laravel does, with DB_URL taking
-# precedence over DB_HOST/DB_DATABASE, then requires all of:
-#
-#   connection  pgsql
-#   host        the compose `postgres` service
-#   database    exactly the expected name
-#
-# It runs through `exec`, in the SAME running container the Artisan command will
-# use, and never through `run`. That distinction is the whole guarantee: `run`
-# builds a fresh container and re-reads .env from disk, while `exec` inherits
-# the environment the running container was created with. Guarding with `run`
-# and mutating with `exec` reads two different environments, so editing .env
-# after the stack started would let the guard approve a target the migration
-# never actually uses. Both halves must observe one environment.
-#
+# assert_local_db: refuse unless the effective target, DB_URL first, is pgsql on the compose postgres service.
+# Runs through exec, never run, so the guard and the Artisan command observe the same container environment.
 #   $(1) expected database name
-# ---------------------------------------------------------------------------
 define assert_local_db
 	@$(EXEC) app php -r '\
 	  $$connection = getenv("DB_CONNECTION") ?: ""; \
@@ -85,10 +46,6 @@ define assert_local_db
 	'
 endef
 
-# ---------------------------------------------------------------------------
-# Help
-# ---------------------------------------------------------------------------
-
 .PHONY: help
 help: ## Show the public command surface
 	@echo "Ledgerflow — public command interface"
@@ -99,19 +56,7 @@ help: ## Show the public command surface
 	@echo "  make destroy      CONFIRM=destroy"
 	@echo "  make demo-corrupt PAYMENT_ID=<uuid> CONFIRM=corrupt-projection"
 
-# ---------------------------------------------------------------------------
-# Environment lifecycle
-# ---------------------------------------------------------------------------
-
-# The order below is load-bearing:
-#
-#   composer install runs BEFORE `up` because the bind mount hides the image's
-#   vendor/, and nginx's /up health check cannot pass without it. Moved below
-#   `up`, a clean checkout deadlocks waiting for a container that cannot become
-#   healthy until a later step.
-#
-#   key:generate also runs BEFORE `up`: booting with an empty APP_KEY risks a
-#   500 from the health route, and `up --wait` would then never return.
+# composer install and key:generate must run before up: the bind mount hides vendor/, and /up needs both.
 .PHONY: install
 install: ## Build and start the stack from a clean checkout
 	@echo "==> ensuring .env exists"
@@ -146,12 +91,7 @@ start: ## Start the local services
 	$(DC) up -d --wait
 	$(DC) ps
 
-# `stop`, never `down`: containers halt, volumes and their data survive.
-#
-# --profile projection, even here where the profile is never STARTED by this
-# file's own targets: `stop` selects containers by currently active profile, not
-# by what happens to be running, so the scheduler and Horizon an operator started
-# with `projection-start` would otherwise survive a plain `stop` untouched.
+# stop, never down. --profile projection, because stop selects by active profile, not by what is running.
 .PHONY: stop
 stop: ## Stop the local services, keeping all data (also reaches the opt-in scheduler and Horizon)
 	$(DC) --profile projection stop
@@ -167,24 +107,7 @@ destroy: ## Remove containers, networks and volumes (CONFIRM=destroy)
 	fi
 	$(DC) --profile projection down --volumes --remove-orphans
 
-# ---------------------------------------------------------------------------
-# Opt-in projection pair: scheduler AND Horizon, together or not at all
-#
-# Neither `install` nor `start` ever passes --profile projection, so a clean
-# install's four default services never change.
-#
-# THERE IS DELIBERATELY NO TARGET THAT STARTS ONE WITHOUT THE OTHER. The relay
-# publishes into `payments-projection` and Horizon is the only thing that drains
-# it, so a scheduler running alone produces a growing backlog that reads as a
-# consumer fault rather than as a missing process. Both names appear on one
-# command line so the pair is what an operator can ask for.
-#
-# STARTED ONLY AFTER MIGRATIONS. `projection-start` depends on db-migrate: the
-# consumer's first act is to lock a `payment_outbox` row and write
-# `payment_projector_receipts`, and starting workers against a schema that lacks
-# those tables produces a burst of failures that look like a projection defect.
-# ---------------------------------------------------------------------------
-
+# The scheduler and Horizon start and stop together, after migrations; no target runs either alone.
 .PHONY: projection-start
 projection-start: db-migrate ## Start the opt-in scheduler and Horizon consumer together
 	@echo "==> starting the projection pair (scheduler + horizon)"
@@ -195,15 +118,7 @@ projection-stop: ## Stop the scheduler and Horizon consumer together
 	@echo "==> stopping the projection pair"
 	$(DC) --profile projection stop scheduler horizon
 
-# ---------------------------------------------------------------------------
-# Demo support - local development only, for docs/operations/five-minute-demo.md.
-#
-# EMAIL, PAYMENT_ID and CONFIRM are caller-supplied: they are exported into the recipe
-# environment and read only through quoted shell expansions, never interpolated as
-# $(EMAIL) into recipe text, where a quote in the value would close it and run the rest.
-# ---------------------------------------------------------------------------
-
-# Hardcoded like DEV_DB and TEST_DB: an allowlist another file can widen is not one.
+# Demo values are caller-supplied: read them only through quoted shell expansions, never as $(VAR) in recipe text.
 DEMO_EMAILS := owner@northwind.test owner@atlantic.test
 EMAIL       ?= owner@northwind.test
 
@@ -240,8 +155,7 @@ demo-token: ## Print one Sanctum token for a seeded fixture merchant (EMAIL=...)
 	    exit 1; }; \
 	  echo "$$token"
 
-# Non-fatal: both exit non-zero for states this target exists to show, and the codes
-# cannot separate those from a stopped container, so the code is printed not swallowed.
+# Non-fatal: non-zero exits are states this target exists to show, so the code is printed, not swallowed.
 .PHONY: demo-status
 demo-status: ## Show relay heartbeat and Horizon supervisor state (read-only)
 	@echo "==> payments:outbox:status"
@@ -251,8 +165,7 @@ demo-status: ## Show relay heartbeat and Horizon supervisor state (read-only)
 	@$(EXEC) app php artisan horizon:status \
 	  || echo "    exit $$? - inactive, never run, or unreachable"
 
-# Deletes only while exactly one row matches, in one snapshot, so a zero or multiple
-# match removes nothing rather than being detected afterwards.
+# Deletes only when exactly one row matches, decided in the same statement.
 .PHONY: demo-corrupt
 demo-corrupt: ## Delete one named payment_details row for the demo (PAYMENT_ID=... CONFIRM=corrupt-projection)
 	@[ -n "$$DEMO_PAYMENT_ID" ] || { \
@@ -291,14 +204,7 @@ demo-corrupt: ## Delete one named payment_details row for the demo (PAYMENT_ID=.
 	  fi; \
 	  echo "  deleted 1 payment_details row; canonical history is untouched"'
 
-# ---------------------------------------------------------------------------
-# Database lifecycle
-# ---------------------------------------------------------------------------
-
-# The compose init script runs only when the PostgreSQL data directory is first
-# initialised, so a volume created before that script existed (or before it was
-# last edited) will not have the test database. This step is idempotent: safe on
-# every run, and it repairs an already-initialised volume without destroying it.
+# Idempotent: the compose init script only runs on a fresh data directory.
 .PHONY: db-ensure-test
 db-ensure-test: ## Create the test database if it is missing
 	@echo "==> ensuring $(TEST_DB) exists"
@@ -315,35 +221,13 @@ db-migrate: ## Apply migrations to the development database
 	$(call assert_local_db,$(DEV_DB))
 	$(EXEC) app php artisan migrate --force
 
-# The seeder is deterministic and repeatable; tests own collision and rollback
-# evidence while this target owns the development command contract.
 .PHONY: db-seed
 db-seed: ## Run the deterministic development seeders
 	@echo "==> seeding $(DEV_DB)"
 	$(call assert_local_db,$(DEV_DB))
 	$(EXEC) app php artisan db:seed --force
 
-# ---------------------------------------------------------------------------
-# Validation
-#
-# Non-destructive by contract: `quality` only reads files, and `test` mutates
-# exactly one thing - the isolated ledgerflow_test database, which the suite
-# truncates and re-migrates by design. Neither touches source files or the
-# development database.
-#
-# Both run from a stopped stack. `quality` needs no services at all; `test`
-# starts postgres and redis itself and leaves them running.
-# ---------------------------------------------------------------------------
-
-# Every PHP tool here only reads files, so this runs in a throwaway container
-# with no service dependencies and works with the stack stopped. All four run in ONE
-# container, chained with && so the first failure aborts: four separate `run`
-# invocations would pay four container starts on a target used constantly.
-#
-# Every tool is in check-only mode. `quality` must never rewrite source: Pint
-# uses --test, Rector uses --dry-run. The one-time write pass that normalised
-# the skeleton was a separate, deliberate act, not something a validation
-# target performs.
+# Check-only: quality must never rewrite source.
 .PHONY: quality
 quality: ## Run Composer, formatting, refactoring and static analysis checks (read-only)
 	@echo "==> quality (read-only: no file is modified)"
@@ -353,20 +237,7 @@ quality: ## Run Composer, formatting, refactoring and static analysis checks (re
 	  vendor/bin/rector process --dry-run && \
 	  vendor/bin/phpstan analyse --memory-limit=-1 --no-progress'
 
-# Works from a completely stopped stack.
-#
-# db-ensure-test talks to a running postgres via `exec`, so the services it
-# needs are started and waited for first. Only postgres and redis are started —
-# not web, and not a long-lived app container — because the suite reaches the
-# framework through its own one-off container.
-#
-# Pest runs in that one-off container rather than through `exec`: on a cold
-# start there is no app container to exec into.
-#
-# SIDE EFFECT, by design: this target LEAVES postgres and redis running. It has
-# no way to know whether they were already up for a development session, and
-# stopping services someone else is using would be worse than leaving two
-# containers idle. Use `make stop` to bring everything down.
+# Leaves postgres and redis running: they may already serve a development session.
 .PHONY: test
 test: ## Run the Pest suite against the isolated test database (starts postgres+redis)
 	@echo "==> test (mutates $(TEST_DB) only; leaves postgres and redis running)"

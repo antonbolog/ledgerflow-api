@@ -24,27 +24,7 @@ use Modules\Payments\Tests\Integration\IntegrationDatabase;
 use Modules\Payments\Tests\Integration\ProjectionGateLocks;
 use Modules\Payments\Tests\Support\FailingLogger;
 
-/*
-|--------------------------------------------------------------------------
-| Targeted outbox repair — `payments:outbox:repair`
-|--------------------------------------------------------------------------
-|
-| IN THE INTEGRATION SUITE BECAUSE THE SUBJECT IS A REAL TRANSACTION. Repair holds
-| a lock on canonical history across several statements and commits for real; under
-| RefreshDatabase every commit becomes a savepoint and the second-connection
-| evidence below — including the serialisation of two concurrent repairs — would be
-| vacuous.
-|
-| THE COMMAND IS INVOKED THROUGH Artisan, so the signature, the option, the
-| container bindings and the registration are all exercised. A test that new-ed the
-| class would pass with the command unregistered, which is the failure an operator
-| would meet.
-|
-*/
-
 /**
- * One canonical event, with whichever derived rows the scenario wants.
- *
  * @return array{event_id: string, payment_id: string, merchant_id: int}
  */
 function repairSeed(
@@ -88,9 +68,6 @@ function repairSeed(
             'aggregate_version' => 1,
             'payload' => json_encode($payload),
             'occurred_at' => $occurredAt,
-            // Deliberately far in the future and behind transport history, so a
-            // repair that makes the row eligible is observable and one that must
-            // not is too.
             'available_at' => '2099-01-01T00:00:00+00:00',
             'publish_count' => 3,
             'last_published_at' => '2026-08-21T10:00:00+00:00',
@@ -115,7 +92,6 @@ function repairSeed(
     return ['event_id' => $eventId, 'payment_id' => $paymentId, 'merchant_id' => $merchantId];
 }
 
-/** The repair as an operator runs it: exit code plus the one JSON object it printed. */
 function repairRun(string $eventId, bool $quiesced = true): array
 {
     $options = ['eventId' => $eventId];
@@ -132,7 +108,6 @@ function repairRun(string $eventId, bool $quiesced = true): array
     return [$exitCode, $decoded];
 }
 
-/** The committed envelope, read from the observer so only durable state is seen. */
 function repairEnvelope(string $eventId): ?array
 {
     $row = DB::connection(IntegrationDatabase::OBSERVER)
@@ -141,7 +116,6 @@ function repairEnvelope(string $eventId): ?array
     return $row === null ? null : (array) $row;
 }
 
-/** Everything repair must never touch, as one comparable snapshot. */
 function repairUntouchedState(): array
 {
     $observer = DB::connection(IntegrationDatabase::OBSERVER);
@@ -263,12 +237,6 @@ it('holds the shared gate on the repair write backend until its commit', functio
     )->acquired)->toBe(1);
 });
 
-/*
-|--------------------------------------------------------------------------
-| Refusals, none of which may write
-|--------------------------------------------------------------------------
-*/
-
 it('refuses without the delivery-quiescence acknowledgement, before touching the database', function (): void {
     $seeded = repairSeed(withEnvelope: false);
 
@@ -285,8 +253,6 @@ it('refuses without the delivery-quiescence acknowledgement, before touching the
 it('refuses a malformed event id without echoing it back', function (): void {
     [$exitCode, $result] = repairRun('not-a-uuid');
 
-    // NEVER ECHOED. Whatever was typed is operator input, and the refusal is
-    // diagnosable without repeating it into stdout or the audit.
     expect($exitCode)->toBe(RepairOutcome::EXIT_FAILED)
         ->and($result['outcome'])->toBe(RepairOutcome::OUTCOME_FAILED)
         ->and($result['reason'])->toBe(RepairReason::MalformedEventId->value)
@@ -316,8 +282,6 @@ it('refuses when no canonical event carries that durable id', function (): void 
 });
 
 it('refuses an ambiguous canonical history rather than choosing a match', function (): void {
-    // TWO HISTORIES, ONE DURABLE ID. Reconstructing from either would produce an
-    // envelope that looks repaired and describes the wrong payment.
     $merchantId = Merchant::factory()->create()->getKey();
     $shared = (string) Str::uuid7();
 
@@ -356,9 +320,6 @@ it('refuses canonical history it cannot decode', function (string $reason, array
 ]);
 
 it('refuses an alias it does not decode instead of reporting absent history', function (): void {
-    // SCOPED BY PREFIX, so a future Payments event is REFUSED rather than reported
-    // as history that does not exist — which would send an operator to look for a
-    // deleted event.
     $seeded = repairSeed(withEnvelope: false, canonicalOverrides: ['event_class' => 'payments.payment_settled']);
 
     [$exitCode, $result] = repairRun($seeded['event_id']);
@@ -368,9 +329,6 @@ it('refuses an alias it does not decode instead of reporting absent history', fu
 });
 
 it('refuses when another envelope already holds the aggregate identity', function (): void {
-    // REFUSED, NEVER RESOLVED. payment_outbox is unique on
-    // (aggregate_uuid, aggregate_version), so writing this row would mean removing
-    // or moving that one — a second corruption in the name of repairing the first.
     $seeded = repairSeed(withEnvelope: false);
     $squatter = (string) Str::uuid7();
 
@@ -392,15 +350,8 @@ it('refuses when another envelope already holds the aggregate identity', functio
     expect($exitCode)->toBe(RepairOutcome::EXIT_REFUSED)
         ->and($result['reason'])->toBe(RepairReason::AggregateIdentityConflict->value)
         ->and(repairEnvelope($seeded['event_id']))->toBeNull()
-        // The conflicting row is still there, untouched.
         ->and(repairEnvelope($squatter))->not->toBeNull();
 });
-
-/*
-|--------------------------------------------------------------------------
-| The mutation matrix
-|--------------------------------------------------------------------------
-*/
 
 it('reconstructs a missing envelope from canonical history and says the history was reinitialised', function (): void {
     $seeded = repairSeed(withEnvelope: false);
@@ -412,9 +363,6 @@ it('reconstructs a missing envelope from canonical history and says the history 
     expect($exitCode)->toBe(RepairOutcome::EXIT_DONE)
         ->and($result['outcome'])->toBe(RepairOutcome::OUTCOME_CREATED)
         ->and($result['mutation_state'])->toBe(RepairMutationState::Created->value)
-        // DELETED DELIVERY HISTORY CANNOT BE RECONSTRUCTED FROM A STORED EVENT,
-        // including a possible former exhaustion, so the claim is reinitialised
-        // rather than restored.
         ->and($result['history_reinitialized'])->toBeTrue()
         ->and($envelope['event_type'])->toBe(PaymentInitiated::ALIAS)
         ->and($envelope['aggregate_uuid'])->toBe($seeded['payment_id'])
@@ -424,10 +372,7 @@ it('reconstructs a missing envelope from canonical history and says the history 
         ->and((int) $envelope['projection_failure_generation'])->toBe(0)
         ->and($envelope['last_published_at'])->toBeNull()
         ->and($envelope['exhausted_at'])->toBeNull()
-        // No named receipt, so the row is inserted immediately eligible.
         ->and($envelope['projection_completed_at'])->toBeNull()
-        // CANONICAL EVENT TIME IS RETAINED while the operational timestamps are
-        // repair time.
         ->and(CarbonImmutable::parse($envelope['occurred_at'])->format(PaymentInitiated::OCCURRED_AT_FORMAT))
         ->toBe('2026-08-21T10:11:12.123456+00:00');
 });
@@ -454,9 +399,6 @@ it('does not accept another projector receipt as completion evidence', function 
 
     [$exitCode] = repairRun($seeded['event_id']);
 
-    // A receipt owned by another projector says nothing about whether
-    // payment_details was built, and a marker stamped from it would retire an
-    // envelope whose work was never done.
     expect($exitCode)->toBe(RepairOutcome::EXIT_DONE)
         ->and(repairEnvelope($seeded['event_id'])['projection_completed_at'])->toBeNull();
 });
@@ -480,10 +422,8 @@ it('restores drifted canonical columns while preserving every history column', f
         ->and($result['history_reinitialized'])->toBeFalse()
         ->and($result['changed_fields'])
         ->toBe(['event_type', 'aggregate_version', 'occurred_at', 'payload', 'available_at'])
-        // RESTORED from canonical history.
         ->and($after['event_type'])->toBe(PaymentInitiated::ALIAS)
         ->and((int) $after['aggregate_version'])->toBe(1)
-        // PRESERVED: transport history, the poison budget, the generation fence.
         ->and((int) $after['publish_count'])->toBe(3)
         ->and($after['last_published_at'])->toBe($before['last_published_at'])
         ->and((int) $after['consecutive_transport_failures'])->toBe(2)
@@ -496,9 +436,6 @@ it('restores drifted canonical columns while preserving every history column', f
 });
 
 it('keeps an exhausted envelope exhausted and unavailable, leaving retry the only way back', function (): void {
-    // THE POISON BOUNDARY. Repair corrects what the envelope SAYS;
-    // payments:outbox:retry remains the only path that decides an exhausted
-    // envelope may be delivered again.
     $seeded = repairSeed(envelopeOverrides: [
         'aggregate_version' => 9,
         'exhausted_at' => '2026-08-21T11:00:00+00:00',
@@ -540,14 +477,11 @@ it('fills a missing completion marker from the named receipt, once', function ()
 
     expect($exitCode)->toBe(RepairOutcome::EXIT_DONE)
         ->and($result['changed_fields'])->toBe(['projection_completed_at'])
-        // No availability refresh: the named receipt says the projection is done.
         ->and($result['changed_fields'])->not->toContain('available_at');
 
     $afterFirst = repairEnvelope($seeded['event_id']);
 
-    // AND IT STAYS FILLED. With a receipt and a marker both present the marker is
-    // PRESERVED, not restamped: its timestamp is the historical fact of when the
-    // projection completed, and rewriting it on every repair would move that fact.
+    // A marker backed by a receipt is preserved, never restamped with a new time.
     [, $second] = repairRun($seeded['event_id']);
 
     expect($second['outcome'])->toBe(RepairOutcome::OUTCOME_UNCHANGED)
@@ -562,16 +496,12 @@ it('clears a completion marker that no named receipt supports', function (): voi
 
     [$exitCode, $result] = repairRun($seeded['event_id']);
 
-    // A marker with no receipt behind it retires an envelope whose projection never
-    // happened, so it is cleared and the row becomes eligible again.
     expect($exitCode)->toBe(RepairOutcome::EXIT_DONE)
         ->and($result['changed_fields'])->toBe(['projection_completed_at', 'available_at'])
         ->and(repairEnvelope($seeded['event_id'])['projection_completed_at'])->toBeNull();
 });
 
 it('is a no-op the second time, touching neither timestamps nor transport backoff', function (): void {
-    // REPAIR IS NOT AN IMPLICIT FORCE-REDELIVERY COMMAND. Running it twice must be
-    // indistinguishable from running it once.
     $seeded = repairSeed(envelopeOverrides: ['aggregate_version' => 9]);
 
     repairRun($seeded['event_id']);
@@ -590,9 +520,6 @@ it('is a no-op the second time, touching neither timestamps nor transport backof
 it('treats a re-rendered payload as already correct rather than as drift', function (): void {
     $seeded = repairSeed();
 
-    // The same six keys in another order describe the same payload. Because both
-    // columns are jsonb PostgreSQL normalises them anyway; what this pins is that a
-    // consistent envelope is a no-op, which is the operator-visible contract.
     [$exitCode, $result] = repairRun($seeded['event_id']);
 
     expect($exitCode)->toBe(RepairOutcome::EXIT_DONE)
@@ -622,16 +549,11 @@ it('changes nothing outside payment_outbox, and no other envelope', function ():
     [$exitCode] = repairRun($target['event_id']);
 
     expect($exitCode)->toBe(RepairOutcome::EXIT_DONE)
-        // Canonical events, projector receipts, read rows and HTTP idempotency
-        // receipts are all exactly as they were.
         ->and(repairUntouchedState())->toEqual($untouchedBefore)
         ->and(repairEnvelope($bystander['event_id']))->toBe($bystanderBefore);
 });
 
 it('does not repair the read-model discrepancy it can see', function (): void {
-    // A RECEIPT WITHOUT ITS READ ROW SURVIVES REPAIR AS THE CORRUPTION IT WAS.
-    // Read-model recovery is T11's rebuild; a successful repair is a claim about
-    // one envelope, not about the payment's derived state.
     $seeded = repairSeed(withEnvelope: false, withReceipt: true);
 
     [$exitCode, $result] = repairRun($seeded['event_id']);
@@ -642,8 +564,6 @@ it('does not repair the read-model discrepancy it can see', function (): void {
             ->table('payment_details')->where('source_event_id', $seeded['event_id'])->exists())
         ->toBeFalse();
 
-    // And the verifier still reports it, which is how an operator learns that the
-    // envelope is fixed and the read model is not.
     Artisan::call('payments:projections:verify');
 
     /** @var array<string, mixed> $verification */
@@ -653,13 +573,6 @@ it('does not repair the read-model discrepancy it can see', function (): void {
         ->toContain('projector_receipt_without_read_row');
 });
 
-/*
-|--------------------------------------------------------------------------
-| Locking, commit uncertainty, and the audit
-|--------------------------------------------------------------------------
-*/
-
-/** Rebind repair with a logger that throws on its $failOnCall'th record. */
 function repairWithFailingLogger(int $failOnCall): void
 {
     app()->bind(OutboxRepair::class, fn ($app): DatabaseOutboxRepair => new DatabaseOutboxRepair(
@@ -669,11 +582,7 @@ function repairWithFailingLogger(int $failOnCall): void
 }
 
 it('contends on canonical identity even when there is no envelope to lock', function (): void {
-    // THE SERIALISATION CLAIM. Two repairs of a MISSING envelope have no outbox row
-    // to contend on, so without the canonical row lock both would find nothing and
-    // both would insert — one dying on the aggregate-identity unique constraint
-    // with an error describing a conflict rather than a race. Holding that row from
-    // a second connection is what proves the contention point is canonical history.
+    // A missing envelope has no outbox row to lock, so only the canonical row lock can serialise two repairs.
     $seeded = repairSeed(withEnvelope: false);
 
     $lockConnection = DB::connection(IntegrationDatabase::LOCK);
@@ -685,26 +594,16 @@ it('contends on canonical identity even when there is no envelope to lock', func
 
     [$exitCode, $result] = repairRun($seeded['event_id']);
 
-    // EXIT 2, NOT EXIT 1, AND THE DISTINCTION IS THE POINT. Nothing was written
-    // either way, but "the command declined" and "the command did not finish" are
-    // different answers, and only the second means the operator still does not know
-    // whether this envelope needs repairing.
     expect($exitCode)->toBe(RepairOutcome::EXIT_FAILED)
         ->and($exitCode)->not->toBe(RepairOutcome::EXIT_REFUSED)
         ->and($result['outcome'])->toBe(RepairOutcome::OUTCOME_FAILED)
         ->and($result['reason'])->toBe(RepairReason::StatementTimeout->value)
-        // THE MUTATION STATE IS THE REAL TRANSACTION OUTCOME, not a constant: the
-        // rollback was confirmed here, which is a different fact from an unknown
-        // commit and must not be reported as one.
         ->and($result['mutation_state'])->toBe(RepairMutationState::RolledBack->value)
         ->and(repairEnvelope($seeded['event_id']))->toBeNull();
 });
 
 it('sees a competing repair committed result rather than overwriting it', function (): void {
-    // READ COMMITTED, NOT REPEATABLE READ. After waiting on the canonical lock the
-    // second repair must observe what the first one committed; a snapshot taken
-    // before the wait would hide it and the second repair would try to insert a row
-    // that already exists.
+    // Read committed: after waiting on the canonical lock, the repair must see the envelope committed meanwhile.
     $seeded = repairSeed(withEnvelope: false);
 
     $lockConnection = DB::connection(IntegrationDatabase::LOCK);
@@ -742,9 +641,6 @@ it('sees a competing repair committed result rather than overwriting it', functi
 });
 
 it('reports an unknown commit outcome instead of claiming the work rolled back', function (): void {
-    // TransactionCommitting fires inside Connection::commit(), so a listener that
-    // throws there is a failure at the exact boundary where the answer is not
-    // knowable. Nothing may be retried on the strength of it.
     $seeded = repairSeed(withEnvelope: false);
 
     Event::listen(TransactionCommitting::class, function (): void {
@@ -761,8 +657,6 @@ it('reports an unknown commit outcome instead of claiming the work rolled back',
 });
 
 it('never begins the mutation when operator intent cannot be recorded', function (): void {
-    // A change to durable delivery state with no evidence that anyone asked for it
-    // is the one thing an audited command must not produce.
     $seeded = repairSeed(withEnvelope: false);
 
     repairWithFailingLogger(failOnCall: 1);
@@ -776,9 +670,6 @@ it('never begins the mutation when operator intent cannot be recorded', function
 });
 
 it('reports a committed repair whose record failed, without claiming a rollback', function (): void {
-    // DATABASE COMMIT AND LOG PERSISTENCE ARE NOT ONE TRANSACTION. The row changed
-    // and the operator's record of it did not, which is neither a clean success nor
-    // a clean failure and must be reported as exactly that.
     $seeded = repairSeed(withEnvelope: false);
 
     repairWithFailingLogger(failOnCall: 2);
@@ -788,7 +679,6 @@ it('reports a committed repair whose record failed, without claiming a rollback'
     expect($exitCode)->toBe(RepairOutcome::EXIT_FAILED)
         ->and($result['reason'])->toBe(RepairReason::AuditFailed->value)
         ->and($result['mutation_state'])->toBe(RepairMutationState::Committed->value)
-        // The commit really did happen, which is why claiming a rollback would be a lie.
         ->and(repairEnvelope($seeded['event_id']))->not->toBeNull();
 });
 
@@ -801,7 +691,6 @@ it('reports a no-op whose record failed as no changes rather than as committed',
 
     expect($exitCode)->toBe(RepairOutcome::EXIT_FAILED)
         ->and($result['reason'])->toBe(RepairReason::AuditFailed->value)
-        // Nothing durable to report as committed.
         ->and($result['mutation_state'])->toBe(RepairMutationState::NoChanges->value);
 });
 
@@ -824,11 +713,9 @@ it('audits intent and outcome under one operation id, with only safe fields', fu
     expect($audited)->toHaveCount(2)
         ->and($audited[0]['category'])->toBe('outbox_repair_intent')
         ->and($audited[1]['category'])->toBe('outbox_repair_outcome')
-        // CORRELATED, and carrying the operator's assertion on both records.
         ->and($audited[0]['operation_id'])->toBe($result['operation_id'])
         ->and($audited[1]['operation_id'])->toBe($result['operation_id'])
         ->and($audited[0]['delivery_quiesced'])->toBeTrue()
-        // NAMES ONLY: no payload, no previous or replacement value, no key.
         ->and($audited[1]['changed_fields'])->toBe($result['changed_fields'])
         ->and(json_encode($audited))->not->toContain('amountMinor');
 });
@@ -914,8 +801,6 @@ it('audits a refusal with a safe reason and no mutation state', function (): voi
         static fn (array $context): bool => ($context['category'] ?? '') === 'outbox_repair_outcome',
     ));
 
-    // Refused before any database work, so there is no intent record and nothing to
-    // roll back — and the identifier is still not echoed.
     expect($audited)->toHaveCount(1)
         ->and($audited[0]['reason'])->toBe(RepairReason::MalformedEventId->value)
         ->and($audited[0]['mutation_state'])->toBe(RepairMutationState::None->value)

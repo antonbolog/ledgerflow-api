@@ -1,38 +1,12 @@
 # syntax=docker/dockerfile:1
-#
-# Ledgerflow application image.
-#
-#   base ──┬── vendor ────────┐
-#          │                  │
-#          ├── dev            │  local development target used by compose.
-#          │                  │  Host UID/GID remap lives HERE and nowhere else.
-#          │                  │
-#          └── production ◄───┘  immutable artifact: fixed 1000:1000 identity,
-#                     │          so the same commit builds the same image from
-#                     │          any machine (deployment-boundaries.md).
-#                     │
-#                     └── web    nginx fronting the production public/ tree.
-#
-# The production stage runs ONE process, chosen by the command. The entrypoint
-# ends in `exec "$@"`, so Horizon, the scheduler/relay, Reverb and future SQS
-# workers reuse this artifact with only a `command:` override and no image
-# change (operations/runtime-contract.md).
 
-# ---------------------------------------------------------------------------
-# base — runtime, extensions, fixed application identity
-# ---------------------------------------------------------------------------
 FROM php:8.4.24-fpm-alpine AS base
 
-# fcgi     -> cgi-fcgi, used by the php-fpm health check
-# unzip    -> Composer's archive path; without it installs fall back to git
-# postgresql-client -> psql, used for database evidence and inspection
 RUN apk add --no-cache \
         fcgi \
         unzip \
         postgresql-client \
-        # Runtime shared libraries for the extensions built below. These must
-        # NOT live in .build-deps: deleting the -dev packages also deletes the
-        # runtime .so files, and the extensions then fail to load at startup.
+        # Runtime libraries stay outside .build-deps: deleting that group would remove the .so files extensions load.
         icu-libs \
         libzip \
     && apk add --no-cache --virtual .build-deps \
@@ -50,22 +24,18 @@ RUN apk add --no-cache \
         pdo_pgsql \
         sockets \
         zip \
-    # Pinned to the exact release verified against PHP 8.4.24 in this image.
-    # An unpinned `pecl install redis` silently moves with upstream and would
-    # make a rebuild of an old commit produce a different extension.
+    # Pinned: an unpinned pecl install would give a rebuild of an old commit a different extension.
     && pecl install redis-6.3.0 \
     && docker-php-ext-enable redis \
     && apk del .build-deps \
     && rm -rf /tmp/pear
 
-# Fixed identity. Never derived from the build host: production must be
-# reproducible from any builder. Only the dev stage below remaps it.
+# Fixed identity, never derived from the build host, so production images are reproducible; only dev remaps it.
 RUN addgroup -g 1000 app \
     && adduser -u 1000 -G app -D -h /home/app app
 
 WORKDIR /var/www/html
 
-# vendor/bin on PATH so tooling is invoked by name inside the container.
 ENV PATH="/var/www/html/vendor/bin:${PATH}" \
     COMPOSER_ALLOW_SUPERUSER=0 \
     COMPOSER_HOME=/home/app/.composer
@@ -79,9 +49,6 @@ COPY --from=composer:2.8.12 /usr/bin/composer /usr/bin/composer
 ENTRYPOINT ["entrypoint.sh"]
 CMD ["php-fpm", "--nodaemonize"]
 
-# ---------------------------------------------------------------------------
-# vendor — production dependency set, resolved from the committed lockfile
-# ---------------------------------------------------------------------------
 FROM base AS vendor
 
 COPY composer.json composer.lock ./
@@ -92,18 +59,12 @@ RUN composer install \
         --no-interaction \
         --prefer-dist
 
-# ---------------------------------------------------------------------------
-# dev — compose target. Host identity remap lives only in this stage.
-# ---------------------------------------------------------------------------
 FROM base AS dev
 
 ARG HOST_UID=1000
 ARG HOST_GID=1000
 
-# Collision-aware on BOTH ids. macOS is 501:20 and Alpine already owns gid 20
-# (dialout), so a bare `addgroup -g` fails there. If the target gid already
-# exists we join that group instead of creating one; likewise for the uid.
-# busybox has no usermod/groupmod; they come from `shadow`.
+# Collision-aware: Alpine already owns macOS's gid 20, so an existing group is joined instead of recreated.
 RUN set -eux; \
     apk add --no-cache shadow; \
     if [ "$HOST_GID" != "1000" ]; then \
@@ -131,17 +92,12 @@ RUN set -eux; \
 
 USER app
 
-# ---------------------------------------------------------------------------
-# production — immutable application artifact, fixed 1000:1000
-# ---------------------------------------------------------------------------
 FROM base AS production
 
 COPY --from=vendor --chown=1000:1000 /var/www/html/vendor ./vendor
 COPY --chown=1000:1000 . .
 
-# The runtime tree is created here, explicitly. .gitignore placeholders are
-# excluded from the build context, so the image must not depend on them to
-# bring these directories into existence.
+# Created explicitly: the .gitignore placeholders are excluded from the build context.
 RUN set -eux; \
     mkdir -p \
         storage/app/private \
@@ -157,13 +113,6 @@ RUN set -eux; \
 
 USER app
 
-# ---------------------------------------------------------------------------
-# web — nginx carrying the production public/ tree
-#
-# Production has no bind mount, so the web tier needs public/ baked in. Local
-# development uses the stock nginx image with the project mounted instead, so
-# this stage is built by CI and deployment only.
-# ---------------------------------------------------------------------------
 FROM nginx:1.30.4-alpine AS web
 
 COPY docker/nginx/default.conf /etc/nginx/conf.d/default.conf

@@ -10,22 +10,6 @@ use Illuminate\Support\Str;
 use Modules\Payments\Application\Rebuild\ProjectionRebuild;
 use Modules\Payments\Application\Rebuild\RebuildOutcome;
 
-/**
- * The operator-facing surface of the bounded batch rebuild: one JSON object,
- * one exit code - the same contract `payments:outbox:repair` established.
- *
- * A CONSOLE ADAPTER AND NOTHING ELSE. It mints the correlation id, measures the
- * wall clock, passes the confirmation through, renders the result and returns
- * the exit code the result derived. Every decision about what a rebuild means
- * belongs to RebuildOutcome.
- *
- * `--confirm-rebuild` IS AN ASSERTION, NOT A CONFIRMATION PROMPT, exactly for
- * the reason `--delivery-quiesced` is: it has to survive being written down in
- * a runbook and read back in a log. It does not decide recovery for the
- * operator - there is no separate `--recover` flag - because an authorized run
- * reads the durable control row and applies D7's rule itself; a flag here
- * would let an operator assert a state the row already knows.
- */
 final class RebuildPaymentProjectionsCommand extends Command
 {
     protected $signature = 'payments:projections:rebuild
@@ -33,7 +17,7 @@ final class RebuildPaymentProjectionsCommand extends Command
 
     protected $description = 'Clear and replay the payment_details read model from canonical stored_events';
 
-    /** The output contract's version, bumped only by a breaking change to its shape. */
+    // Bump only for a breaking change to the JSON output shape.
     public const int SCHEMA_VERSION = 1;
 
     public const string COMMAND = 'payments:projections:rebuild';

@@ -24,69 +24,20 @@ use Override;
 use stdClass;
 use Throwable;
 
+// One REPEATABLE READ, READ ONLY snapshot. The watermark is the maximum visible id, not a commit-order fence.
 /**
- * Four verification passes and duplicate detection in one read-only snapshot.
- *
- *     BEGIN
- *     SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY
- *     SET LOCAL statement_timeout / transaction_timeout
- *     shared gate, then observed control state     <- before any audit pass
- *     select max(id), now()                       <- watermark and audit_at
- *     loop: one keyset batch of canonical Payments events, then its derived rows
- *     COMMIT
- *
- * REPEATABLE READ IS OWNED EXPLICITLY, NOT INHERITED. Under READ COMMITTED every
- * statement takes its own snapshot, so the watermark, the canonical batches and
- * the derived lookups would each see a different committed state and the report
- * would describe a database that never existed at any single instant. `READ ONLY`
- * on the same statement is what makes non-mutation a PostgreSQL guarantee rather
- * than a code review: a write attempted in here is refused as 25006.
- *
- * THE WATERMARK IS THE MAXIMUM VISIBLE id, NOT THE SEQUENCE'S ALLOCATED VALUE,
- * and the global id is NOT a commit-order fence. A transaction that allocated a
- * lower id can still commit after this snapshot opened, so this reports the rows
- * VISIBLE in one snapshot - not a permanent claim that every id below the
- * watermark is durable. Late commits belong to the next run, and every run is a
- * fresh audit rather than a resumable checkpoint.
- *
- * KEYSET, NEVER OFFSET, AND NO SET OF VISITED IDS. The cursor is the last id of
- * the previous batch, so memory is one batch regardless of how much history
- * exists. Counts accumulate; retained examples stop at a cap and say so.
- *
- * The canonical walk compares derived fields against history. Three independent
- * reverse walks also inspect derived records unreachable from that forward walk.
- * `scanned` names each started pass; only finishing every pass yields completeness.
- *
- * IT NEVER REHYDRATES PaymentAggregate, dispatches an event, or invokes the
- * consumer, the relay or the outbox writer. An audit that reused the live
- * projection path to decide what SHOULD be there would be asking the suspect.
- *
- * THE ROW SHAPES ARE DECLARED RATHER THAN CAST FROM mixed. The query builder hands
- * back stdClass, whose every property is mixed at level 10, and pgsql is free to
- * return a bigint as either int or string depending on the driver's emulation
- * setting. Naming the shapes once here is what lets the comparisons below be
- * ordinary typed code instead of a suppression.
- *
  * @phpstan-type CanonicalRow object{id: int|string, aggregate_uuid: string, aggregate_version: int|string, event_version: int|string, event_class: string, event_properties: string|null}
  * @phpstan-type DetailsRow object{payment_id: string, source_event_id: string, merchant_id: int|string, amount_minor: int|string, currency: string, status: string, aggregate_version: int|string, initiated_at: string}
  */
 final class DatabaseProjectionVerifier implements ProjectionVerifier
 {
-    /** Every Payments alias, so an alias this audit cannot decode is still SEEN. */
     private const string PAYMENTS_ALIAS_PREFIX = 'payments.';
 
-    /**
-     * The keyset origin for a uuid-keyed reverse pass.
-     *
-     * The first page includes this value: corrupted derived state need not contain
-     * an application-generated UUID. Later pages use a strict comparison.
-     */
+    // The first page compares with >=: corrupted derived state need not hold an application-generated UUID.
     private const string NIL_UUID = '00000000-0000-0000-0000-000000000000';
 
-    /** `read_only_sql_transaction` - a write attempted inside the audit snapshot. */
     private const string READ_ONLY_SQLSTATE = '25006';
 
-    /** `query_canceled` - statement_timeout fired. */
     private const string STATEMENT_TIMEOUT_SQLSTATE = '57014';
 
     public const string REASON_WORK_BUDGET = 'work_budget_exhausted';
@@ -112,17 +63,8 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
 
     private bool $examplesTruncated = false;
 
-    /**
-     * Rows examined per pass, keyed in report order.
-     *
-     * A KEY APPEARS ONLY WHEN ITS PASS STARTS, which is what gives
-     * VerificationReport::completed() something real to refuse: a pass lost to a
-     * future early return leaves its key absent and the report cannot be built as
-     * complete. A pass that started and aborted keeps its partial count, because
-     * an incomplete run should still say how far it got.
-     *
-     * @var array<string, int>
-     */
+    // A key appears only when its pass starts, so a skipped pass cannot be reported as complete.
+    /** @var array<string, int> */
     private array $scanned = [];
 
     private ?int $highWatermark = null;
@@ -149,18 +91,7 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
     {
         $this->reset();
 
-        // AN OWNED TRANSACTION OR NONE AT ALL, exactly as the repair refuses a
-        // savepoint. Inside an outer transaction beginTransaction() opens a
-        // SAVEPOINT, and PostgreSQL refuses SET TRANSACTION ISOLATION LEVEL in a
-        // subtransaction - so the audit would fail anyway, but only after opening
-        // a savepoint, with a reason describing the symptom instead of the cause.
-        //
-        // THE SNAPSHOT IS THE CONTRACT, not merely the isolation statement. A
-        // savepoint carries no snapshot of its own, its commit() releases nothing,
-        // and the READ ONLY declaration that makes non-mutation a server-side
-        // guarantee belongs to a real transaction. Borrowing a caller's owns none
-        // of the three, so the audit declines rather than reporting over a scope
-        // it does not control.
+        // Never borrow a caller's transaction: a savepoint has no snapshot or READ ONLY guarantee of its own.
         if ($this->connection->transactionLevel() !== 0) {
             return $this->partial(self::REASON_DATABASE_ERROR);
         }
@@ -172,19 +103,13 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
             $this->connection->beginTransaction();
             $transactionStarted = true;
 
-            // FIRST, AND IN ONE STATEMENT. SET TRANSACTION only applies before any
-            // query has run in the transaction, and pairing the isolation level
-            // with READ ONLY here means there is no window in which the audit is
-            // open but still able to write.
             $this->connection->statement('set transaction isolation level repeatable read, read only');
             $this->connection->statement($this->config->statementTimeoutStatement());
             $this->connection->statement($this->config->transactionTimeoutStatement());
 
             $gate = new ProjectionGate($this->connection)->inspectPaymentDetails();
 
-            // Report the row even when the exclusive lock denied entry. During
-            // lock-first acquisition it may still say ready; that never overrides
-            // the lock refusal. All reads use this same read-only snapshot.
+            // Reported even when the lock refused entry; a row still saying ready never overrides that refusal.
             /** @var object{state: string}|null $control */
             $control = $this->connection->selectOne(
                 'select state from payment_projection_controls where projection = ?',
@@ -200,12 +125,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
 
             $this->captureSnapshot();
 
-            // FOUR PASSES, ONE SNAPSHOT, IN THIS ORDER. Every one of them reads the
-            // state established above, so a record deleted between the canonical
-            // walk and a reverse walk cannot make one pass contradict another. The
-            // order is for readability only: none of them depends on another's
-            // result, which is precisely why a reverse pass can find what the
-            // forward walk structurally cannot.
             foreach ([
                 $this->scanCanonicalEvents(...),
                 $this->findDuplicateCanonicalEventIds(...),
@@ -216,10 +135,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
                 $reason = $pass($deadline);
 
                 if ($reason !== null) {
-                    // The snapshot is released rather than committed: nothing was
-                    // written, and holding it open while the caller formats a
-                    // partial report would keep a REPEATABLE READ transaction alive
-                    // for no reason.
                     $this->rollBackQuietly();
 
                     return $this->partial($reason);
@@ -243,31 +158,17 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
                 $this->rollBackQuietly();
             }
 
-            // THE FINDINGS ALREADY OBSERVED SURVIVE, AND THE RUN IS STILL
-            // INCOMPLETE. Discarding them would throw away the only evidence the
-            // audit produced; presenting them as a finished audit would claim
-            // history the snapshot never reached.
             return $this->partial($this->safeReason($failure));
         }
     }
 
-    /**
-     * The watermark and the audit timestamp, read once inside the snapshot.
-     *
-     * `now()` IS transaction_timestamp(), fixed for the whole transaction, which
-     * is exactly the property the age comparison needs: every event in this run is
-     * aged against one instant rather than against a clock that moves between
-     * batches.
-     */
+    // now() is fixed for the transaction, so every event is aged against one instant.
     private function captureSnapshot(): void
     {
         $row = $this->connection->selectOne(
             'select coalesce(max(id), 0) as high_watermark, now() as audit_at from stored_events'
         );
 
-        // TYPES, NOT VALIDATION. An aggregate with no GROUP BY returns exactly one
-        // row, so this branch exists to make the conversions below honest rather
-        // than suppressed.
         if (! $row instanceof stdClass || ! is_numeric($row->high_watermark) || ! is_string($row->audit_at)) {
             throw new VerificationSnapshotUnavailable(
                 'The stored_events watermark query returned an unexpected shape; refusing to audit.'
@@ -279,15 +180,7 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         $this->auditAt = $this->auditInstant->format(PaymentInitiated::OCCURRED_AT_FORMAT);
     }
 
-    /**
-     * Walk canonical Payments events through the watermark, in keyset batches.
-     *
-     * Returns null when the pass completed, or the safe reason that stopped it.
-     *
-     * THE BUDGET IS CHECKED BEFORE EACH NEXT BATCH, never inside one. A batch
-     * already begun always finishes being evaluated, so a partial report never
-     * describes half an event.
-     */
+    // The budget is checked before each batch, never inside one, so no event is half-evaluated.
     private function scanCanonicalEvents(int $deadline): ?string
     {
         $this->beginPass(VerificationReport::PASS_CANONICAL_EVENTS);
@@ -319,18 +212,9 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         }
     }
 
+    // A prefix match, not the decodable alias, so undecodable Payments events are reported rather than invisible.
+    // Oversized payloads are withheld in SQL, before they are transferred.
     /**
-     * One keyset batch of canonical Payments rows.
-     *
-     * `like 'payments.%'` RATHER THAN THE ONE DECODABLE ALIAS. Scoping to the exact
-     * alias would make a Payments event this audit cannot decode invisible instead
-     * of reported, which is the difference between "no corruption" and "no
-     * corruption I looked for". Other bounded contexts stay outside the audit.
-     *
-     * THE PAYLOAD IS SIZED IN SQL AND WITHHELD IF IT IS OVER THE CAP, rather than
-     * fetched and then measured. Fetching first would mean the cap protects
-     * nothing: the bytes are already in the process by the time it is consulted.
-     *
      * @return list<CanonicalRow>
      */
     private function canonicalBatch(int $cursor): array
@@ -367,8 +251,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
     }
 
     /**
-     * Evaluate one batch, or report the reason the audit cannot continue.
-     *
      * @param  list<CanonicalRow>  $batch
      */
     private function evaluateBatch(array $batch): ?string
@@ -382,18 +264,12 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
             $storedEventId = (int) $row->id;
             $this->scanned[VerificationReport::PASS_CANONICAL_EVENTS]++;
 
-            // A WITHHELD PAYLOAD STOPS THE AUDIT RATHER THAN BEING SKIPPED. Its
-            // contents were never inspected, so it can be declared neither
-            // consistent nor corrupt, and an audit that quietly stepped over it
-            // would report a complete clean pass over history it did not read.
+            // A withheld payload stops the audit: uninspected history is neither consistent nor corrupt.
             if ($row->event_properties === null) {
                 return self::REASON_PAYLOAD_TOO_LARGE;
             }
 
             try {
-                // NAMED EXPLICITLY, NOT `(array) $row`. The decoder reads five keys
-                // and the batch selects six; spreading the whole row would hand it
-                // a column it does not read and would hide a rename behind a cast.
                 $decoded[$storedEventId] = PaymentInitiatedEnvelope::fromStoredEventRow([
                     'aggregate_uuid' => $row->aggregate_uuid,
                     'aggregate_version' => $row->aggregate_version,
@@ -409,23 +285,7 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
                 continue;
             }
 
-            // THE EVENT ID IS CHECKED HERE AND THE PAYMENT ID IS NOT, and the
-            // asymmetry is the point. `paymentId` was already compared to
-            // `stored_events.aggregate_uuid`, a uuid column PostgreSQL has already
-            // refused anything malformed for, so its form is guaranteed
-            // transitively. The durable event id has NO canonical column to be
-            // compared against - it exists only inside the payload - so nothing has
-            // vetted it before this line.
-            //
-            // AND IT IS ABOUT TO BECOME A QUERY PARAMETER against three uuid
-            // columns. Sending a malformed one raises 22P02, which would abort the
-            // WHOLE audit as a database error: one corrupt payload would hide every
-            // other finding behind an incomplete run, and the corruption itself
-            // would never be reported. It is a finding about this event instead.
-            //
-            // Str::isUuid accepts only the canonical hyphenated form, the same
-            // stricter-than-PostgreSQL rule DatabasePaymentQuery applies, and the
-            // only spelling this system ever writes.
+            // No uuid column vets the event id, and a malformed one would raise 22P02 and abort the whole audit.
             if (! Str::isUuid($decoded[$storedEventId]->eventId)) {
                 $this->record(VerificationFinding::CanonicalPayloadMalformed, storedEventId: $storedEventId);
                 $this->classify(VerificationClassification::Inconsistent);
@@ -450,8 +310,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         foreach ($decoded as $storedEventId => $event) {
             $envelope = $envelopes[$event->eventId] ?? null;
 
-            // The envelope's own payload is subject to the same cap, and for the
-            // same reason: an uninspected payload cannot be compared.
             if ($envelope !== null && $envelope->payload === null) {
                 return self::REASON_PAYLOAD_TOO_LARGE;
             }
@@ -470,14 +328,8 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         return null;
     }
 
+    // Findings before classification: a contradiction outranks every delivery state, including grace.
     /**
-     * One canonical event against everything derived from it.
-     *
-     * FINDINGS FIRST, CLASSIFICATION LAST, and never the other way round: a
-     * contradiction outranks every delivery state, so grace can never suppress a
-     * mismatch on a recent event. The delivery states are only consulted when
-     * nothing was contradicted and nothing was derived yet.
-     *
      * @param  DetailsRow|null  $bySource
      * @param  DetailsRow|null  $byPayment
      */
@@ -493,9 +345,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         $contradicted = false;
 
         if ($envelope === null) {
-            // NOT LAG, EVER. T6 commits the stored event and its initial envelope
-            // in one transaction, so a visible event without one was deleted or
-            // never written - there is no in-flight state this can be.
             $this->record(VerificationFinding::OutboxEnvelopeMissing, $storedEventId, $event->eventId);
             $contradicted = true;
         } else {
@@ -539,19 +388,11 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
             }
         }
 
-        // THE OTHER DIRECTION OF SOURCE IDENTITY, reachable from the canonical
-        // side: this payment has a read row, and it was projected from some other
-        // event. Looking only by source_event_id would report the row as merely
-        // missing and lose the fact that a different event claims this payment.
         if ($byPayment !== null && $byPayment->source_event_id !== $event->eventId) {
             $this->record(VerificationFinding::ReadRowWrongSourceEvent, $storedEventId, $event->eventId);
             $contradicted = true;
         }
 
-        // ONLY WHEN THERE IS AN ENVELOPE TO CARRY A MARKER. The marker is a column
-        // on the envelope, so with no envelope its absence is implied by the
-        // missing-envelope finding rather than being a second fact. Reporting both
-        // would send an operator to repair a column on a row that is not there.
         if ($envelope !== null) {
             if ($marker !== null && ! $hasReceipt) {
                 $this->record(
@@ -591,14 +432,7 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         }
     }
 
-    /**
-     * An incomplete, non-contradicted delivery: stopped, late, or still in flight.
-     *
-     * AGE IS EVENT AGE, from canonical occurredAt to the fixed audit timestamp, and
-     * it is deliberately not measured from `last_published_at` or `available_at`:
-     * republication would otherwise rejuvenate an old event forever and an audit
-     * would never call anything overdue.
-     */
+    // Age is event age: measuring from republication would keep an old event in flight forever.
     private function deliveryStateOf(
         int $storedEventId,
         PaymentInitiatedEnvelope $event,
@@ -611,9 +445,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         $auditInstant = $this->auditInstant;
 
         if ($auditInstant !== null && $event->occurredAt->greaterThan($auditInstant)) {
-            // AN OPERATIONAL WARNING, NOT AN INFERRED CORRUPTION FINDING. A future
-            // event time says something is wrong with a clock, which is neither a
-            // contradiction between two records nor an ordinary in-flight delivery.
             $this->record(VerificationFinding::EventTimeInFuture, $storedEventId, $event->eventId);
 
             return null;
@@ -629,12 +460,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
     }
 
     /**
-     * The `payment_details` columns that disagree with canonical history.
-     *
-     * NAMES, NEVER VALUES. The caller puts this list straight into an example that
-     * reaches stdout, so returning the amounts that differed would publish payment
-     * data to diagnose a mismatch.
-     *
      * @param  DetailsRow  $row
      * @return list<string>
      */
@@ -666,10 +491,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
             $mismatched[] = 'aggregate_version';
         }
 
-        // INSTANTS, NOT STRINGS, and to the microsecond. The column comes back in
-        // PostgreSQL's own rendering at whatever offset the session displays, so a
-        // textual comparison would report a mismatch for two identical instants -
-        // and could miss a real sub-second drift.
         if (! CarbonImmutable::parse($row->initiated_at)->equalTo($event->occurredAt)) {
             $mismatched[] = 'initiated_at';
         }
@@ -714,13 +535,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
     }
 
     /**
-     * The named projector's receipts, as event id to creation time.
-     *
-     * THE PROJECTOR NAME IS PART OF THE QUESTION. A receipt written by some other
-     * projector says nothing about whether `payment_details` was built, and
-     * treating one as completion evidence would retire an envelope whose work was
-     * never done.
-     *
      * @param  list<string>  $eventIds
      * @return array<string, string>
      */
@@ -747,13 +561,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
     }
 
     /**
-     * Read rows for this batch, indexed by BOTH keys from one statement.
-     *
-     * ONE QUERY, TWO INDEXES. The source-event key answers "was this event
-     * projected"; the payment key answers "was this payment projected from
-     * something else". Two statements would ask the same table the same batch of
-     * questions twice.
-     *
      * @param  list<string>  $eventIds
      * @param  list<string>  $paymentIds
      * @return array{0: array<string, DetailsRow>, 1: array<string, DetailsRow>}
@@ -782,23 +589,7 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         return [$bySource, $byPayment];
     }
 
-    /**
-     * Canonical Payments events that share one durable event id.
-     *
-     * A GROUPED QUERY, NOT THE FORWARD WALK, and that is forced rather than
-     * chosen: two rows carrying the same id can land in different batches, so a
-     * walk could only catch them by holding every id it had seen in memory - the
-     * one thing the bounds forbid. PostgreSQL groups them without transferring
-     * history into PHP.
-     *
-     * THE EXACT COUNT AND A BOUNDED SAMPLE, from one statement. `count(*) over ()`
-     * is evaluated over the whole grouped set before `limit` applies, so the total
-     * is honest even when only a few ids are carried back.
-     *
-     * NULL IDS ARE EXCLUDED. A payload with no `eventId` is malformed, which the
-     * canonical pass already reports against its own row; grouping them here would
-     * report two unrelated corrupt rows as duplicates of each other.
-     */
+    // A grouped query, not the forward walk: duplicates can span batches, and remembering every id is unbounded.
     private function findDuplicateCanonicalEventIds(int $deadline): ?string
     {
         if (($this->clock)() >= $deadline) {
@@ -832,9 +623,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         $carried = 0;
 
         foreach ($rows as $row) {
-            // The id is reported only when it is a canonical UUID, for the reason
-            // the forward walk checks the same thing: an unusable identifier is a
-            // malformed payload, already reported there, and must not be echoed.
             $this->record(
                 VerificationFinding::CanonicalDuplicateEventId,
                 eventId: Str::isUuid($row->event_id) ? $row->event_id : null,
@@ -842,42 +630,13 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
             $carried++;
         }
 
-        // The ids beyond the sample are counted without being carried, so the
-        // total is right and the retained diagnostics stay capped.
         $this->recordWithoutExample(VerificationFinding::CanonicalDuplicateEventId, $total - $carried);
 
         return null;
     }
 
-    /**
-     * Every receipt this projection wrote, asked whether anything still accounts
-     * for it.
-     *
-     * WHY IT RESOLVES THROUGH THE ENVELOPE. A receipt carries only a projector
-     * name and an event id; it has no aggregate identity of its own. The durable
-     * event id lives inside `stored_events.event_properties`, which is JSON with no
-     * index, so asking canonical history about it directly would mean a scan of
-     * history for every batch. The envelope holds the same event id as its PRIMARY
-     * KEY and carries the aggregate identity that `stored_events` has a unique
-     * index on, so the same question is answered by two indexed lookups.
-     * A correlated LATERAL LIMIT 1 keeps the lookup parameterized; EXISTS can
-     * instead plan a history-wide hashed subplan for each keyset batch.
-     *
-     * A MISSING ENVELOPE IS ITS OWN ANSWER, not a failure to resolve. The consumer
-     * writes a receipt only while holding that envelope's row lock, so the pair
-     * cannot come apart through an interrupted delivery - something removed the
-     * envelope afterwards, and there is then no identity left to check canonical
-     * history with. Reporting it as an orphan would claim history had been checked
-     * when it had not.
-     *
-     * IT RESOLVES ON THE AGGREGATE UUID ALONE, NOT THE VERSION PAIR, and the
-     * difference is what keeps the label honest. An envelope whose
-     * `aggregate_version` has been corrupted still belongs to a payment canonical
-     * history knows about; the corrupt column is the ENVELOPE pass's finding and
-     * the forward walk's field mismatch. Resolving this pass on the pair would make
-     * that one corruption additionally accuse a receipt that is perfectly intact,
-     * and send an operator looking for a deleted event that never existed.
-     */
+    // Resolves through the envelope's indexed keys instead of scanning event_properties; LATERAL LIMIT 1 keeps
+    // the lookup parameterised. Aggregate uuid alone, so a corrupt envelope version cannot accuse an intact receipt.
     private function scanProjectorReceipts(int $deadline): ?string
     {
         $this->beginPass(VerificationReport::PASS_PROJECTOR_RECEIPTS);
@@ -937,10 +696,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
                 if (! $row->has_canonical) {
                     $this->record(VerificationFinding::ProjectorReceiptOrphaned, eventId: $row->event_id);
                 }
-
-                // A receipt whose envelope resolves to canonical history is left to
-                // the forward walk, which owns whether the two AGREE. Reporting it
-                // from both directions would double the counts for one corruption.
             }
 
             $cursor = $rows[count($rows) - 1]->event_id;
@@ -952,18 +707,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         }
     }
 
-    /**
-     * Every projected row, asked whether canonical history accounts for it.
-     *
-     * KEYED ON payment_id, which is `stored_events.aggregate_uuid` and carries its
-     * own index. The row's `source_event_id` and `aggregate_version` are the other
-     * links, and neither is the question here: a row whose payment exists
-     * canonically but was projected from some other event, or which disagrees on a
-     * business column, is found by the forward walk, which can compare both sides
-     * because it holds the canonical one. This pass answers only what that walk
-     * structurally cannot reach - a row whose payment has no canonical event at
-     * all - so one corruption is described by one finding.
-     */
     private function scanReadRows(int $deadline): ?string
     {
         $this->beginPass(VerificationReport::PASS_READ_ROWS);
@@ -1017,26 +760,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         }
     }
 
-    /**
-     * Every delivery envelope, asked whether canonical history accounts for it.
-     *
-     * KEYED ON (aggregate_uuid, aggregate_version), the PAIR - unlike the two
-     * passes above, and deliberately. `payment_outbox` enforces its own unique
-     * constraint on exactly that pair precisely because it mirrors the key
-     * `stored_events` enforces, so the pair IS this table's canonical identity and
-     * a version that resolves to nothing is this pass's own finding rather than
-     * someone else's.
-     *
-     * A CORRUPT VERSION IS THEREFORE REPORTED TWICE, and that is intended rather
-     * than tolerated: the forward walk says the envelope for THIS event has a wrong
-     * column, and this pass says the envelope as it now stands matches no canonical
-     * event. Both are true, they are different facts, and an operator needs the
-     * second one to know the row is unreachable from history as well as wrong.
-     *
-     * An envelope whose aggregate identity DOES resolve but whose `event_id` is not
-     * that event's durable id is reported by the forward walk as a missing envelope
-     * for the canonical event - once, from the side that can see both ids.
-     */
     private function scanOutboxEnvelopes(int $deadline): ?string
     {
         $this->beginPass(VerificationReport::PASS_OUTBOX_ENVELOPES);
@@ -1097,11 +820,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
     }
 
     /**
-     * Positional placeholders for a bounded list.
-     *
-     * The lists here are one batch of canonical events, so their length is the
-     * configured batch size at most - never "however many rows matched".
-     *
      * @param  list<string>  $values
      */
     private function placeholders(array $values): string
@@ -1109,7 +827,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         return implode(', ', array_fill(0, count($values), '?'));
     }
 
-    /** Which finding a shared envelope refusal is, on the canonical path. */
     private static function findingFor(ProjectionEnvelopeRejected $rejected): VerificationFinding
     {
         return match ($rejected->category) {
@@ -1122,13 +839,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
     }
 
     /**
-     * Count a finding always; retain its example only while there is room.
-     *
-     * THE COUNT IS NOT CAPPED AND THE EXAMPLES ARE. An operator needs to know that
-     * four thousand events failed even when only fifty can be shown, and
-     * `examples_truncated` is what stops the shown fifty from reading as the whole
-     * of it.
-     *
      * @param  list<string>  $fields
      */
     private function record(
@@ -1149,13 +859,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         $this->examples[] = new VerificationExample($finding, $storedEventId, $eventId, $paymentId, $fields);
     }
 
-    /**
-     * Count findings the audit knows about but is deliberately not carrying.
-     *
-     * FOR A COUNT PostgreSQL PRODUCED, not for one PHP could have. It exists so a
-     * bounded sample of an unbounded set still reports the true total, and it
-     * marks the diagnostics truncated for exactly the reason the cap does.
-     */
     private function recordWithoutExample(VerificationFinding $finding, int $additional): void
     {
         if ($additional <= 0) {
@@ -1166,7 +869,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         $this->examplesTruncated = true;
     }
 
-    /** A pass declares itself started, so a pass that never ran leaves no key. */
     private function beginPass(string $pass): void
     {
         $this->scanned[$pass] ??= 0;
@@ -1178,12 +880,6 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
     }
 
     /**
-     * Finding counts in the enum's declaration order.
-     *
-     * DETERMINISTIC OUTPUT, so two runs over the same state produce byte-identical
-     * JSON and a diff between them means the database changed rather than that a
-     * hash map iterated differently.
-     *
      * @return array<string, int>
      */
     private function sortedFindingCounts(): array
@@ -1214,15 +910,7 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         );
     }
 
-    /**
-     * A stable category for the failure, never the driver's wording.
-     *
-     * transaction_timeout TERMINATES THE SESSION rather than cancelling a
-     * statement, so it arrives as a lost connection and is reported as a database
-     * error. It is deliberately NOT reconnected and resumed: the snapshot it was
-     * bounding no longer exists, and continuing on a new backend would silently
-     * mix two different views of history into one report.
-     */
+    // transaction_timeout ends the session: never reconnect and mix two snapshots into one report.
     private function safeReason(Throwable $failure): string
     {
         return match (RetryingAtomicTransaction::sqlStateOf($failure)) {
@@ -1241,13 +929,10 @@ final class DatabaseProjectionVerifier implements ProjectionVerifier
         try {
             $this->connection->rollBack();
         } catch (Throwable) {
-            // Nothing durable is at stake - the transaction wrote nothing by
-            // construction - and a second exception here would only obscure the
-            // first.
+            // Read-only: nothing durable is at stake, and a second exception would obscure the first.
         }
     }
 
-    /** A fresh audit every invocation; nothing carries over from the last one. */
     private function reset(): void
     {
         $this->classificationCounts = VerificationClassification::zeroed();

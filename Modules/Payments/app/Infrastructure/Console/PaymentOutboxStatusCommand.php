@@ -13,20 +13,6 @@ use RuntimeException;
 use stdClass;
 use Throwable;
 
-/**
- * A read-only JSON health surface: is the scheduler alive, and is the backlog moving.
- *
- * TWO INDEPENDENT SIGNALS, NEVER COLLAPSED INTO ONE. The heartbeat says whether
- * `payments:outbox:relay` is still being scheduled at all; the database aggregate
- * says what PostgreSQL currently holds. An empty backlog and a dead scheduler look
- * identical from the outbox alone, and a Redis outage must not be reported as a
- * stopped scheduler — that confusion is exactly what RelayHeartbeat's five states
- * exist to prevent, so this command reads them and adds nothing of its own.
- *
- * WRITES NOTHING. Unlike OutboxRelay, this never mutates a row, so there is no
- * commit-outcome-unknown phase to classify: any Throwable escaping the aggregate
- * means the database answer is not known, full stop.
- */
 final class PaymentOutboxStatusCommand extends Command
 {
     protected $signature = 'payments:outbox:status';
@@ -59,17 +45,6 @@ final class PaymentOutboxStatusCommand extends Command
     }
 
     /**
-     * One snapshot-consistent aggregate, index-aligned with payment_outbox_eligible_index.
-     *
-     * A SHORT READ-ONLY TRANSACTION, bounded by the same statement_timeout_ms the
-     * relay's own row transaction uses — reused rather than duplicated, because both
-     * are "how long may one bounded PostgreSQL operation hold this connection".
-     *
-     * eligible_count is the complete relay predicate, INCLUDING available_at <=
-     * now(). active_count is the partial-index predicate only, so it also counts
-     * rows still waiting out grace or backoff. Both come from one statement so they
-     * describe the same instant rather than two queries racing the wall clock.
-     *
      * @return array{state: string, eligible_count: int|null, oldest_eligible_age_seconds: int|null, active_count: int|null, gate: string|null}
      */
     private function databaseStatus(): array
@@ -99,11 +74,6 @@ final class PaymentOutboxStatusCommand extends Command
                 from payment_outbox
                 SQL);
 
-            // TYPES, NOT VALIDATION, same as OutboxRelay's own row read. selectOne()
-            // is declared mixed, and an aggregate with no GROUP BY always returns
-            // exactly one stdClass row — this branch exists so the cast below is
-            // honest rather than suppressed. UNTESTED BY DESIGN: producing it would
-            // require a query PostgreSQL cannot answer this way.
             if (! $row instanceof stdClass
                 || ! is_numeric($row->active_count)
                 || ! is_numeric($row->eligible_count)
@@ -114,11 +84,6 @@ final class PaymentOutboxStatusCommand extends Command
                 );
             }
 
-            // T11'S GATE DISTINCTION. Read in the SAME transaction as the aggregate
-            // above, so the two answers describe one instant. An operator reading
-            // this command must never mistake a closed gate for a healthy empty
-            // backlog - the same reason RelayOutcome::GateClosed exists as its own
-            // case rather than folding into NothingEligible.
             $gate = $this->gate->inspectPaymentDetails()->value;
 
             $this->connection->commit();
@@ -133,15 +98,11 @@ final class PaymentOutboxStatusCommand extends Command
                 'gate' => $gate,
             ];
         } catch (Throwable) {
-            // Nothing here ever wrote a row, so there is no ambiguous outcome to
-            // classify — only whether the answer is known. A cleanup failure is
-            // swallowed for the usual reason: nothing durable is at stake, and a
-            // second exception would only obscure the first.
             if ($transactionStarted && $this->connection->transactionLevel() > 0) {
                 try {
                     $this->connection->rollBack();
                 } catch (Throwable) {
-                    // Deliberate.
+                    // Read-only: nothing durable is at stake, and the answer is already unavailable.
                 }
             }
 

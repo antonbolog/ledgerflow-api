@@ -4,30 +4,6 @@ declare(strict_types=1);
 
 namespace App\Http\Problem;
 
-/**
- * The stable machine identifiers this API promises.
- *
- * `code` IS THE CONTRACT. `type` is derived from it, and `title`, `status` and
- * `detail` hang off it, so a client that matches on one member can never disagree
- * with a client that matches on another.
- *
- * WHY `type` IS A RELATIVE URI REFERENCE: RFC 9457 permits one, and it is resolved
- * against the request URI. This project has no published documentation host, and a
- * dead absolute URL in a public repository is worse than a relative one. Re-basing
- * later changes this one method and nothing else.
- *
- * `detail` here is the CLIENT-SAFE sentence and the only one a deployed
- * environment ever emits. An exception message routinely carries SQL, table names
- * and identifiers; ProblemDetailsMapper decides whether debug may substitute it,
- * and the default is silence.
- *
- * `payment_not_found` ARRIVED WITH T9's QUERY ENDPOINT. `projection_rebuilding`
- * belongs to the shared projection gate: the write path (RetryingAtomicTransaction),
- * the transactional read (DatabasePaymentQuery), the relay and the consumer each
- * check the gate and, on POST and GET, raise a typed ProjectionRebuilding
- * application exception that this case renders as 503 with Retry-After: 1 - see
- * docs/specifications/payments/projection-and-query.md, "Query contract".
- */
 enum ProblemType: string
 {
     case Unauthenticated = 'unauthenticated';

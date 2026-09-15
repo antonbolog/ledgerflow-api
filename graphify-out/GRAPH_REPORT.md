@@ -1,16 +1,16 @@
-# Graph Report - ledgerflow-api  (2026-09-14)
+# Graph Report - ledgerflow-api  (2026-09-15)
 
 ## Corpus Check
-- 234 files · ~209,271 words
+- 234 files · ~126,333 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1426 nodes · 2626 edges · 126 communities (106 shown, 20 thin omitted)
+- 1426 nodes · 2626 edges · 127 communities (107 shown, 20 thin omitted)
 - Extraction: 97% EXTRACTED · 3% INFERRED · 0% AMBIGUOUS · INFERRED: 72 edges (avg confidence: 0.86)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `dd640a5a`
+- Built from commit: `1103bf93`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -83,6 +83,7 @@
 - Atomic Idempotent Write
 - extra
 - rector.php
+- T10 — Verification and Targeted Repair
 - psr-4
 - logging.php
 - DatabaseProjectionVerifier
@@ -150,7 +151,7 @@
 - **Deferred Projection Gate and Its Reciprocal Obligations** — docs_adr_0004_lock_through_push_outbox_relay_hs_1, docs_specifications_payments_verification_and_rebuild_projection_gate, docs_specifications_payments_outbox_delivery_initial_relay_algorithm, docs_specifications_payments_projection_and_query_consumer_transaction, docs_specifications_payments_projection_and_query_query_contract, docs_roadmap_t11 [EXTRACTED 1.00]
 - **Path-Scoped Agent Instruction System with CLAUDE.md Parity** — agents_repository_instructions, _github_agents_github_automation_instructions, modules_payments_agents_payments_module_instructions, docs_agents_documentation_instructions, tests_agents_test_instructions, agents_make_agent_check [EXTRACTED 1.00]
 
-## Communities (126 total, 20 thin omitted)
+## Communities (127 total, 20 thin omitted)
 
 ### Community 0 - "ModuleBoundaryTest.php"
 Cohesion: 0.22
@@ -205,16 +206,16 @@ Cohesion: 0.14
 Nodes (7): Illuminate\Console\Command, Illuminate\Contracts\Cache\Factory, PaymentOutboxStatusCommand, RelayPaymentOutboxCommand, self, RelayConfiguration, RelayHeartbeat
 
 ### Community 14 - "Payments Projection Gate"
-Cohesion: 0.12
-Nodes (20): Ledgerflow architecture index, Payments vertical slice, Ambiguous Commit Outcome, HS-1 — Deliberately Omitted Projection Gate, Lightweight ADR Format, Architecture Decision Records Index, Rebuild Path, T11 — Connection-Affine Gated Rebuild (+12 more)
+Cohesion: 0.15
+Nodes (16): Ledgerflow architecture index, Payments vertical slice, HS-1 — Deliberately Omitted Projection Gate, Lightweight ADR Format, Architecture Decision Records Index, Rebuild Path, T11 — Connection-Affine Gated Rebuild, T7 — Scheduler-Driven Outbox Relay (+8 more)
 
 ### Community 15 - "ADR 0004 — Lock-Through-Push Outbox Relay"
 Cohesion: 0.24
 Nodes (20): ADR 0004 — Lock-Through-Push Outbox Relay, Messaging and Queues, Payments Flow, Runtime Contract, Documentation Ownership Rules, Ledgerflow Documentation Index, Sequential Delivery Order, External Trackers (Linear and Asana) (+12 more)
 
 ### Community 16 - "Initial Relay Algorithm"
-Cohesion: 0.12
-Nodes (20): Lock-Through-Push Publication, OutboxRelay::relayOne(), RelayPaymentOutboxCommand, Safe Duplicate Over Lost Message, SKIP LOCKED Relay Concurrency, Event and Delivery Path, Payments Minimal Data Model, T10 — Verification and Targeted Repair (+12 more)
+Cohesion: 0.14
+Nodes (17): Ambiguous Commit Outcome, OutboxRelay::relayOne(), RelayPaymentOutboxCommand, SKIP LOCKED Relay Concurrency, Event and Delivery Path, Payments Minimal Data Model, T4 Blocking Compatibility Evidence (Q6–Q10), Evolution Gate — Claim/Lease Publishing (+9 more)
 
 ### Community 17 - "Illuminate\Database\ConnectionInterface"
 Cohesion: 0.18
@@ -397,8 +398,8 @@ Cohesion: 0.39
 Nodes (4): DatabaseSeeder, Illuminate\Database\Console\Seeds\WithoutModelEvents, Illuminate\Database\Seeder, MerchantDatabaseSeeder
 
 ### Community 66 - "Atomic Idempotent Write"
-Cohesion: 0.29
-Nodes (7): Payments Write Path, Payments Tracer Bullet, T6 — Atomic Idempotent Payment Initiation, Atomic Idempotent Write, T3 Blocking Compatibility Evidence (Q1–Q5), SQLSTATE Retry Allowlist, Transport Exception Classification
+Cohesion: 0.20
+Nodes (10): Lock-Through-Push Publication, Safe Duplicate Over Lost Message, Payments Write Path, Payments Tracer Bullet, T6 — Atomic Idempotent Payment Initiation, Atomic Idempotent Write, T3 Blocking Compatibility Evidence (Q1–Q5), SQLSTATE Retry Allowlist (+2 more)
 
 ### Community 67 - "extra"
 Cohesion: 0.33
@@ -407,6 +408,10 @@ Nodes (6): extra, laravel, merge-plugin, dont-discover, include, Modules/*/compo
 ### Community 68 - "rector.php"
 Cohesion: 0.33
 Nodes (5): Rector\Config\RectorConfig, Rector\Php55\Rector\String_\StringClassNameToClassConstantRector, RectorLaravel\Rector\ArrayDimFetch\EnvVariableToEnvHelperRector, RectorLaravel\Rector\ArrayDimFetch\ServerVariableToRequestFacadeRector, RectorLaravel\Set\LaravelSetList
+
+### Community 70 - "T10 — Verification and Targeted Repair"
+Cohesion: 0.50
+Nodes (4): T10 — Verification and Targeted Repair, payments:projections:verify, payments:projections:verify command, Scheduled projection verification and corruption alerting
 
 ### Community 71 - "psr-4"
 Cohesion: 0.40

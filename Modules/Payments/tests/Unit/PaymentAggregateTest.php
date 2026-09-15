@@ -19,10 +19,7 @@ function initiateOn(PaymentAggregate $aggregate): PaymentAggregate
 }
 
 it('records one PaymentInitiated stamped with aggregate version 1', function (): void {
-    // `new` rather than retrieve(): retrieve() resolves through the container and
-    // replays from the database, and this suite is framework-free. Version 1 and
-    // not 0 because recordThat() applies BEFORE it stamps — and 1 is the value
-    // stored_events' unique key and payment_outbox.aggregate_version carry.
+    // Version 1, not 0: recordThat() applies the event before it stamps the version.
     $events = initiateOn(new PaymentAggregate)->getRecordedEvents();
 
     expect($events)->toHaveCount(1)

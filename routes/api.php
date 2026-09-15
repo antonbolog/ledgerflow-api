@@ -6,36 +6,9 @@ use Illuminate\Support\Facades\Route;
 use Modules\Payments\Http\Controllers\InitiatePaymentController;
 use Modules\Payments\Http\Controllers\QueryPaymentController;
 
-/*
-|--------------------------------------------------------------------------
-| API routes
-|--------------------------------------------------------------------------
-|
-| The first API route in the project.
-|
-| IT LIVES HERE RATHER THAN INSIDE THE PAYMENTS MODULE because
-| tests/Architecture/ModuleBoundaryTest.php asserts that no module carries a
-| routes directory, and moving that boundary is not a decision this endpoint
-| needs. Referencing a module's Http layer from the root is permitted: only
-| Domain and Infrastructure are closed to the outside.
-|
-| bootstrap/app.php registers this file with the `api` prefix and middleware
-| group. That is the part of `install:api` that finally has a consumer; the rest
-| of it — the example route and its scaffolding — is still not run.
-|
-| The api middleware group is Laravel's default (SubstituteBindings only). No
-| throttling: the initiation specification names rate limiting solely to say it
-| cannot provide idempotency, so it is not a T6 deliverable.
-|
-*/
-
 Route::middleware('auth:sanctum')->group(function (): void {
     Route::post('/payments', InitiatePaymentController::class)->name('payments.initiate');
 
-    // NO ->whereUuid('paymentId'). A route constraint would make a malformed id
-    // fall through to the generic 404 not_found, so a syntactically invalid unknown
-    // id would be a DISTINGUISHABLE error class from a valid unknown one. The query
-    // adapter refuses malformed input itself and answers payment_not_found, which
-    // is the same answer a stranger's payment gets.
+    // No whereUuid(): a malformed id must get payment_not_found, not the generic route 404.
     Route::get('/payments/{paymentId}', QueryPaymentController::class)->name('payments.show');
 });

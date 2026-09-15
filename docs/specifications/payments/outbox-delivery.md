@@ -160,6 +160,11 @@ maximum wall-clock runtime prevent unbounded database occupancy. Overlapping rel
 safe because row locks, not scheduler uniqueness, provide correctness — `SKIP LOCKED` is what makes
 that true, and no `withoutOverlapping()`/`onOneServer()` is registered on the schedule entry.
 
+The relay publishes through the dedicated `payments` Redis connection while it holds the outbox row lock.
+Its short connect and read timeouts bound how long a Redis fault can extend that hold, and `max_retries` is `0` so the relay's PostgreSQL-backed backoff stays the only retry owner.
+The connection has no `url` key, because a `REDIS_URL` path or query string would override its database, retries and timeouts.
+Horizon never uses this connection: it has its own `horizon` connection, because its long-lived reads would fail against these short bounds.
+
 ### HS-1 — discharged by T11 Slice 2
 
 An earlier draft of this algorithm opened with "acquire the Payments projection shared gate." **T7 did
