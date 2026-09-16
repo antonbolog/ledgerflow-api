@@ -16,6 +16,8 @@ Implemented in T1: the multi-stage `Dockerfile` (`base`/`vendor`/`dev`/`producti
 the initial Makefile, Pest on PostgreSQL with database isolation checks, Pint, Rector,
 PHPStan level 10, and CI.
 
+Implemented in ANT-22: the `dev-xdebug` leaf stage and ignored local Compose override provide optional PhpStorm step debugging without changing the normal development, test, production, worker, or web images.
+
 Implemented in T2: the `Merchant` and `Payments` modules with enforced layer boundaries
 ([ADR 0001](../../adr/0001-custom-ddd-module-layout.md)), merchant-user identity moved into
 `Modules/Merchant` behind a Sanctum-authenticated application contract, a required and indexed
@@ -67,6 +69,48 @@ below true rather than aspirational.
 
 The production image may later be specialized into runtime targets, but local development and AWS
 workers must execute the same application artifact and dependency set.
+
+## Optional PhpStorm Xdebug
+
+Xdebug 3.5.3 exists only in the `dev-xdebug` leaf stage derived from `dev`.
+The normal `dev` and `production` stages do not inherit it, and the `web` stage copies only public files from `production` into Nginx.
+The scheduler and Horizon continue to use the normal `ledgerflow-app:latest` image built from `dev`.
+
+Enable the local Xdebug image and recreate the stack:
+
+```shell
+cp compose.override.dist.yml compose.override.yml
+make install
+```
+
+The copied file is ignored by Git and Compose loads it automatically.
+It changes only the `app` service to build `dev-xdebug` as `ledgerflow-app-xdebug:latest`, maps `host.docker.internal` to the host gateway, and sets `PHP_IDE_CONFIG=serverName=localhost`.
+It publishes no inbound Xdebug port because Xdebug initiates the connection from the container to PhpStorm.
+
+Configure PhpStorm to listen for PHP debug connections on port `9999` under PHP > Debug.
+Direct debugging does not use the DBGp Proxy settings.
+Create a PHP server named `localhost` with host `localhost` or `127.0.0.1`, the configured `APP_PORT` (`8080` by default), and a path mapping from the local repository root to `/var/www/html`.
+
+While the Xdebug override is active, opening any HTTP endpoint initiates a debug connection when PhpStorm is listening.
+Use this URL as a basic breakpoint example:
+
+```text
+http://127.0.0.1:8080/
+```
+
+Use the configured `APP_PORT` instead of `8080` when it differs.
+CLI commands also initiate a debug connection while the Xdebug override is active:
+
+```shell
+docker compose exec app php artisan ...
+```
+
+Return to the normal Xdebug-free image by removing the local override and rebuilding through the normal installation contract:
+
+```shell
+rm compose.override.yml
+make install
+```
 
 ## Intended Makefile interface
 

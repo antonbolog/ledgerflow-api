@@ -27,6 +27,7 @@ Thumbs.db
 .env.*
 !.env.example
 auth.json
+/compose.override.yml
 
 # Dependencies
 /vendor/
