@@ -1,0 +1,10 @@
+# Copy to compose.override.yml to enable Xdebug. See docs/specifications/foundation/development-environment.md#optional-phpstorm-xdebug.
+services:
+  app:
+    image: ledgerflow-app-xdebug:latest
+    build:
+      target: dev-xdebug
+    extra_hosts:
+      - "host.docker.internal=host-gateway"
+    environment:
+      PHP_IDE_CONFIG: "serverName=localhost"

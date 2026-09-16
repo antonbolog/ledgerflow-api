@@ -37,7 +37,6 @@ RUN addgroup -g 1000 app \
 WORKDIR /var/www/html
 
 ENV PATH="/var/www/html/vendor/bin:${PATH}" \
-    COMPOSER_ALLOW_SUPERUSER=0 \
     COMPOSER_HOME=/home/app/.composer
 
 COPY docker/php/php.ini /usr/local/etc/php/conf.d/99-ledgerflow.ini
@@ -66,7 +65,7 @@ ARG HOST_GID=1000
 
 # Collision-aware: Alpine already owns macOS's gid 20, so an existing group is joined instead of recreated.
 RUN set -eux; \
-    apk add --no-cache shadow; \
+    apk add --no-cache --virtual .dev-user-deps shadow; \
     if [ "$HOST_GID" != "1000" ]; then \
         if getent group "$HOST_GID" >/dev/null 2>&1; then \
             usermod -aG "$(getent group "$HOST_GID" | cut -d: -f1)" app; \
@@ -88,7 +87,24 @@ RUN set -eux; \
     fi; \
     mkdir -p /usr/local/var/log /usr/local/var/run; \
     chown -R "$HOST_UID":"$HOST_GID" \
-        /home/app /var/www/html /usr/local/var/log /usr/local/var/run
+        /home/app /var/www/html /usr/local/var/log /usr/local/var/run; \
+    apk del .dev-user-deps
+
+USER app
+
+FROM dev AS dev-xdebug
+
+USER root
+
+RUN apk add --no-cache --virtual .xdebug-build-deps \
+        $PHPIZE_DEPS \
+        linux-headers \
+    && pecl install xdebug-3.5.3 \
+    && docker-php-ext-enable xdebug \
+    && apk del .xdebug-build-deps \
+    && rm -rf /tmp/pear
+
+COPY docker/php/xdebug.ini /usr/local/etc/php/conf.d/99-xdebug.ini
 
 USER app
 
