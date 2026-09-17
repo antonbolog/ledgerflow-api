@@ -268,7 +268,8 @@ T13 carries the demo half through the
 ## Planned system evolution after M5
 
 The Payments resilience slice is complete, so these directions are now unblocked. They are not yet
-decomposed into the active Linear/Asana task set.
+decomposed into the active task set, except for merchant dashboard integration, which ANT-28 through
+ANT-31 now carry.
 
 ### Filament admin and realtime foundation
 
@@ -291,8 +292,23 @@ decomposed into the active Linear/Asana task set.
 
 ### Merchant dashboard integration
 
-- Build the Next.js/React dashboard in `ledgerflow-spa` after stable API contracts exist.
-- Finalize Sanctum, CORS/CSRF, deployment domains, WebSocket authorization, and reconnect behavior.
+This direction is decomposed: ANT-28 specifies the authentication contract, and it blocks ANT-29 and
+ANT-30 while relating to ANT-31.
+
+- **ANT-28 is specification only and complete as documentation.**
+  [ADR 0006](adr/0006-merchant-oauth-bff-authentication.md) and
+  [merchant OAuth and BFF authentication](specifications/merchant/oauth-bff-authentication.md) record
+  Passport as the OAuth 2.0 authorization and resource server, the Authorization Code Grant with PKCE
+  behind a confidential first-party client, BFF-owned `Secure` `HttpOnly` token cookies, session-free
+  merchant resource routes, and the deferrals for WebSocket authentication and password-change
+  revocation. No code, dependency, migration, or wire contract changed.
+- **ANT-29 migrates merchant API authentication from Sanctum to Passport.**
+  Sanctum remains the implemented mechanism until it runs.
+- **ANT-30 scaffolds `ledgerflow-spa`** and establishes its executable contracts.
+- **ANT-31 implements the PKCE flow in the Next.js BFF**, including the single-flight refresh that
+  ADR 0006 leaves to it.
+- Finalize CORS, deployment domains, WebSocket authorization, and reconnect behavior; the first two
+  are open items named in that specification.
 - Deploy and validate the frontend independently from the API image.
 
 ### AWS demo production
