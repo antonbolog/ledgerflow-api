@@ -35,6 +35,11 @@ Use sequential names such as `0001-custom-ddd-module-layout.md`; do not put date
   durable control row plus a connection-affine advisory lock, defer rather than fail gated work, and
   prove rebuild ownership by lock possession rather than by a token, a pid, or a successful query.
   Accepted, implemented by T11.
+- [0006](0006-merchant-oauth-bff-authentication.md) - Authenticate merchants with Passport OAuth 2.0
+  behind a Next.js BFF: Authorization Code Grant with PKCE, a confidential first-party client,
+  BFF-owned `Secure` `HttpOnly` token cookies, session-free merchant resource routes, and merchant
+  identity kept in a separate provider from the planned Filament operator identity. Accepted as
+  specification by ANT-28; implementation belongs to ANT-29 and ANT-31.
 
 ## Candidates
 

@@ -18,6 +18,11 @@ infrastructure and deployment topology.
 - [Payments specifications](docs/specifications/payments/README.md)
 - [Resilience test plan](docs/testing/payments-resilience.md)
 
+## Merchant authentication
+
+- [Merchant OAuth and BFF authentication](docs/specifications/merchant/oauth-bff-authentication.md)
+  - specified by ANT-28, not yet implemented; Sanctum remains in force until ANT-29.
+
 ## Runtime and delivery
 
 - [Development environment](docs/specifications/foundation/development-environment.md)

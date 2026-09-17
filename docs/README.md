@@ -16,6 +16,7 @@ unrelated implementation details.
 | What must be built, and in what order? | [Roadmap](roadmap.md) |
 | How must local development work? | [Development environment](specifications/foundation/development-environment.md) |
 | What is the exact Payments behavior? | [Payments specifications](specifications/payments/README.md) |
+| How will merchants authenticate through the dashboard? | [Merchant OAuth and BFF authentication](specifications/merchant/oauth-bff-authentication.md) |
 | How is resilience proved? | [Resilience test plan](testing/payments-resilience.md) |
 | Which application processes run locally and on AWS? | [Runtime contract](operations/runtime-contract.md) |
 | How do I see the whole slice working in five minutes? | [Five-minute demo](operations/five-minute-demo.md) |
