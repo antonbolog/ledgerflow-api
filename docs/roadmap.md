@@ -303,7 +303,16 @@ ANT-30 while relating to ANT-31.
   merchant resource routes, and the deferrals for WebSocket authentication and password-change
   revocation. No code, dependency, migration, or wire contract changed.
 - **ANT-29 migrates merchant API authentication from Sanctum to Passport.**
-  Sanctum remains the implemented mechanism until it runs.
+  The resource API now authenticates on the Passport `api` guard, Sanctum is removed and its token
+  table dropped, and access, refresh and personal access lifetimes are configured. The authorization
+  server now serves `GET /oauth/authorize` and `POST /oauth/token` only, enforces `S256` PKCE
+  server-side, logs merchants in on `merchant_web` behind a throttle, spends that session on one
+  authorization attempt, and skips consent for the one configured BFF client. Refresh rotation
+  revokes through a compare-and-set, so the loser of a concurrent refresh receives `invalid_grant`
+  rather than a second live family; `POST /api/auth/logout` revokes the presented access token and
+  its refresh token in one transaction; and `passport:purge` is scheduled daily as bookkeeping.
+  What ADR 0006 defers stands: no token-family tracking, no replay detection, no cascading
+  revocation, and no password-change or WebSocket revocation.
 - **ANT-30 scaffolds `ledgerflow-spa`** and establishes its executable contracts.
 - **ANT-31 implements the PKCE flow in the Next.js BFF**, including the single-flight refresh that
   ADR 0006 leaves to it.

@@ -12,17 +12,44 @@
   },
   "servers": [
     {
-      "url": "http://127.0.0.1:8080",
-      "description": "Local Docker Compose stack, loopback only."
+      "url": "http://localhost:8080",
+      "description": "Local Docker Compose stack, published on loopback only."
     }
   ],
   "tags": [
     {
       "name": "Payments",
       "description": "Payment initiation and query for the authenticated merchant."
+    },
+    {
+      "name": "Authentication",
+      "description": "Merchant token revocation on the resource API. The OAuth authorization server itself is not part of this contract."
     }
   ],
   "paths": {
+    "/api/auth/logout": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "operationId": "logoutMerchant",
+        "summary": "Revoke the presented access token and its refresh token",
+        "description": "Revokes the access token carried by this request and the refresh token issued beside it, in one transaction. Revocation takes effect on the next request, because validation reads `revoked` from the database every time. The merchant authorization session is not touched: it is already invalidated as soon as an authenticated merchant has attempted one authorization. This endpoint is not idempotent: a second call with the same, now revoked, token is answered `401 unauthenticated` like any other endpoint. Clearing the BFF cookies and coordinating the browser's logout belong to the BFF.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Both tokens are revoked. The response carries no body, and neither token is echoed."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          }
+        }
+      }
+    },
     "/api/payments": {
       "post": {
         "tags": [
@@ -273,7 +300,7 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "A Sanctum personal access token. Locally, obtain one with `make demo-token`."
+        "description": "A Passport access token, presented as a bearer JWT. Locally, obtain one with `make demo-token`."
       }
     },
     "parameters": {

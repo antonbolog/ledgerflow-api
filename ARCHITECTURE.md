@@ -21,7 +21,9 @@ infrastructure and deployment topology.
 ## Merchant authentication
 
 - [Merchant OAuth and BFF authentication](docs/specifications/merchant/oauth-bff-authentication.md)
-  - specified by ANT-28, not yet implemented; Sanctum remains in force until ANT-29.
+  - specified by ANT-28 and implemented by ANT-29: the Passport `api` guard on `/api/*`, the
+    authorization server, merchant login, the BFF client, atomic refresh rotation, logout and
+    revocation, and the daily token purge. The BFF half belongs to `ledgerflow-spa`.
 
 ## Runtime and delivery
 

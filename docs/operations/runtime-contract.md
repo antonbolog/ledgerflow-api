@@ -33,7 +33,7 @@ The lifecycle table and the exact recognized target live in
 
 | Compose service | Process | Healthcheck |
 |---|---|---|
-| `web` | nginx serving `/api/*` and `/up` on `127.0.0.1:8080`, loopback only | HTTP `/up` |
+| `web` | nginx serving `/api/*`, `/oauth/*`, `/login` and `/up`, published on `127.0.0.1:8080` and addressed as `http://localhost:8080` | HTTP `/up` |
 | `app` | PHP-FPM, and the container operator commands run in | PHP-FPM status |
 | `postgres` | PostgreSQL 18, business and delivery truth | `pg_isready` |
 | `redis` | Redis 8, queue, cache and coordination | `redis-cli ping` |
@@ -43,7 +43,7 @@ alone, and `make projection-stop` removes the same pair:
 
 | Compose service | Process | Healthcheck |
 |---|---|---|
-| `scheduler` | `php artisan schedule:work`, which runs the per-second outbox relay | `payments:outbox:status` |
+| `scheduler` | `php artisan schedule:work`, which runs the per-second outbox relay and the daily `passport:purge` | `payments:outbox:status` |
 | `horizon` | `php artisan horizon`, supervising the `payments-projection` queue | `horizon:status` |
 
 **A clean checkout whose outbox never moves is a missing `projection-start`, not a defect.** Payments
@@ -56,7 +56,7 @@ rather than instantly; `docker compose restart scheduler` makes recovery immedia
 reconnects on its own. Neither case consumes projection failure budget or exhausts an envelope.
 
 Three `demo-` Make targets support [the five-minute demo](five-minute-demo.md): `demo-token` prints a
-Sanctum token for a seeded fixture identity, `demo-status` shows relay and Horizon state read-only,
+Passport bearer token for a seeded fixture identity, `demo-status` shows relay and Horizon state read-only,
 and `demo-corrupt` deletes one named `payment_details` row behind a typed confirmation and the local
 database allowlist. They are local development tooling. No validation target performs their effect:
 `make check` and `make ci` never invoke them.

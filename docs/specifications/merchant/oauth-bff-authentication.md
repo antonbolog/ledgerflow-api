@@ -2,8 +2,9 @@
 
 ## Given
 
-`ledgerflow-api` authenticates merchant requests with non-expiring, unscoped Sanctum personal access
-tokens, and `MerchantContext` resolves the owning merchant from the `sanctum` guard.
+`ledgerflow-api` authenticated merchant requests with non-expiring, unscoped Sanctum personal access
+tokens until ANT-29, which moved the resource API onto Passport's `api` guard and dropped the Sanctum
+token table.
 `ledgerflow-spa` is at pre-scaffold stage and will run Next.js with a browser-facing backend for
 frontend.
 `GET /api/payments/{paymentId}` already hides foreign and unknown identifiers behind one
@@ -30,8 +31,13 @@ The durable decisions are recorded in
 [ADR 0006](../../adr/0006-merchant-oauth-bff-authentication.md) as **D-1** through **D-17**, and this
 document is their canonical behavioral expansion.
 
-**Nothing in this document is implemented.**
-Sanctum remains the merchant authentication in force until ANT-29 (**D-17**).
+**This document is implemented in `ledgerflow-api`.**
+ANT-29 moved `/api/*` onto the `api` guard, set the lifetimes below, removed Sanctum and closed the
+CORS open item; added the merchant login page, `GET /oauth/authorize` and `POST /oauth/token` with
+mandatory `S256` PKCE, a one-shot `merchant_web` session, and consent skipped for the one configured
+first-party client; and made refresh rotation a compare-and-set, added `POST /api/auth/logout`, and
+scheduled `passport:purge`.
+What remains open is owned by `ledgerflow-spa` or deferred behind the contracts below.
 [The roadmap](../../roadmap.md) owns task state.
 
 ## Participants and trust boundaries
@@ -52,8 +58,8 @@ browser --top-level redirect-------------------------------> ledgerflow-api (aut
 
 ## Guard layout
 
-The target layout. Today `config/auth.php` declares only `web`, and the resource API runs on the
-`sanctum` guard.
+Both guards are declared and in use as of ANT-29: the resource API runs on `api`, and merchants
+authenticate on `merchant_web` through the login page below.
 
 | Guard | Driver | Identity provider | Serves | Session |
 |---|---|---|---|---|
@@ -75,12 +81,24 @@ default, keeping only their user keys apart, so naming a second guard is not an 
 Whether the planned Filament panel gets its own session cookie, store, or domain is owned by that
 panel's future contract, not decided here.
 
-`MerchantContext` must resolve the `api` guard; that binding, currently the literal `sanctum`, is the
-single point at which the resource API switches mechanism.
+`MerchantContext` must resolve the `api` guard, which is the single point at which the resource API
+switches mechanism; ANT-29 moved that literal from `sanctum` to `api`.
 
 The `merchant_web` session exists only to answer "which merchant user is authorizing this client".
 It is never accepted on `/api/*`, and no merchant resource route carries session, cookie, or CSRF
 middleware (**D-8**).
+
+**The session is one-shot.** It is invalidated as soon as an authenticated merchant has attempted
+one authorization, whether that attempt issued a code or was refused, so no merchant session
+outlives the request that used it. A guest keeps its session, because that session carries the
+intended URL the login page returns to. This is what makes logout observable without a
+cross-site mutation on the API host: there is no lingering session for a later authorization request
+to reuse silently, and the next one prompts for credentials again. It amends **D-15** step 3, which
+assumed a session that survives authorization.
+
+Only `GET /oauth/authorize` and `POST /oauth/token` are registered. Passport's remaining default
+routes are not, in particular `POST /oauth/token/refresh`, which mints a `laravel_token` cookie that
+the token guard would accept on `/api/*` and which would therefore contradict **D-8**.
 
 ## Client registration
 
@@ -96,6 +114,13 @@ middleware (**D-8**).
 - The consent screen is skipped for this client, which Passport does not do by default.
   Skipping consent is justified only while the client is first-party **and** its redirect URIs are
   exact-match; if either stops holding, consent must return.
+  The skip is keyed to the one client id in `passport.bff_client_id`, not to first-party status in
+  general, and it additionally requires that the client be ownerless and confidential.
+  Passport's second route to skipping consent, reusing a prior grant when the user already holds an
+  active token for the client, is disabled: with no consent screen, a token can only come from a
+  client already allowed to skip, and reuse would extend that allowance to any client that ever held
+  one.
+  No consent screen exists, so any other client is refused rather than prompted.
 - No scopes are defined, so no scope is requested and none is granted (**D-14**).
 
 ## Sequences
@@ -116,7 +141,13 @@ It stores the verifier and the state server-side of the browser boundary, in a s
 The authorization server resolves the merchant on the `merchant_web` guard.
 A guest is sent to the merchant login page and returns to the same authorization request afterwards.
 Consent is skipped for this first-party client, so an authenticated merchant is redirected straight
-back with a code.
+back with a code, and the `merchant_web` session is invalidated in the same response.
+
+**PKCE is enforced by the authorization server, not only by the BFF.** An authorization request
+without a `code_challenge`, or with any `code_challenge_method` other than `S256`, is refused with
+`400 invalid_request` before the request reaches the grant. League itself requires PKCE only from
+public clients and treats a missing method as `plain`, so without this the BFF would be the sole
+enforcer of **D-3**.
 
 ### 3. Callback
 
@@ -131,6 +162,14 @@ The BFF posts to `/oauth/token` with `grant_type=authorization_code`, the `code`
 `redirect_uri`, `client_id`, `client_secret`, and `code_verifier`.
 It writes the returned access and refresh tokens into its two cookies and redirects the browser to
 the originally requested page.
+
+The token endpoint carries neither session nor CSRF middleware, because the BFF calls it server to
+server. It is throttled by client: 600 requests a minute for the configured BFF client, and 60 a
+minute by address for anything else. A single budget keyed by address would otherwise put every
+merchant behind the BFF's one egress address into the same bucket.
+The address fallback is only as granular as the deployment makes the client address: nothing in this
+repository configures trusted proxies or a real-IP header, so behind a proxy every non-BFF caller
+shares one bucket. That is the intended floor here, because the BFF is the only registered client.
 Neither token is ever placed in a response body, a URL, a template, or a browser-readable store
 (**D-5**).
 
@@ -150,6 +189,13 @@ The BFF posts to `/oauth/token` with `grant_type=refresh_token`, the refresh tok
 Passport rotates: the presented refresh token and its access token are revoked, and a new pair is
 returned.
 The BFF overwrites both cookies with the new pair in the same response.
+
+**Rotation is a compare-and-set.** The authorization server revokes the presented refresh token with
+one conditional update that moves the row only while it is still unrevoked, and a request that moves
+no row is refused with `invalid_grant` before any successor is issued.
+Passport's own repository revokes unconditionally after a separate check, so two concurrent refreshes
+carrying the same token could both pass that check and both receive a live pair, forking two families.
+The conditional update is what makes "the loser receives `invalid_grant`" true rather than likely.
 
 A failed refresh is terminal for the request.
 The BFF clears both cookies and drives the browser back through the authorization redirect; it does
@@ -174,6 +220,20 @@ Ending the authorization session is what makes logout observable.
 Without it, the next authorization redirect re-issues tokens silently and the merchant is never
 actually logged out.
 
+**Step 1 is `POST /api/auth/logout`**, on the `api` guard like every other resource route.
+It revokes the access token the request carries and the refresh token issued beside it in one
+transaction, and answers `204` with no body, echoing neither token.
+It is documented in [the wire contract](../../api/openapi.json).
+
+**Step 3 needs no call.** The `merchant_web` session is invalidated as soon as an authenticated
+merchant has attempted one authorization, so by the time a merchant is holding tokens there is no
+session left to end, and the next authorization prompts for credentials again.
+
+**The endpoint is not idempotent, and does not claim to be.** A second call with the same, now
+revoked, token is answered `401 unauthenticated`, exactly as any other resource route answers it.
+Step 2 and whatever the browser should see across a repeated or interrupted logout are the BFF's, and
+belong to ANT-31.
+
 ### 9. Revocation
 
 A token expires on its own at the lifetime above, because Passport carries expiry inside the signed
@@ -181,6 +241,9 @@ token.
 Revocation is the only way to invalidate one **before** that point: the `expires_at` columns are
 display-only, so editing them changes nothing.
 Pruning revoked and expired rows is bookkeeping, not a security control.
+`passport:purge` is scheduled daily beside the relay schedule for exactly that reason: validation
+reads `revoked` from the database on every request, so a row that outlives a missed run is already
+refused, and no authentication decision depends on the purge having run.
 Password-change revocation is deferred (**D-16**).
 
 ## Cookie contract
@@ -257,8 +320,9 @@ authenticates from `Authorization: Bearer` alone (**D-6**, **D-8**), so a cookie
 inert.
 
 `127.0.0.1` is deliberately not used alongside `localhost`: it is a different cookie host, and mixing
-the two silently splits the cookie jar. `APP_URL` is `http://127.0.0.1:8080` today, so reconciling the
-local API origin with this decision is ANT-29's.
+the two silently splits the cookie jar. ANT-29 set `APP_URL` to `http://localhost:8080`; the port is
+still published on the `127.0.0.1` loopback interface, because the bind address and the origin are
+separate concerns.
 
 ### What production requires
 
@@ -348,12 +412,13 @@ or sensitive payment payloads.
   Passport cannot tell that case apart from an ordinary concurrent-refresh race, so it does not
   detect the family compromise and nothing is revoked in response to it.
   This specification claims rotation, and nothing stronger.
-- **Concurrent refresh is not solved by the grant.**
-  Rotation revokes the presented refresh token immediately, and the browser cookie jar is the
-  authoritative store, so two concurrent requests carrying the same refresh token race and the loser
-  receives `invalid_grant`.
-  Single-flight coordination across Next.js processes is an ANT-31 obligation; the mechanism is an
-  open item below, not a settled contract.
+- **Concurrent refresh is arbitrated, not avoided.**
+  The compare-and-set above decides the race: exactly one of two concurrent requests carrying the
+  same refresh token receives a successor pair, and the loser receives `invalid_grant`.
+  It does not spare the loser that answer.
+  The browser cookie jar is still the authoritative store, so a BFF that lets two requests refresh at
+  once will still see one of them fail and have to recover.
+  Single-flight coordination across Next.js processes remains an ANT-31 obligation.
 - **Key rotation is fleet-wide.**
   Passport signs access tokens with one key pair and offers no `kid` rollover, so rotating keys
   invalidates every outstanding access token at once.
@@ -376,17 +441,34 @@ or sensitive payment payloads.
 
 Owned by **ANT-29** in this repository:
 
-- the merchant login page, its throttling, and its session lifetime on the `merchant_web` guard;
-- whether client secrets are hashed, which makes them unrecoverable after creation;
-- key storage and rotation ownership, and whether rotation also invalidates refresh tokens, verified
-  against `league` source rather than assumed;
-- the `passport:purge` schedule alongside the existing relay schedule;
-- revocation of existing Sanctum tokens, and the replacement for `make demo-token`;
-- the currently unreviewed framework CORS default, which under **D-7** should deny rather than widen.
+- ~~the merchant login page, its throttling, and its session lifetime on the `merchant_web` guard~~ —
+  done in ANT-29: a login page on the API host, named `login`, throttled to 5 attempts a minute by
+  normalized email and address together, with the session regenerated on success and invalidated as
+  soon as it has served one authorization;
+- ~~whether client secrets are hashed, which makes them unrecoverable after creation~~ — done in
+  ANT-29: Passport 13 hashes them unconditionally, so `make demo-bff-client` prints the secret once
+  and rotation means revoking the client and registering a new one;
+- ~~key storage and rotation ownership, and whether rotation also invalidates refresh tokens~~ — done
+  in ANT-29: keys are generated locally and supplied from the environment in production, rotating the
+  signing pair invalidates access tokens only, and rotating `APP_KEY` invalidates refresh tokens and
+  pending codes; see
+  [development environment](../foundation/development-environment.md#passport-as-actually-installed);
+- ~~the `passport:purge` schedule alongside the existing relay schedule~~ — done in ANT-29: scheduled
+  daily, and bookkeeping only;
+- ~~revocation of existing Sanctum tokens, and the replacement for `make demo-token`~~ — done in
+  ANT-29: dropping `personal_access_tokens` revoked every Sanctum token, and `make demo-token` now
+  prints a one-hour Passport personal access token issued through a local-only personal access
+  client;
+- ~~the currently unreviewed framework CORS default~~ — done in ANT-29: `config/cors.php` declares no
+  paths, so no browser origin receives a CORS grant.
 
 Owned by **ANT-31** in `ledgerflow-spa`:
 
 - the single-flight refresh mechanism and whether it accepts a short server-side overlap window;
+- deleting both token cookies on logout and on terminal refresh failure, with the attributes they
+  were written with;
+- what the browser sees across a repeated or interrupted logout, since the API endpoint is not
+  idempotent and answers a second call with the same token `401 unauthenticated`;
 - final cookie names, including whether the `__Host-` prefix is used in production;
 - measured cookie sizes against the 4096-byte limit.
 
@@ -406,4 +488,4 @@ Owned jointly, before either task starts:
 - [Payments initiation and idempotency](../payments/initiation-and-idempotency.md) - the write
   contract the BFF forwards unchanged.
 - [Development environment](../foundation/development-environment.md) - what is actually installed
-  today, including Sanctum.
+  today, including Passport and how it is wired.

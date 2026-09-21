@@ -35,16 +35,19 @@ That is a missing process, not a defect: see
 Then take a bearer token and keep it in a shell variable:
 
 ```sh
-API=http://127.0.0.1:8080
+API=http://localhost:8080
 TOKEN=$(make demo-token)
 ```
 
 `make demo-token` prints the token and nothing else on stdout, so the capture above works.
-It issues a Sanctum personal access token for a seeded fixture identity through the running `app`
+It issues a one-hour Passport personal access token for a seeded fixture identity through the running `app`
 container.
 `EMAIL=` selects the identity and accepts only `owner@northwind.test` (the default) and
 `owner@atlantic.test`, the two merchants `make db-seed` creates.
-There is no login endpoint to demonstrate, because this repository does not implement one.
+The demo drives the resource API with that token directly. The merchant login page and the
+authorization code flow are exercised by `ledgerflow-spa`, not by this walkthrough; locally they need
+`make demo-password EMAIL=...` for a known fixture password and `make demo-bff-client` for the OAuth
+client.
 
 Keep the token in the variable.
 Do not paste it into a file, a commit, or an issue: it authenticates as a merchant for as long as it

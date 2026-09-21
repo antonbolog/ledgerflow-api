@@ -79,6 +79,19 @@ install: ## Build and start the stack from a clean checkout
 	  else \
 	    echo "  APP_KEY present, preserved"; \
 	  fi'
+	@echo "==> ensuring Passport keys"
+	@$(RUN) sh -c '\
+	  if [ -f storage/oauth-private.key ] && [ -f storage/oauth-public.key ]; then \
+	    echo "  Passport keys present, preserved"; \
+	  elif [ -f storage/oauth-private.key ] || [ -f storage/oauth-public.key ]; then \
+	    echo "ERROR: only one of storage/oauth-private.key and storage/oauth-public.key exists." >&2; \
+	    echo "       Refusing to overwrite it: replacing a key invalidates every issued access token." >&2; \
+	    echo "       Fix: restore the missing key, or delete the remaining one deliberately." >&2; \
+	    exit 1; \
+	  else \
+	    echo "  Passport keys absent, generating"; \
+	    php artisan passport:keys --ansi; \
+	  fi'
 	@echo "==> starting services"
 	$(DC) up -d --wait
 	@$(MAKE) --no-print-directory db-ensure-test
@@ -133,7 +146,7 @@ demo-guard:
 
 # Stdout carries the token and nothing else, so `TOKEN=$$(make demo-token)` works.
 .PHONY: demo-token
-demo-token: ## Print one Sanctum token for a seeded fixture merchant (EMAIL=...)
+demo-token: ## Print one one-hour Passport bearer token for a seeded fixture merchant (EMAIL=...)
 	@allowed=0; \
 	  for e in $$DEMO_EMAILS; do \
 	    [ "$$e" = "$$DEMO_EMAIL" ] && allowed=1; \
@@ -145,15 +158,38 @@ demo-token: ## Print one Sanctum token for a seeded fixture merchant (EMAIL=...)
 	    echo "  Run make db-seed if these identities do not exist yet." >&2; \
 	    exit 1; }
 	@$(MAKE) --no-print-directory demo-guard >&2
-	@token=$$($(EXEC) -e DEMO_EMAIL app php artisan tinker --execute \
-	  'echo \Modules\Merchant\Infrastructure\Persistence\Eloquent\User::query()->where("email", getenv("DEMO_EMAIL"))->firstOrFail()->createToken("ledgerflow-demo")->plainTextToken, PHP_EOL;' \
-	  | tr -d '\r' | grep -oE '[0-9]+\|[A-Za-z0-9]{40,}' | tail -1); \
+	@token=$$($(EXEC) -e DEMO_EMAIL app sh -c 'php artisan merchant:demo-token "$$DEMO_EMAIL"' \
+	  | tr -d '\r' | grep -E '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$$' | tail -1); \
 	  [ -n "$$token" ] || { \
 	    echo "REFUSING: no token was minted." >&2; \
 	    echo "  Run make db-seed if the fixture identities do not exist yet," >&2; \
 	    echo "  and check that the app container is running." >&2; \
 	    exit 1; }; \
 	  echo "$$token"
+
+# No -T: the password is read from a hidden prompt, which needs a terminal. It is never an
+# argument or an environment variable, so nothing but that prompt can carry it.
+.PHONY: demo-password
+demo-password: ## Set a seeded fixture merchant's local password from a hidden prompt (EMAIL=...)
+	@allowed=0; \
+	  for e in $$DEMO_EMAILS; do \
+	    [ "$$e" = "$$DEMO_EMAIL" ] && allowed=1; \
+	  done; \
+	  [ "$$allowed" = 1 ] || { \
+	    echo "REFUSING: EMAIL must name a seeded fixture identity." >&2; \
+	    echo "  allowed: $$DEMO_EMAILS" >&2; \
+	    echo "  given:   $$DEMO_EMAIL" >&2; \
+	    echo "  Run make db-seed if these identities do not exist yet." >&2; \
+	    exit 1; }
+	@$(MAKE) --no-print-directory demo-guard
+	$(DC) exec -e DEMO_EMAIL app sh -c 'php artisan merchant:demo-password "$$DEMO_EMAIL"'
+
+# The redirect URI is exact-match and lives here, not in the command: the command is the same one
+# ledgerflow-infra would run against a real environment with a real callback.
+.PHONY: demo-bff-client
+demo-bff-client: ## Register the local BFF OAuth client and print its secret once
+	@$(MAKE) --no-print-directory demo-guard
+	$(EXEC) app php artisan merchant:bff-client http://localhost:3000/auth/callback
 
 # Non-fatal: non-zero exits are states this target exists to show, so the code is printed, not swallowed.
 .PHONY: demo-status
