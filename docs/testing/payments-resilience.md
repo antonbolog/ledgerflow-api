@@ -27,7 +27,7 @@ commands before the scaffold exists.
 - Key lengths at 0, 1, 255, and 256 bytes are covered.
 - Amount values at 0, 1, `100_000_000`, and `100_000_001` and currency cases are covered before
   transaction entry.
-- Sanctum users resolve one server-side merchant; two merchants prove isolation.
+- Passport bearer tokens resolve one server-side merchant; two merchants prove isolation.
 - A new key commits exactly one receipt, stored event, and outbox row.
 - Identical retry returns exact stored status, body bytes, and `Location`.
 - Conflicting retry returns `idempotency_payload_mismatch` and creates no durable state.

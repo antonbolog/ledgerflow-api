@@ -141,7 +141,7 @@ A projected lookup short-circuits the receipt fallback, so an owned projection i
 a receipt read. Another merchant's payment returns the same not-found shape as a missing one. The
 query adapter, `DatabasePaymentQuery`, may read only `payment_details` and
 `payment_idempotency_receipts` and writes nothing; the surrounding authenticated request still
-performs its normal Sanctum and `MerchantContext` identity queries. The endpoint never rehydrates
+performs its normal Passport and `MerchantContext` identity queries. The endpoint never rehydrates
 `PaymentAggregate` and never treats Redis/SQS state as proof that a payment exists.
 
 ## Failure handling

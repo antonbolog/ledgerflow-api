@@ -17,7 +17,7 @@ function showPayment(string $paymentId, ?Merchant $merchant = null): TestRespons
 {
     $token = Initiation::token($merchant);
 
-    // RequestGuard memoises its user across requests in one test.
+    // The token guard memoises its user across requests in one test.
     Auth::forgetGuards();
 
     return test()

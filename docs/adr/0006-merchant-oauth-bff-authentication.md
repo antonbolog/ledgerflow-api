@@ -1,16 +1,22 @@
 # 0006 - Authenticate merchants with Passport OAuth 2.0 behind a Next.js BFF
 
-- **Status** - Accepted as a decision. No implementation has landed.
+- **Status** - Accepted and implemented in `ledgerflow-api` by ANT-29: the resource server (`api`
+  guard, token lifetimes, Sanctum retirement, CORS), the authorization server
+  (`GET /oauth/authorize`, `POST /oauth/token`, merchant login, server-side PKCE, the first-party BFF
+  client), atomic refresh rotation, `POST /api/auth/logout`, and the daily `passport:purge`. The BFF
+  half is ANT-31's; **D-16**'s deferrals stand.
 - **Date** - 2026-09-17.
 - **Decision owner** - AB.
 - **Implements into** - ANT-29 in this repository and ANT-31 in `ledgerflow-spa`.
 
 ## Context
 
-Merchant requests are authenticated today by non-expiring, unscoped Sanctum personal access tokens,
+**This section records the state at the time of the decision; ANT-29 has since implemented it.**
+
+Merchant requests were authenticated by non-expiring, unscoped Sanctum personal access tokens,
 resolved through the `sanctum` guard; see
 [development environment](../specifications/foundation/development-environment.md#sanctum-as-actually-installed)
-for what that actually installed. `config/auth.php` declares one guard, `web`, there is no login
+for what that actually installed. `config/auth.php` declared one guard, `web`, there was no login
 route, and the Filament panel is planned but not installed.
 
 `ledgerflow-spa` is at pre-scaffold stage, and the accepted direction is a Next.js runtime owning a
@@ -58,13 +64,13 @@ is deliberately not restated in this record.
 | D-8 | Merchant resource endpoints remain session-free: no session, cookie, or CSRF middleware. |
 | D-9 | A dedicated `merchant_web` session guard exists only for OAuth login and authorization. |
 | D-10 | The planned Filament panel authenticates operators through a separate guard over a separate identity provider. |
-| D-11 | Access tokens live 15 minutes; refresh tokens live 14 days and rotate on every use. |
+| D-11 | Access tokens live 15 minutes; refresh tokens live 14 days and rotate on every use. Implemented by ANT-29 as a compare-and-set, so concurrent refreshes cannot both receive a successor pair. |
 | D-12 | On `401` the BFF may refresh once and replay the original request at most once. |
 | D-13 | The BFF never refreshes on `403`, on the tenant-hiding `404`, on `422`, or on `503`. |
 | D-14 | No OAuth scopes are defined initially. |
-| D-15 | Logout revokes the active access and refresh tokens, clears the BFF cookies, and ends the merchant authorization session. |
+| D-15 | Logout revokes the active access and refresh tokens, clears the BFF cookies, and ends the merchant authorization session. Amended by ANT-29: step 1 is `POST /api/auth/logout`, and step 3 needs no call because the merchant authorization session is one-shot and is invalidated as soon as an authenticated merchant has attempted one authorization, successful or refused. Step 2 is ANT-31's. |
 | D-16 | WebSocket authentication and password-change token revocation are deferred behind separate contracts. |
-| D-17 | Sanctum remains the implemented merchant authentication until ANT-29 replaces it. |
+| D-17 | Sanctum remains the implemented merchant authentication until ANT-29 replaces it. Superseded by ANT-29: Passport's `api` guard authenticates `/api/*` and Sanctum is removed. |
 
 ### Why a confidential client with PKCE rather than a public one
 

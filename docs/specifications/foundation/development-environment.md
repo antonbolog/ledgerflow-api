@@ -20,7 +20,7 @@ Implemented in ANT-22: the `dev-xdebug` leaf stage and ignored local Compose ove
 
 Implemented in T2: the `Merchant` and `Payments` modules with enforced layer boundaries
 ([ADR 0001](../../adr/0001-custom-ddd-module-layout.md)), merchant-user identity moved into
-`Modules/Merchant` behind a Sanctum-authenticated application contract, a required and indexed
+`Modules/Merchant` behind a bearer-token-authenticated application contract, a required and indexed
 `users.merchant_id` foreign key, and two deterministic seeded merchants and users.
 
 ## CI contract
@@ -95,7 +95,7 @@ While the Xdebug override is active, opening any HTTP endpoint initiates a debug
 Use this URL as a basic breakpoint example:
 
 ```text
-http://127.0.0.1:8080/
+http://localhost:8080/
 ```
 
 Use the configured `APP_PORT` instead of `8080` when it differs.
@@ -174,10 +174,13 @@ what it validates.
   `wikimedia/composer-merge-plugin` 2.1.0, which needs an `allow-plugins` entry. Editing
   `extra` by hand also invalidates the lock's content hash, so `composer update --lock` is a
   required step, not a fallback: `composer validate --strict` inside `make quality` fails without it.
-- `laravel/sanctum` **4.3.3** — merchant-user identity. Installed with `composer require` and
+- `laravel/sanctum` **4.3.3** — **removed by ANT-29; recorded here for provenance.** Merchant-user
+  identity. Installed with `composer require` and
   `vendor:publish --tag=sanctum-config` only. `install:api` was **not** run: it would also create
   `routes/api.php`, register `api:` in `bootstrap/app.php`, and ship an example route, none of which
   has a consumer until the task that serves a real endpoint.
+  **ANT-29 removed this package**, deleted `config/sanctum.php` and dropped `personal_access_tokens`;
+  see **Passport, as actually installed** below.
 
 **Deferred to the task with the first consumer**
 
@@ -209,6 +212,9 @@ package; see [ADR 0001](../../adr/0001-custom-ddd-module-layout.md).
 
 ### Sanctum, as actually installed
 
+**Historical.** ANT-29 replaced Sanctum with Passport; this section records what T2 through ANT-28
+ran on, and the publish-versus-load trap that Passport repeats. Nothing below is installed today.
+
 Two things differ from what was assumed when T2 was planned, and both are load-bearing:
 
 - **Sanctum 4.3.3 does not load its migration from the package.** Its service provider calls
@@ -239,6 +245,59 @@ domains — now belong to
 [Merchant dashboard integration](../../roadmap.md#merchant-dashboard-integration), not to whoever
 served the first endpoint: none of them can be answered before the SPA and its deployment topology
 are fixed. Read that file rather than inherit it.
+
+### Passport, as actually installed
+
+Read from `vendor/laravel/passport` at 13.8.0 and `vendor/thephpleague/oauth2-server` at 9.4.1.
+
+- **Version range.** `laravel/passport` accepts `illuminate/* ^13.0` from v13.4.4 onward and resolves
+  to **v13.8.0** on `php ^8.2`, so Laravel 13.24.0 on the pinned PHP 8.4.1 platform is in range. It
+  pulls `league/oauth2-server` 9.4.1, `lcobucci/jwt` 5.6.0, `firebase/php-jwt` 7.1.1,
+  `phpseclib/phpseclib` 4.0.1, `defuse/php-encryption` 2.4.0, `symfony/psr-http-message-bridge`
+  8.1.0, `php-http/discovery` 1.20.0, `league/event` 3.0.3 and three PSR packages.
+- **It publishes its migrations and does not load them**, the same trap Sanctum sprang in T2.
+  `vendor:publish --tag=passport-migrations` produced all five stubs under `database/migrations/`
+  with `2026_09_17_1657xx` timestamps: auth codes, access tokens, refresh tokens, clients and device
+  codes. They are kept byte-identical to the package, so `pint.json` and `phpstan.neon` exclude those
+  five exact paths rather than hand-edit generated files. Rector passes them unchanged.
+- **Routes are suppressed before they can register.** `Passport::ignoreRoutes()` and
+  `Passport::$deviceCodeGrantEnabled = false` run in `AppServiceProvider::register()`, because
+  package providers boot before application providers and Passport registers its routes while
+  booting. This keeps `/oauth/token/refresh` out of the application: its transient-token cookie is a
+  session-derived credential that `TokenGuard` would accept on `/api/*`, which ADR 0006 D-8 forbids.
+- **The two OAuth endpoints are registered from `routes/oauth.php`**, loaded through
+  `withRouting(then: ...)` rather than through the `api` or `web` file, because the authorization
+  server shares neither the API's bearer-only contract nor the web group's blanket session
+  middleware. `POST /oauth/token` carries only `throttle:oauth-token`; `GET /oauth/authorize` and
+  the merchant login routes carry `web`.
+- **Guards.** `config/auth.php` declares `api` (driver `passport`) and `merchant_web` (driver
+  `session`), and `api` is the default guard. Laravel merges its own `auth.guards` defaults into the
+  published file, so its `web` guard survives deletion there and `AppServiceProvider` removes it
+  after configuration loads.
+- **Lifetimes.** Access tokens 15 minutes, refresh tokens 14 days, personal access tokens 1 hour,
+  set in `AppServiceProvider::register()` (ADR 0006 D-11). Passport's own defaults are one year.
+- **Refresh rotation.** `MerchantServiceProvider::register()` binds
+  `Laravel\Passport\Bridge\RefreshTokenRepository` to a subclass that revokes through one
+  conditional update and raises `invalid_grant` when it moves no row. Passport resolves the bridge
+  repository by that concrete name while building its grants, so the binding reaches the refresh
+  grant without replacing the grant or the authorization server.
+- **Purge.** `routes/console.php` schedules `passport:purge` daily, so it runs only while the opt-in
+  scheduler runs. It is bookkeeping: validation reads `revoked` on every request.
+- **Keys.** `passport:keys` writes `storage/oauth-private.key` (0600) and `storage/oauth-public.key`
+  (0660); `make install` generates them only when both are absent and refuses when exactly one
+  exists. They are ignored by Git and excluded from the Docker build context, so no image carries
+  them. Production supplies `PASSPORT_PRIVATE_KEY` and `PASSPORT_PUBLIC_KEY` instead.
+- **What rotation costs.** Access tokens are RS256 JWTs signed by that key pair, so rotating it
+  invalidates every outstanding access token and nothing else: a BFF recovers through one refresh.
+  Refresh tokens and authorization codes are encrypted with `APP_KEY`, and `APP_PREVIOUS_KEYS` is not
+  consulted, so rotating `APP_KEY` invalidates every refresh token and pending code and sends every
+  merchant back through authorization.
+- **CORS.** `config/cors.php` is published with no paths, so no browser origin receives a CORS grant
+  from this API; the BFF calls it server to server (ADR 0006 D-7).
+- **Personal access tokens are local tooling only.** `PersonalAccessClientSeeder` creates the single
+  personal access client and refuses outside the local and testing environments, so `make demo-token`
+  works locally while no production deployment can mint a bearer token without the authorization
+  flow.
 
 ### Spatie event sourcing, as actually installed
 

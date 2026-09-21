@@ -54,8 +54,8 @@ Architecture), and separate production runtime and Nginx image builds.
 See the [CI contract](docs/specifications/foundation/development-environment.md#ci-contract) for
 commands and evidence boundaries.
 
-The API is available at <http://127.0.0.1:8080> (loopback only). `GET /up` is the health endpoint;
-`POST /api/payments` requires a Sanctum bearer token and an `Idempotency-Key` header, and
+The API is available at <http://localhost:8080> (published on loopback only). `GET /up` is the health endpoint;
+`POST /api/payments` requires a Passport bearer token and an `Idempotency-Key` header, and
 `GET /api/payments/{paymentId}` requires the same bearer token.
 
 Run `make` to see the complete command surface. Destructive targets require target-specific typed
@@ -105,7 +105,7 @@ Each repository is authoritative for its own implementation and local operating 
 
 Current application stack:
 
-- PHP 8.4, Laravel 13, and Sanctum
+- PHP 8.4, Laravel 13, and Passport
 - PostgreSQL 18 and Redis 8
 - Spatie Laravel Event Sourcing for `Payments`
 - Docker, GNU Make, Pest, PHPStan, Pint, Rector, and GitHub Actions

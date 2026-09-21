@@ -7,7 +7,7 @@ linked specifications are authoritative for detailed behavior.
 
 ### Initiate a payment
 
-`POST /api/payments` requires Sanctum authentication and an `Idempotency-Key`. The merchant comes
+`POST /api/payments` requires a Passport bearer token and an `Idempotency-Key`. The merchant comes
 from the authenticated user; the client cannot choose it. The slice accepts only `USD` and an
 `amount_minor` from `1` through `100_000_000` inclusive.
 
@@ -17,7 +17,7 @@ The first accepted request returns `202 Accepted`, a UUIDv7 payment ID, `status:
 
 ### Query a payment
 
-`GET /api/payments/{paymentId}` requires Sanctum authentication and resolves the merchant the same
+`GET /api/payments/{paymentId}` requires the same bearer token and resolves the merchant the same
 way, through `MerchantContext`. It returns:
 
 - `200` when the owned `PaymentDetails` projection exists;

@@ -17,5 +17,12 @@
         "bootstrap/cache",
         "storage",
         "vendor"
+    ],
+    "notPath": [
+        "database/migrations/2026_09_17_165725_create_oauth_auth_codes_table.php",
+        "database/migrations/2026_09_17_165726_create_oauth_access_tokens_table.php",
+        "database/migrations/2026_09_17_165727_create_oauth_refresh_tokens_table.php",
+        "database/migrations/2026_09_17_165728_create_oauth_clients_table.php",
+        "database/migrations/2026_09_17_165729_create_oauth_device_codes_table.php"
     ]
 }

@@ -4,12 +4,15 @@ declare(strict_types=1);
 
 namespace App\Providers;
 
+use Carbon\CarbonInterval;
 use Illuminate\Console\Events\CommandFinished;
 use Illuminate\Console\Events\CommandStarting;
 use Illuminate\Contracts\Console\Kernel as ConsoleKernel;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\ServiceProvider;
+use Laravel\Passport\Passport;
 use Override;
 use Throwable;
 
@@ -24,7 +27,23 @@ class AppServiceProvider extends ServiceProvider
     ];
 
     #[Override]
-    public function register(): void {}
+    public function register(): void
+    {
+        // register(), not boot(): package providers boot first, and Passport registers its routes while booting.
+        Passport::ignoreRoutes();
+        Passport::$deviceCodeGrantEnabled = false;
+
+        // Laravel merges its own auth.guards defaults into config/auth.php, so its `web` guard
+        // survives deleting it there. Merchant sessions belong to merchant_web alone (ADR 0006, D-9).
+        /** @var array<string, array<string, string>> $guards */
+        $guards = config('auth.guards', []);
+
+        config(['auth.guards' => Arr::only($guards, ['api', 'merchant_web'])]);
+
+        Passport::tokensExpireIn(CarbonInterval::minutes(15));
+        Passport::refreshTokensExpireIn(CarbonInterval::days(14));
+        Passport::personalAccessTokensExpireIn(CarbonInterval::hours(1));
+    }
 
     public function boot(): void
     {

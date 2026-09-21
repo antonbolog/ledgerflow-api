@@ -14,14 +14,27 @@ Docker image, and application runtime contracts. The merchant dashboard belongs 
 `ledgerflow-spa`; Terraform, AWS resources, environments, and deployment topology belong to
 `ledgerflow-infra`.
 
-Core stack: PHP 8.4, Laravel 13, PostgreSQL 18, Redis 8, Sanctum, Spatie Laravel Event Sourcing,
+Core stack: PHP 8.4, Laravel 13, PostgreSQL 18, Redis 8, Passport, Spatie Laravel Event Sourcing,
 `nwidart/laravel-modules`, Pest, PHPStan level 10, Pint, and Rector. Exact resolved versions and
 compatibility evidence live in
 [development environment](docs/specifications/foundation/development-environment.md).
 
 ## Current capabilities
 
-- `Merchant` owns merchant-user identity and resolves the authenticated merchant through Sanctum.
+- `Merchant` owns merchant-user identity and resolves the authenticated merchant through the
+  Passport `api` guard. Sanctum is retired and its token table is dropped.
+- The OAuth authorization server registers `GET /oauth/authorize` and `POST /oauth/token` and
+  nothing else, from `routes/oauth.php`. The token endpoint carries neither session nor CSRF
+  middleware and is throttled per client; authorize requests must carry an `S256` `code_challenge`.
+  Merchants sign in on the `merchant_web` guard through a throttled login page, and that session is
+  invalidated once an authenticated merchant has attempted one authorization, successful or refused.
+  Consent is skipped for the one client id in `passport.bff_client_id` and never through Passport's
+  prior-grant reuse; no consent screen exists, so any other client is refused.
+- Refresh rotation revokes the presented token through one conditional update, so a concurrent loser
+  receives `invalid_grant` instead of a second live token family. `POST /api/auth/logout` revokes the
+  presented access token and its refresh token in one transaction and answers `204` with no body; it
+  is not idempotent. `passport:purge` is scheduled daily and is bookkeeping only. There is no
+  token-family tracking, replay detection, or cascading revocation.
 - `Payments` is event-sourced. `POST /api/payments` atomically commits the idempotency receipt,
   stored event, and outbox envelope; retries replay exact stored response bytes.
 - The scheduler-driven outbox relay publishes eligible event IDs to the logical
@@ -111,7 +124,9 @@ environment lifecycle, database lifecycle, validation, and CI contracts.
 | `make destroy CONFIRM=destroy` | Remove only project containers, networks, and volumes |
 | `make db-migrate` / `make db-seed` | Mutate only the allowlisted local development database |
 | `make projection-start` / `make projection-stop` | Start or stop the scheduler and Horizon consumer together, never one alone |
-| `make demo-token [EMAIL=...]` | Print one Sanctum token for a seeded fixture merchant, on stdout only |
+| `make demo-token [EMAIL=...]` | Print one one-hour Passport bearer token for a seeded fixture merchant, on stdout only |
+| `make demo-password EMAIL=...` | Set a seeded fixture merchant's password from a hidden interactive prompt |
+| `make demo-bff-client` | Register the local BFF OAuth client and print its secret once |
 | `make demo-status` | Show relay heartbeat and Horizon supervisor state, read-only |
 | `make demo-corrupt PAYMENT_ID=... CONFIRM=corrupt-projection` | Delete one named `payment_details` row for the demo |
 | `make quality` | Read-only Composer, Pint, Rector, and PHPStan checks |
@@ -122,7 +137,7 @@ environment lifecycle, database lifecycle, validation, and CI contracts.
 | `make build-runtime` / `make build-nginx` | Build production and web image targets without publishing |
 | `make ci` | After `make install`, run quality, unit, integration and both image builds in order |
 
-The three `demo-` targets are local development tooling for the
+The five `demo-` targets are local development tooling for the
 [five-minute demo](docs/operations/five-minute-demo.md).
 Neither `make check` nor `make ci` invokes them or tests their shell refusal paths.
 

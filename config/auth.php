@@ -7,12 +7,18 @@ use Modules\Merchant\Infrastructure\Persistence\Eloquent\User;
 return [
 
     'defaults' => [
-        'guard' => env('AUTH_GUARD', 'web'),
+        // A literal, not env(): an unqualified auth check must never fall back to a session guard.
+        'guard' => 'api',
         'passwords' => env('AUTH_PASSWORD_BROKER', 'users'),
     ],
 
     'guards' => [
-        'web' => [
+        'api' => [
+            'driver' => 'passport',
+            'provider' => 'users',
+        ],
+
+        'merchant_web' => [
             'driver' => 'session',
             'provider' => 'users',
         ],

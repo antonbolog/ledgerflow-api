@@ -21,7 +21,7 @@ but it is never authoritative.
 
 `POST /api/payments`:
 
-- requires Sanctum authentication and `Idempotency-Key`;
+- requires a Passport bearer token on the `api` guard and `Idempotency-Key`;
 - resolves `merchant_id` from the authenticated user and rejects client-selected ownership;
 - accepts a key of 1–255 bytes and documents it as a non-secret opaque identifier;
 - accepts integer `amount_minor` from `1` through `100_000_000` inclusive;

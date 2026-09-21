@@ -100,7 +100,35 @@ it('documents every implemented api route and no other', function (): void {
         ->all();
 
     expect($documented)->toBe($implemented)
-        ->and($implemented)->toBe(['get /api/payments/{paymentId}', 'post /api/payments']);
+        ->and($implemented)->toBe([
+            'get /api/payments/{paymentId}',
+            'post /api/auth/logout',
+            'post /api/payments',
+        ]);
+});
+
+it('documents the logout response exactly as sent', function (): void {
+    $operation = openApiOperation('/api/auth/logout', 'post');
+
+    $merchant = Merchant::factory()->create();
+    $token = Initiation::token($merchant);
+
+    Auth::forgetGuards();
+    $response = test()->withHeader('Authorization', 'Bearer '.$token)->postJson('/api/auth/logout');
+
+    $response->assertNoContent();
+
+    expect(array_keys($operation['responses']))->toBe([204, 401])
+        ->and($operation['responses'][204])->not->toHaveKey('content')
+        ->and($response->getContent())->toBe('')
+        ->and($operation['security'])->toBe([['bearerAuth' => []]]);
+
+    Auth::forgetGuards();
+    $refused = test()->withHeader('Authorization', 'Bearer '.$token)->postJson('/api/auth/logout');
+
+    $refused->assertStatus(401);
+
+    expect($refused->json('code'))->toBe(ProblemType::Unauthenticated->value);
 });
 
 it('documents the accepted initiation body and Location header exactly as sent', function (): void {
@@ -243,7 +271,7 @@ it('refuses both operations unauthenticated, exactly as the shared 401 documents
     $documented = openApiDocument()['components']['responses']['Unauthenticated']['content']['application/problem+json']['example'];
 
     // A live request per operation: a documented 401 key alone stays green with
-    // auth:sanctum removed from either route.
+    // auth:api removed from either route.
     $queryPath = '/api/payments/'.Str::uuid7();
 
     $unauthenticated = [

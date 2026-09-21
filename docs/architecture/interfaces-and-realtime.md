@@ -18,17 +18,16 @@ stable API contracts and authorized realtime events.
 
 ## Authentication and authorization
 
-Laravel Sanctum is the API authentication mechanism, and its **bearer-token foundation exists as of
-T2**: `laravel/sanctum` 4.3.3 is installed, `personal_access_tokens` is migrated, merchant users
-issue and resolve tokens, and `Modules\Merchant\Application\Identity\MerchantContext` answers which
-merchant owns the authenticated request.
+Laravel Passport is the API authentication mechanism as of ANT-29: both `/api/*` routes run behind
+`auth:api`, `Modules\Merchant\Application\Identity\MerchantContext` resolves that guard, and
+`Modules\Merchant` owns merchant-user identity. Sanctum is removed and `personal_access_tokens` is
+dropped, which revoked every token it had issued.
 
-**T6 serves the first authenticated endpoint**, `POST /api/payments` behind `auth:sanctum`, and
-proves real bearer-token authentication: a test issues a genuine token and sends it as an
-`Authorization: Bearer` header rather than installing a user through `actingAs`, so the guard is
-what resolves the merchant.
+**Authentication is proved with real tokens, not test doubles**: a test mints a genuine Passport
+token and sends it as an `Authorization: Bearer` header rather than installing a user through
+`actingAs`, so the guard is what resolves the merchant.
 
-**The browser contract above the token is now decided and not yet implemented.**
+**The browser contract above the token is decided and only partly implemented.**
 [ADR 0006](../adr/0006-merchant-oauth-bff-authentication.md) selects Passport as the OAuth 2.0
 authorization and resource server, the Authorization Code Grant with PKCE, and a confidential
 first-party client owned by the Next.js BFF in `ledgerflow-spa`.
@@ -42,12 +41,20 @@ The sequences, cookie attributes, lifetimes, refresh and retry rules, and the li
 does not close are canonical in
 [merchant OAuth and BFF authentication](../specifications/merchant/oauth-bff-authentication.md).
 
-**Until ANT-29 replaces it, Sanctum above is the implemented mechanism.**
-Token abilities remain unscoped, `sanctum.expiration` remains null so tokens do not expire, and
-`config/sanctum.php` is published in full, so its `stateful`, `guard`, `expiration` and `middleware`
-keys are still unreviewed defaults rather than decisions.
-CORS and the deployment domains also remain unreviewed and are named as open items in that
-specification.
+**ANT-29 has implemented the resource server and the authorization server.** Access tokens live 15
+minutes, refresh tokens 14 days and personal access tokens one hour; no scope is defined; and CORS is
+explicit, granting no browser origin.
+The authorization server exposes `GET /oauth/authorize` and `POST /oauth/token` and nothing else,
+enforces `S256` PKCE before the grant sees the request, signs merchants in on a throttled login page
+over the `merchant_web` session guard, invalidates that session once an authenticated merchant has
+attempted one authorization, and skips consent for one configured client id only.
+Refresh rotation is a compare-and-set, `POST /api/auth/logout` revokes the presented access token
+and its refresh token in one transaction, and `passport:purge` runs daily as bookkeeping.
+Token-family tracking, replay detection and cascading revocation are not implemented and are not
+claimed; password-change and WebSocket revocation stay deferred; the deployment domains remain open
+items in that specification.
+Local tooling mints tokens through a personal access client that exists only in the local and
+testing environments, and registers the local BFF client through `make demo-bff-client`.
 None of them may be inferred from local development defaults.
 
 Merchant authorization is tenant-scoped on the server. A merchant identifier supplied by a

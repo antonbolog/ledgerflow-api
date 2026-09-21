@@ -6,10 +6,11 @@ namespace Modules\Payments\Tests\Support;
 
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Testing\TestResponse;
+use Modules\Merchant\Database\Seeders\PersonalAccessClientSeeder;
 use Modules\Merchant\Infrastructure\Persistence\Eloquent\Merchant;
 use Modules\Merchant\Infrastructure\Persistence\Eloquent\User;
 
-// Authenticates with a real Sanctum bearer token, never Sanctum::actingAs, which bypasses the guard and token table.
+// Authenticates with a real Passport bearer token, never Passport::actingAs, which bypasses the guard and token table.
 final class Initiation
 {
     public const string KEY = 'slice-1-idempotency-key';
@@ -22,7 +23,7 @@ final class Initiation
     {
         $token = self::token($merchant);
 
-        // RequestGuard memoises its user across requests in one test, so a later request would keep the first merchant.
+        // The token guard memoises its user across requests in one test, so a later request would keep the first merchant.
         Auth::forgetGuards();
 
         return test()
@@ -40,6 +41,8 @@ final class Initiation
     {
         $merchant ??= Merchant::factory()->create();
 
-        return User::factory()->for($merchant)->create()->createToken('slice-1')->plainTextToken;
+        test()->seed(PersonalAccessClientSeeder::class);
+
+        return User::factory()->for($merchant)->create()->createToken('slice-1')->accessToken;
     }
 }

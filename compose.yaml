@@ -40,7 +40,9 @@ services:
       - path: .env
         required: false
     environment:
-      APP_URL: "http://${APP_BIND:-127.0.0.1}:${APP_PORT:-8080}"
+      # Deliberately not derived from APP_BIND: the loopback bind is where the port is published,
+      # while localhost is the single cookie host the BFF and the API must agree on.
+      APP_URL: "http://localhost:${APP_PORT:-8080}"
     volumes:
       - ./:/var/www/html
     healthcheck:

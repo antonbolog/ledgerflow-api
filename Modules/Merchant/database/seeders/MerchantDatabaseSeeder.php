@@ -31,6 +31,12 @@ class MerchantDatabaseSeeder extends Seeder
         ],
     ];
 
+    /** @return list<string> */
+    public static function fixtureEmails(): array
+    {
+        return array_column(self::IDENTITIES, 'email');
+    }
+
     public function run(): void
     {
         // `db:seed --force` bypasses Laravel's production prompt, so the environment is the guard.
@@ -73,5 +79,7 @@ class MerchantDatabaseSeeder extends Seeder
                 $user->save();
             }
         });
+
+        $this->call(PersonalAccessClientSeeder::class);
     }
 }
