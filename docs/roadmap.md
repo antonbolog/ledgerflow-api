@@ -299,7 +299,8 @@ ANT-30 while relating to ANT-31.
   [ADR 0006](adr/0006-merchant-oauth-bff-authentication.md) and
   [merchant OAuth and BFF authentication](specifications/merchant/oauth-bff-authentication.md) record
   Passport as the OAuth 2.0 authorization and resource server, the Authorization Code Grant with PKCE
-  behind a confidential first-party client, BFF-owned `Secure` `HttpOnly` token cookies, session-free
+  behind a confidential first-party client, BFF-owned `Secure` `HttpOnly` token cookies (since
+  superseded by ADR 0007), session-free
   merchant resource routes, and the deferrals for WebSocket authentication and password-change
   revocation. No code, dependency, migration, or wire contract changed.
 - **ANT-29 migrates merchant API authentication from Sanctum to Passport.**
@@ -314,10 +315,15 @@ ANT-30 while relating to ANT-31.
   What ADR 0006 defers stands: no token-family tracking, no replay detection, no cascading
   revocation, and no password-change or WebSocket revocation.
 - **ANT-30 scaffolds `ledgerflow-spa`** and establishes its executable contracts.
-- **ANT-31 implements the PKCE flow in the Next.js BFF**, including the single-flight refresh that
-  ADR 0006 leaves to it.
-- Finalize CORS, deployment domains, WebSocket authorization, and reconnect behavior; the first two
-  are open items named in that specification.
+- **ANT-31 implements the PKCE flow in the Next.js BFF** under
+  [ADR 0007](adr/0007-opaque-bff-session-custody.md), which supersedes ADR 0006's token cookies:
+  tokens live in a Redis-backed BFF session record behind one opaque cookie, and refresh is
+  coordinated by a lock but made correct by record and rotation compare-and-set. ANT-31 develops and
+  validates against local Redis.
+- **A `ledgerflow-infra` task provisions the deployed BFF session store** under the Redis contract in
+  that specification. It blocks deployment of ANT-31, not its local development.
+- Finalize production deployment domains, WebSocket authorization, and reconnect behavior; the
+  production hostnames are the one open item named in that specification.
 - Deploy and validate the frontend independently from the API image.
 
 ### AWS demo production

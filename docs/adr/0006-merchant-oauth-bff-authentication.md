@@ -5,6 +5,9 @@
   (`GET /oauth/authorize`, `POST /oauth/token`, merchant login, server-side PKCE, the first-party BFF
   client), atomic refresh rotation, `POST /api/auth/logout`, and the daily `passport:purge`. The BFF
   half is ANT-31's; **D-16**'s deferrals stand.
+  **Partly superseded** by [ADR 0007](0007-opaque-bff-session-custody.md): **D-4** in full, and
+  **D-15** step 2 and its unconditional revocation claim. This record is kept as historical evidence
+  and is not rewritten.
 - **Date** - 2026-09-17.
 - **Decision owner** - AB.
 - **Implements into** - ANT-29 in this repository and ANT-31 in `ledgerflow-spa`.
@@ -57,7 +60,7 @@ is deliberately not restated in this record.
 | D-1 | Laravel Passport is both the OAuth 2.0 authorization server and the resource server. |
 | D-2 | The Next.js application in `ledgerflow-spa` is the BFF and the only browser-facing OAuth client. |
 | D-3 | The flow is the Authorization Code Grant with PKCE, using a **confidential** first-party client. |
-| D-4 | The BFF stores the access token and the refresh token in two separate `Secure` `HttpOnly` cookies that it owns. |
+| D-4 | The BFF stores the access token and the refresh token in two separate `Secure` `HttpOnly` cookies that it owns. Superseded by [ADR 0007](0007-opaque-bff-session-custody.md) **S-1** and **S-5**: tokens live in a server-side BFF session record, and the browser holds one opaque session cookie. |
 | D-5 | Browser JavaScript never receives either token. |
 | D-6 | The BFF calls Laravel resource endpoints with `Authorization: Bearer`. |
 | D-7 | The browser never calls a Laravel resource endpoint directly. |
@@ -68,7 +71,7 @@ is deliberately not restated in this record.
 | D-12 | On `401` the BFF may refresh once and replay the original request at most once. |
 | D-13 | The BFF never refreshes on `403`, on the tenant-hiding `404`, on `422`, or on `503`. |
 | D-14 | No OAuth scopes are defined initially. |
-| D-15 | Logout revokes the active access and refresh tokens, clears the BFF cookies, and ends the merchant authorization session. Amended by ANT-29: step 1 is `POST /api/auth/logout`, and step 3 needs no call because the merchant authorization session is one-shot and is invalidated as soon as an authenticated merchant has attempted one authorization, successful or refused. Step 2 is ANT-31's. |
+| D-15 | Logout revokes the active access and refresh tokens, clears the BFF cookies, and ends the merchant authorization session. Amended by ANT-29: step 1 is `POST /api/auth/logout`, and step 3 needs no call because the merchant authorization session is one-shot and is invalidated as soon as an authenticated merchant has attempted one authorization, successful or refused. Step 2 is ANT-31's. Step 2 and the unconditional revocation claim are superseded by [ADR 0007](0007-opaque-bff-session-custody.md) **S-9**: logout always clears the one session cookie, while record termination, deletion, and revocation are best effort under dependency failure. |
 | D-16 | WebSocket authentication and password-change token revocation are deferred behind separate contracts. |
 | D-17 | Sanctum remains the implemented merchant authentication until ANT-29 replaces it. Superseded by ANT-29: Passport's `api` guard authenticates `/api/*` and Sanctum is removed. |
 
@@ -120,6 +123,7 @@ this system may claim protection stronger than rotation.
 - **A server-side BFF session store with an opaque session cookie**, holding tokens outside the
   browser. Rejected because it contradicts D-4, but recorded deliberately: it is the escape hatch if
   the refresh-concurrency ceiling proves unacceptable in practice.
+  Taken by [ADR 0007](0007-opaque-bff-session-custody.md), which reverses this rejection.
 
 ## Consequences
 
@@ -135,6 +139,7 @@ this system may claim protection stronger than rotation.
 
 ## Related
 
+- [ADR 0007](0007-opaque-bff-session-custody.md) - supersedes **D-4** and parts of **D-15**.
 - [Merchant OAuth and BFF authentication](../specifications/merchant/oauth-bff-authentication.md) -
   the canonical specification this ADR decides the mechanism for.
 - [Interfaces and realtime](../architecture/interfaces-and-realtime.md) - surface boundaries and the
