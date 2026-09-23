@@ -39,7 +39,13 @@ Use sequential names such as `0001-custom-ddd-module-layout.md`; do not put date
   behind a Next.js BFF: Authorization Code Grant with PKCE, a confidential first-party client,
   BFF-owned `Secure` `HttpOnly` token cookies, session-free merchant resource routes, and merchant
   identity kept in a separate provider from the planned Filament operator identity. Accepted as
-  specification by ANT-28; implementation belongs to ANT-29 and ANT-31.
+  specification by ANT-28 and implemented in this repository by ANT-29. D-4 (token cookies) and
+  D-15 step 2 with its unconditional revocation claim are superseded by 0007.
+- [0007](0007-opaque-bff-session-custody.md) - Hold merchant OAuth tokens in a Redis-backed BFF session
+  record behind one opaque `__Host-` cookie, coordinate refresh with a lock but rely on record and
+  rotation compare-and-set for correctness, fail closed without Redis, and treat logout revocation as
+  best effort under dependency failure. Accepted as specification; implementation belongs to ANT-31
+  and a `ledgerflow-infra` session-store task.
 
 ## Candidates
 

@@ -23,7 +23,9 @@ infrastructure and deployment topology.
 - [Merchant OAuth and BFF authentication](docs/specifications/merchant/oauth-bff-authentication.md)
   - specified by ANT-28 and implemented by ANT-29: the Passport `api` guard on `/api/*`, the
     authorization server, merchant login, the BFF client, atomic refresh rotation, logout and
-    revocation, and the daily token purge. The BFF half belongs to `ledgerflow-spa`.
+    revocation, and the daily token purge. The BFF half belongs to `ledgerflow-spa`, holding tokens
+    in a Redis-backed session record behind one opaque cookie per
+    [ADR 0007](docs/adr/0007-opaque-bff-session-custody.md).
 
 ## Runtime and delivery
 

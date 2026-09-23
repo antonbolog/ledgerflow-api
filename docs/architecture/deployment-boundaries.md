@@ -40,7 +40,9 @@ justify the extra cross-repository step.
 - ECS Fargate services and task definitions;
 - an Application Load Balancer and routing for API, admin, SPA, and Reverb where applicable;
 - RDS PostgreSQL;
-- ElastiCache Redis;
+- ElastiCache Redis, including the BFF session store under the durability, isolation, and
+  `noeviction` contract in
+  [merchant OAuth and BFF authentication](../specifications/merchant/oauth-bff-authentication.md#redis-availability-and-durability);
 - SQS queues and DLQs for selected workloads;
 - CloudWatch logs, metrics, alarms, and dashboards;
 - IAM roles and GitHub Actions OIDC trust;

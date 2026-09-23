@@ -13,8 +13,10 @@ specifications and generated API contracts once implementation begins.
 | Admin panel (`/admin`), planned | `ledgerflow-api` | Authorized business operators | Filament server-driven UI |
 | Realtime channels | `ledgerflow-api` | Authenticated merchant dashboard sessions | WebSocket/Reverb |
 
-`ledgerflow-spa` never reads the database, Redis, queues, or AWS services directly. It consumes
-stable API contracts and authorized realtime events.
+`ledgerflow-spa` never reads this repository's database, Redis keys, queues, or AWS services
+directly. It consumes stable API contracts and authorized realtime events. Its BFF session store is
+its own Redis namespace under separate ACL credentials, which `ledgerflow-api` never reads; see
+[ADR 0007](../adr/0007-opaque-bff-session-custody.md).
 
 ## Authentication and authorization
 
@@ -31,9 +33,10 @@ token and sends it as an `Authorization: Bearer` header rather than installing a
 [ADR 0006](../adr/0006-merchant-oauth-bff-authentication.md) selects Passport as the OAuth 2.0
 authorization and resource server, the Authorization Code Grant with PKCE, and a confidential
 first-party client owned by the Next.js BFF in `ledgerflow-spa`.
-The BFF holds the access and refresh tokens in two separate `Secure` `HttpOnly` cookies, browser
-JavaScript reads neither, and the BFF calls `/api/*` with `Authorization: Bearer` so the browser
-never reaches a resource endpoint directly.
+[ADR 0007](../adr/0007-opaque-bff-session-custody.md) supersedes ADR 0006's token cookies: the BFF
+holds the access and refresh tokens only in a server-side session record in Redis, the browser holds
+one opaque `__Host-` session cookie that carries no token, and the BFF calls `/api/*` with
+`Authorization: Bearer` so the browser never reaches a resource endpoint directly.
 Merchant resource routes stay session-free; a dedicated `merchant_web` session guard serves only
 OAuth login and authorization, and the planned Filament panel authenticates operators through a
 separate guard over a separate identity provider.
@@ -118,7 +121,7 @@ here. See
 ## Deferred decisions
 
 - exact API versioning and generated client approach;
-- local and production hostnames, CORS, and key management, listed as open items in
+- production hostnames, listed as an open item in
   [merchant OAuth and BFF authentication](../specifications/merchant/oauth-bff-authentication.md#open-items-owned-by-the-implementation-tasks);
 - Next.js rendering mode and hosting topology;
 - WebSocket channel authentication, channel names, event payloads, and reconnect/backfill strategy;
