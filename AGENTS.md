@@ -161,9 +161,12 @@ The workflow calls the same commands as `make ci`; see the
 General flow: Think → Plan → Build → Review → Test → Ship → Reflect. Before planning a non-trivial
 change, inspect the working tree, relevant instructions, exact source, conventions, and tests.
 
-- Start structural code exploration with Codebase Memory for symbols, callers, dependencies, and
-  impact analysis. Inspect exact source before edits or implementation claims; do not reindex when
-  the index is already ready.
+- Orient before any `grep`, `rg`, `find`, or broad file read, including on narrow configuration or
+  documentation tasks: query Codebase Memory for code structure and `graphify query` for
+  architecture and documentation, then read only the exact slices they identify. Fall back to
+  narrow search only when a query cannot answer, and say so.
+- Use Codebase Memory for symbols, callers, dependencies, and impact analysis. Inspect exact source
+  before edits or implementation claims; do not reindex when the index is already ready.
 - Use Graphify for broad architecture, documentation relationships, communities, and visual graph
   exploration. When `graphify-out/graph.json` exists, query it rather than reading generated graph
   artifacts directly.
