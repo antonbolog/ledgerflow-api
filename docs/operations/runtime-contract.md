@@ -151,6 +151,26 @@ Commit and log persistence are not one transaction, so an uncertain outcome is r
 state or re-running verification, never by repeating the mutation. Contracts in
 [verification and rebuild](../specifications/payments/verification-and-rebuild.md).
 
+### Access logs
+
+**Nginx access logs never record a request query string, on any route.**
+`docker/nginx/default.conf` selects the `query_free` format with one server-level `access_log`, so
+Laravel requests stay covered after `try_files` redirects them to the PHP location.
+The format mirrors the image's `main` format field for field, with default escaping, and replaces only
+the raw request line with the method, the path from `$request_uri` cut at the first `?`, and the
+protocol: client address, remote user, timestamp, status, response size, referer, user agent and
+forwarded-for remain.
+Request duration and request identifiers are not logged.
+This keeps OAuth `state` and the PKCE `code_challenge` out of the access log, as
+[secret hygiene](../specifications/merchant/oauth-bff-authentication.md#secret-hygiene) requires.
+**The Nginx error log is not covered.**
+Its format is fixed, and a warning or error tied to a request, such as an upstream failure or a
+response buffered to a temporary file, may still record the raw request line with its query string.
+Its level is unchanged; whether to suppress or raise it is an unresolved
+[open item](../specifications/merchant/oauth-bff-authentication.md#open-items-owned-by-the-implementation-tasks).
+Compose bind-mounts the same file that the production `web` image copies; a running `web` container
+reads it only at start or reload, so restart `web` after editing it.
+
 ### Manual verification and targeted repair
 
 Use the existing running `app` container for these operator commands; do not run host PHP.
