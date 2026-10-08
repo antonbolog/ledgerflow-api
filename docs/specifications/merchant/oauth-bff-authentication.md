@@ -580,7 +580,12 @@ OAuth necessarily carries `state` and the `code_challenge` in the authorization 
 Codes are single-use and short-lived, and PKCE binds them to the verifier, but that does not make
 them safe to record, so:
 
-- query strings are not logged for `/oauth/authorize` on the API or for the BFF callback;
+- the BFF callback's query string is not logged;
+- on the API, the Nginx access log records no request query string for any route, as the
+  [runtime contract](../../operations/runtime-contract.md#access-logs) defines; the Nginx error log
+  may still record the raw request line, query included, during a warning or error tied to a
+  request, which remains an unresolved limitation listed under
+  [open items](#open-items-owned-by-the-implementation-tasks);
 - the callback redirects immediately to a clean URL after processing, whatever the outcome, so no
   page is ever rendered at the URL carrying `code` and `state`;
 - every response involved in the callback sends `Referrer-Policy: no-referrer`, so neither value
@@ -644,11 +649,12 @@ secret hashing, key storage and rotation, the `passport:purge` schedule, Sanctum
 See [development environment](../foundation/development-environment.md#passport-as-actually-installed)
 for what was installed.
 
-Owned by `ledgerflow-api`, not yet implemented:
+Owned by `ledgerflow-api` as a separate follow-up outside ANT-33, pending an observability decision:
 
-- excluding the `/oauth/authorize` query string from access logs, as
-  [secret hygiene](#secret-hygiene) requires; `docker/nginx/default.conf` declares no `log_format`,
-  so Nginx's default `combined` format still records it.
+- the Nginx error log, which may still record the raw `/oauth/authorize` request line, query
+  included, during any warning or error tied to that request. ANT-33 neither suppresses nor
+  raises the `error_log` level; it makes only the access log query-free, as the
+  [runtime contract](../../operations/runtime-contract.md#access-logs) records.
 
 Owned by **ANT-31** in `ledgerflow-spa`:
 
