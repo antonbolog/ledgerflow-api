@@ -2,6 +2,23 @@
 
 ## Payments Infrastructure
 
+### Cut over API workers atomically on the first deploy of required payment intents
+
+**What:** Drain old API workers, or cut over all at once, so no headerless initiation commits after
+the ANT-35 recovery guarantee starts.
+
+**Why:** A rolling deploy lets old workers keep writing receipts without an intent, and those
+payments never appear in `GET /api/payment-intents`.
+
+**Context:** ANT-35 requires `Ledgerflow-Intent-Id` on new initiations and ADR 0008 states that
+the recovery guarantee covers only intents committed after every API worker runs that code. The
+API repository only states the boundary; the deployment topology that must honor it belongs to
+`ledgerflow-infra`. No deployed environment exists yet.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** ANT-35 Phase 2 and the `ledgerflow-infra` deployment task.
+
 ### Evolve the outbox relay to claim/lease publishing when 12A reaches its measured limit
 
 **What:** Replace lock-through-Redis-push with a short database claim, publication outside the

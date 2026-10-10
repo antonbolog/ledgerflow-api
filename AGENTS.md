@@ -37,6 +37,11 @@ compatibility evidence live in
   token-family tracking, replay detection, or cascading revocation.
 - `Payments` is event-sourced. `POST /api/payments` atomically commits the idempotency receipt,
   stored event, and outbox envelope; retries replay exact stored response bytes.
+  It requires `Ledgerflow-Intent-Id` and `Ledgerflow-Intent-Expires-At` and arbitrates by
+  `(merchant_id, intent_id)`, so the same intent under a new key replays and conflicting reuse is
+  `409`. One BFF-stamped expiry bounds every attempt and the single reservation rerun through a
+  transaction-local `transaction_timeout` plus typed refusals; see
+  [ADR 0008](docs/adr/0008-payment-intent-arbitration-and-deadline.md).
 - The scheduler-driven outbox relay publishes eligible event IDs to the logical
   `payments-projection` Redis queue inside short PostgreSQL transactions. Its local scheduler is
   opt-in and exposes a read-only JSON status command.
@@ -58,6 +63,12 @@ compatibility evidence live in
   differs only in the `instance` path it echoes. One adapter-owned transaction reads `payment_details`
   and, only on a miss, `payment_idempotency_receipts`; it never rehydrates `PaymentAggregate` and
   checks `payment_projection_controls` through the shared gate before those reads.
+- `GET /api/payment-intents` is the merchant-scoped recovery read: `200` with
+  `{"intents": [...], "truncated": <bool>}`, the merchant's intent-bearing receipts from the last
+  24 hours of PostgreSQL time, newest first, at most 20. Projected elements add `amount_minor` and
+  `currency` through a merchant-scoped join; pending ones omit both keys. The same adapter checks the
+  shared gate first; absence counts only in an untruncated read, per
+  [the recovery read](docs/specifications/payments/projection-and-query.md#recovery-read).
 - Manual `payments:projections:verify` audits canonical and derived state in one read-only snapshot.
   `payments:outbox:repair {eventId} --delivery-quiesced` repairs one envelope, preserves existing
   exhaustion and failure history, and never rebuilds read rows. See the
@@ -67,7 +78,7 @@ compatibility evidence live in
   reports incomplete and repair refuses while the gate is closed, before scanning or canonical
   locking. Rebuild ownership and guarded recovery follow
   [ADR 0005](docs/adr/0005-payments-projection-gate-and-rebuild-ownership.md).
-- [`docs/api/openapi.json`](docs/api/openapi.json) is the canonical wire contract for both routes;
+- [`docs/api/openapi.json`](docs/api/openapi.json) is the canonical wire contract for every `/api/*` route;
   `tests/Feature/OpenApiContractTest.php` asserts its parity against the real routes, real responses
   and `ProblemType`. [The five-minute demo](docs/operations/five-minute-demo.md) walks the healthy
   flow, a real Redis outage, deliberate corruption, read-only verification and an explicit rebuild

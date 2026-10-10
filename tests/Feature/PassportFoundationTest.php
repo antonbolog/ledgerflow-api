@@ -14,6 +14,7 @@ use Illuminate\Testing\TestResponse;
 use Laravel\Passport\Guards\TokenGuard;
 use Laravel\Passport\Passport;
 use Laravel\Passport\PassportServiceProvider;
+use Modules\Payments\Tests\Support\Initiation;
 
 const PASSPORT_TABLE_COLUMNS = [
     'oauth_auth_codes' => ['id', 'user_id', 'client_id', 'scopes', 'revoked', 'expires_at'],
@@ -126,7 +127,7 @@ it('would detect a CORS grant if a browser-facing path were configured', functio
 });
 
 it('adds no CORS header to an actual cross-origin api request', function (): void {
-    $response = $this->withHeader('Origin', 'http://localhost:3000')->postJson('/api/payments');
+    $response = $this->withHeader('Origin', 'http://localhost:3000')->postJson('/api/payments', headers: Initiation::headers());
 
     $response->assertUnauthorized();
 

@@ -4,7 +4,7 @@
     "title": "Ledgerflow Payments API",
     "version": "1.0.0",
     "summary": "Idempotent payment initiation and merchant-scoped payment query.",
-    "description": "The two implemented `/api/*` routes of `ledgerflow-api`. Every failure is an RFC 9457 problem document with the media type `application/problem+json`. Behavioral invariants are canonical in docs/specifications/payments/, not here; this document is the transport contract only.",
+    "description": "The implemented `/api/*` routes of `ledgerflow-api`. Every failure is an RFC 9457 problem document with the media type `application/problem+json`. Behavioral invariants are canonical in docs/specifications/payments/, not here; this document is the transport contract only.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -57,7 +57,7 @@
         ],
         "operationId": "initiatePayment",
         "summary": "Initiate a payment",
-        "description": "Commits the idempotency receipt, the stored event and the outbox envelope in one PostgreSQL transaction or none of them. The merchant is resolved from the authenticated user and can never be supplied by the client. An identical retry replays the exact stored response bytes, status and `Location`.",
+        "description": "Commits the idempotency receipt, the stored event and the outbox envelope in one PostgreSQL transaction or none of them. The merchant is resolved from the authenticated user and can never be supplied by the client. Every initiation is arbitrated by the merchant and its payment intent: a retry with the same intent, under the same or a new idempotency key, replays the exact stored response bytes, status and `Location`, even after the intent has expired. No new payment is created once less than 250 ms remain before `Ledgerflow-Intent-Expires-At` by PostgreSQL time, and no write commits after it except a `COMMIT` already executing at that instant, which lands within the residual allowance in ADR 0008.",
         "security": [
           {
             "bearerAuth": []
@@ -66,6 +66,12 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/IntentId"
+          },
+          {
+            "$ref": "#/components/parameters/IntentExpiresAt"
           }
         ],
         "requestBody": {
@@ -114,7 +120,7 @@
             "$ref": "#/components/responses/Unauthenticated"
           },
           "409": {
-            "description": "The idempotency key was already used by this merchant with a different canonical payload. Nothing new is written.",
+            "description": "The idempotency key or the payment intent is already bound to a different payment request: the same intent with a different canonical payload, the key bound to another intent, or the key and the intent bound to two different payments. A receipt written before intents existed, matched on the key, conflicts only when the payload differs, and otherwise replays. Nothing new is written.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -122,9 +128,9 @@
                 },
                 "example": {
                   "type": "/problems/idempotency-payload-mismatch",
-                  "title": "Idempotency key reused with a different payload",
+                  "title": "Idempotency key or payment intent reused with a different request",
                   "status": 409,
-                  "detail": "This idempotency key was already used with a different payload.",
+                  "detail": "This idempotency key or payment intent is already bound to a different payment request.",
                   "instance": "/api/payments",
                   "code": "idempotency_payload_mismatch"
                 }
@@ -132,7 +138,7 @@
             }
           },
           "422": {
-            "description": "The request payload did not satisfy the initiation contract.",
+            "description": "The request did not satisfy the initiation contract, including a missing or malformed intent header and an expiry too far ahead, or the intent expired, plus the 1 s residual allowance, without creating a payment. Nothing is written.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -155,10 +161,10 @@
             }
           },
           "503": {
-            "description": "Either idempotency arbitration exhausted its allowlisted transaction retries, or the Payments projection gate is closed for a rebuild. The two are distinguished by `code`, never by the status alone.",
+            "description": "Either idempotency arbitration could not finish in time, or the Payments projection gate is closed for a rebuild; the two are distinguished by `code`, never by the status alone. `idempotency_contention` covers exhausted allowlisted transaction retries, an intent refused by its deadline while a concurrent request for it may still commit, and a database session ended at the deadline. `Retry-After` is the whole number of seconds until the outcome settles, at least 1.",
             "headers": {
               "Retry-After": {
-                "$ref": "#/components/headers/RetryAfter"
+                "$ref": "#/components/headers/RetryAfterSeconds"
               }
             },
             "content": {
@@ -293,6 +299,76 @@
           }
         }
       }
+    },
+    "/api/payment-intents": {
+      "get": {
+        "tags": [
+          "Payments"
+        ],
+        "operationId": "listRecentPaymentIntents",
+        "summary": "Recover the merchant's recent payment intents",
+        "description": "Lists the authenticated merchant's intent-bearing receipts whose `created_at` is at least `statement_timestamp() - interval '24 hours'` in PostgreSQL time, inclusive, newest first with `created_at` ties ordered by receipt id, at most 20. `truncated` is true when an older qualifying intent exists beyond the 20 returned. Reads `payment_idempotency_receipts` and `payment_details` inside one adapter-owned transaction, joining a projection only under the same merchant. Receipts written without an intent never appear. Takes no parameters.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The merchant's recent intents. An empty list is still `200`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecentPaymentIntents"
+                },
+                "example": {
+                  "intents": [
+                    {
+                      "intent_id": "8f14e45f-ceea-4e7a-9b1c-2d3e4f5a6b7c",
+                      "payment_id": "019bd0f6-3a8e-7c21-9d5a-2f4b6c8e0a13",
+                      "created_at": "2026-10-10T09:15:30.123456+00:00",
+                      "amount_minor": 1250,
+                      "currency": "USD"
+                    },
+                    {
+                      "intent_id": "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+                      "payment_id": "019bd0f6-41aa-7d02-8c3b-5e6f7a8b9c0d",
+                      "created_at": "2026-10-10T09:14:02.654321+00:00"
+                    }
+                  ],
+                  "truncated": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "503": {
+            "description": "The Payments projection gate is closed for a rebuild.",
+            "headers": {
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "/problems/projection-rebuilding",
+                  "title": "Projection rebuilding",
+                  "status": 503,
+                  "detail": "A projection rebuild is in progress. Retry.",
+                  "instance": "/api/payment-intents",
+                  "code": "projection_rebuilding"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -315,6 +391,28 @@
           "maxLength": 255
         },
         "example": "demo-2026-09-07-0001"
+      },
+      "IntentId": {
+        "name": "Ledgerflow-Intent-Id",
+        "in": "header",
+        "required": true,
+        "description": "Client-generated payment intent, one per payment the merchant means to create. It neither derives from nor reveals the idempotency key, and it is scoped to the merchant. Exactly one value, as a lowercase canonical UUID; any other spelling, including uppercase, braces, surrounding whitespace or a repeated header, is refused.",
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "example": "0199c6a8-3f1e-7c2a-9b4d-5e6f7a8b9c0d"
+      },
+      "IntentExpiresAt": {
+        "name": "Ledgerflow-Intent-Expires-At",
+        "in": "header",
+        "required": true,
+        "description": "Absolute expiry the BFF stamps once, at the intent's first claim, and repeats unchanged on every retry. Exactly one value in the `Date.prototype.toISOString()` form, UTC with milliseconds. An expiry more than 32 seconds ahead of PostgreSQL time is refused.",
+        "schema": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "example": "2026-10-08T12:15:00.000Z"
       }
     },
     "headers": {
@@ -324,6 +422,14 @@
         "schema": {
           "type": "integer",
           "const": 1
+        }
+      },
+      "RetryAfterSeconds": {
+        "description": "Whole seconds to wait before retrying, at least 1.",
+        "required": true,
+        "schema": {
+          "type": "integer",
+          "minimum": 1
         }
       }
     },
@@ -443,6 +549,93 @@
             "type": "string",
             "const": "projection_pending",
             "description": "Transport state, not a payment status the domain ever records."
+          }
+        }
+      },
+      "RecentPaymentIntents": {
+        "type": "object",
+        "required": [
+          "intents",
+          "truncated"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "intents": {
+            "type": "array",
+            "maxItems": 20,
+            "description": "Newest first.",
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/ProjectedPaymentIntent"
+                },
+                {
+                  "$ref": "#/components/schemas/PendingPaymentIntent"
+                }
+              ]
+            }
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when a qualifying intent exists beyond the returned list. A truncated response does not show that an absent intent is missing."
+          }
+        }
+      },
+      "ProjectedPaymentIntent": {
+        "type": "object",
+        "required": [
+          "intent_id",
+          "payment_id",
+          "created_at",
+          "amount_minor",
+          "currency"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "intent_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payment_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "description": "The receipt's PostgreSQL creation time, UTC with six fractional digits."
+          },
+          "amount_minor": {
+            "type": "integer"
+          },
+          "currency": {
+            "type": "string",
+            "examples": [
+              "USD"
+            ]
+          }
+        }
+      },
+      "PendingPaymentIntent": {
+        "type": "object",
+        "description": "The payment's projection has not landed yet; `amount_minor` and `currency` are absent, never null.",
+        "required": [
+          "intent_id",
+          "payment_id",
+          "created_at"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "intent_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payment_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "description": "The receipt's PostgreSQL creation time, UTC with six fractional digits."
           }
         }
       },

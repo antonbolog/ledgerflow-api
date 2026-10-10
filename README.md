@@ -31,6 +31,9 @@ architecture anchor for the three-repository Ledgerflow system.
   never reveals that a payment exists but belongs to someone else. The query reads only the read
   model and its idempotency-receipt fallback, and
   never rehydrates the aggregate.
+- `GET /api/payment-intents` lets a merchant's BFF recover payments after losing its session state:
+  the merchant's intent-bearing payments from the last 24 hours, newest first, at most 20, with a
+  `truncated` flag. Only an untruncated answer can show that an intent created no payment.
 - A connection-affine projection gate closes Payments traffic during a bounded batch rebuild: `POST`
   and `GET` return `503 projection_rebuilding` with `Retry-After: 1`, while the relay and consumer
   defer without consuming any delivery or failure budget.
@@ -55,8 +58,9 @@ See the [CI contract](docs/specifications/foundation/development-environment.md#
 commands and evidence boundaries.
 
 The API is available at <http://localhost:8080> (published on loopback only). `GET /up` is the health endpoint;
-`POST /api/payments` requires a Passport bearer token and an `Idempotency-Key` header, and
-`GET /api/payments/{paymentId}` requires the same bearer token.
+`POST /api/payments` requires a Passport bearer token, an `Idempotency-Key` header, and the
+`Ledgerflow-Intent-Id` and `Ledgerflow-Intent-Expires-At` headers, and
+`GET /api/payments/{paymentId}` and `GET /api/payment-intents` require the same bearer token.
 
 Run `make` to see the complete command surface. Destructive targets require target-specific typed
 confirmation, for example `make destroy CONFIRM=destroy`.

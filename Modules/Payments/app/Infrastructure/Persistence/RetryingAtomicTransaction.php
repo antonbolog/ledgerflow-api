@@ -8,8 +8,10 @@ use Closure;
 use Illuminate\Database\Connection;
 use Illuminate\Database\ConnectionInterface;
 use Illuminate\Database\DeadlockException;
+use Illuminate\Database\DetectsLostConnections;
 use Modules\Payments\Application\Initiation\AtomicTransaction;
 use Modules\Payments\Application\Initiation\IdempotencyContention;
+use Modules\Payments\Application\Initiation\PaymentIntentSessionTerminated;
 use Modules\Payments\Application\Initiation\ProjectionRebuilding;
 use Modules\Payments\Infrastructure\Projection\ProjectionGate;
 use Override;
@@ -19,6 +21,8 @@ use Throwable;
 // Owns the SQLSTATE allowlist: Laravel's ConcurrencyErrorDetector does not recognise 55P03 (ADR 0003).
 final readonly class RetryingAtomicTransaction implements AtomicTransaction
 {
+    use DetectsLostConnections;
+
     public const int MAX_ATTEMPTS = 3;
 
     public const array RETRYABLE = ['40P01', '40001', '55P03'];
@@ -43,6 +47,12 @@ final readonly class RetryingAtomicTransaction implements AtomicTransaction
                 }, 1);
             } catch (Throwable $e) {
                 $this->rollBackTransactionLaravelLeaked();
+
+                // Recognised by connection loss, never by SQLSTATE: a session ended by transaction_timeout surfaces as
+                // HY000, not 25P04, and Laravel's rollback on the dead socket replaces the statement's own exception.
+                if ($this->causedByLostConnection($e)) {
+                    throw PaymentIntentSessionTerminated::afterConnectionLoss($e);
+                }
 
                 $sqlState = self::sqlStateOf($e);
 

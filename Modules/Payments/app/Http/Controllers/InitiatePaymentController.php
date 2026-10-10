@@ -34,6 +34,8 @@ final class InitiatePaymentController
             occurredAt: CarbonImmutable::now()->utc()->format(PaymentInitiated::OCCURRED_AT_FORMAT),
             idempotencyKeyHash: PaymentInitiationContext::hashKey($request->rawIdempotencyKey()),
             requestFingerprint: PaymentInitiationContext::fingerprint($merchantId, $amountMinor, $currency),
+            intentId: $request->intentId(),
+            intentExpiresAt: $request->intentExpiresAt(),
         );
 
         $receipt = $initiate($context);

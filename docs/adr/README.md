@@ -46,6 +46,11 @@ Use sequential names such as `0001-custom-ddd-module-layout.md`; do not put date
   rotation compare-and-set for correctness, fail closed without Redis, and treat logout revocation as
   best effort under dependency failure. Accepted as specification; implementation belongs to ANT-31
   and a `ledgerflow-infra` session-store task.
+- [0008](0008-payment-intent-arbitration-and-deadline.md) - Arbitrate payment initiation by a
+  merchant-scoped, client-generated payment intent, amending ADR 0003's conflict target, and bound
+  every attempt and the reservation rerun by one BFF-stamped expiry enforced in PostgreSQL with a
+  transaction-local `transaction_timeout` plus typed refusals ahead of it. Accepted, implemented by
+  ANT-35 Phase 2.
 
 ## Candidates
 

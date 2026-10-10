@@ -41,7 +41,7 @@ unrelated implementation details.
 The write path, the scheduler-driven outbox relay, the Horizon-supervised projection consumer with
 its failure accounting and operator retry, the merchant-scoped read model query endpoint
 (`GET /api/payments/{paymentId}`, projected `200` / pending `202` / `payment_not_found` `404`), the
-shared projection gate with its `503 projection_rebuilding` state, and the manual verification,
+merchant-scoped recovery read (`GET /api/payment-intents`), the shared projection gate with its `503 projection_rebuilding` state, and the manual verification,
 repair and rebuild commands are implemented.
 Current resilience evidence comes from the Pest suites; retired process rehearsals are marked
 historical in the [resilience test plan](testing/payments-resilience.md#process-level-resilience).

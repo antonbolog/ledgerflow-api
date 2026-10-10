@@ -26,7 +26,7 @@ enum ProblemType: string
         return match ($this) {
             self::Unauthenticated => 'Unauthenticated',
             self::ValidationFailed => 'Validation failed',
-            self::IdempotencyPayloadMismatch => 'Idempotency key reused with a different payload',
+            self::IdempotencyPayloadMismatch => 'Idempotency key or payment intent reused with a different request',
             self::IdempotencyContention => 'Idempotency contention',
             self::PaymentNotFound => 'Payment not found',
             self::ProjectionRebuilding => 'Projection rebuilding',
@@ -56,7 +56,7 @@ enum ProblemType: string
         return match ($this) {
             self::Unauthenticated => 'This endpoint requires an authenticated merchant user.',
             self::ValidationFailed => 'The request payload did not satisfy the initiation contract.',
-            self::IdempotencyPayloadMismatch => 'This idempotency key was already used with a different payload.',
+            self::IdempotencyPayloadMismatch => 'This idempotency key or payment intent is already bound to a different payment request.',
             self::IdempotencyContention => 'The request could not be arbitrated in time. Retry.',
             self::PaymentNotFound => 'No payment matching this identifier is available.',
             self::ProjectionRebuilding => 'A projection rebuild is in progress. Retry.',

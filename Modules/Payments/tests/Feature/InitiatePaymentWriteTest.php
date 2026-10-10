@@ -94,7 +94,7 @@ it('never lets one merchant replay another merchant receipt', function (): void 
         ->assertStatus(202);
 });
 
-it('reserves against the merchant/key constraint only', function (): void {
+it('surfaces a payment_id collision as an internal error after one rerun, never as contention', function (): void {
     $collidingPaymentId = '01984f6f-7777-7000-8000-000000000001';
     $squatter = Merchant::factory()->create();
 

@@ -6,6 +6,7 @@ use Illuminate\Support\Facades\Route;
 use Modules\Merchant\Application\Identity\MerchantContext;
 use Modules\Merchant\Infrastructure\Persistence\Eloquent\Merchant;
 use Modules\Payments\Http\Requests\InitiatePaymentRequest;
+use Modules\Payments\Http\Requests\PaymentIntentHeaders;
 use Modules\Payments\Tests\Support\Initiation;
 
 it('accepts the inclusive amount boundaries', function (int $amount): void {
@@ -123,18 +124,23 @@ it('exposes canonical typed accessors for the command context', function (): voi
         'amount' => $request->canonicalAmountMinor(),
         'currency' => $request->canonicalCurrency(),
         'key' => $request->rawIdempotencyKey(),
+        'intent' => $request->intentId(),
+        'expires_at' => $request->intentExpiresAt(),
     ]));
 
     $rawKey = 'Mixed-Case_Key.42~';
+    $headers = Initiation::headers(['Idempotency-Key' => $rawKey]);
 
     $response = $this->postJson('/api/_request_probe', [
         'amount_minor' => 1_250,
         'currency' => 'usd',
-    ], ['Idempotency-Key' => $rawKey]);
+    ], $headers);
 
     $response->assertStatus(200);
 
     expect($response->json('amount'))->toBe(1_250)
         ->and($response->json('currency'))->toBe('USD')
-        ->and($response->json('key'))->toBe($rawKey);
+        ->and($response->json('key'))->toBe($rawKey)
+        ->and($response->json('intent'))->toBe($headers[PaymentIntentHeaders::INTENT_ID])
+        ->and($response->json('expires_at'))->toBe($headers[PaymentIntentHeaders::EXPIRES_AT]);
 });

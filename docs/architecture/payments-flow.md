@@ -7,13 +7,16 @@ linked specifications are authoritative for detailed behavior.
 
 ### Initiate a payment
 
-`POST /api/payments` requires a Passport bearer token and an `Idempotency-Key`. The merchant comes
+`POST /api/payments` requires a Passport bearer token, an `Idempotency-Key`, and the payment intent
+headers `Ledgerflow-Intent-Id` and `Ledgerflow-Intent-Expires-At`. The merchant comes
 from the authenticated user; the client cannot choose it. The slice accepts only `USD` and an
 `amount_minor` from `1` through `100_000_000` inclusive.
 
 The first accepted request returns `202 Accepted`, a UUIDv7 payment ID, `status: initiated`, and a
-`Location` header. An identical retry returns the stored status, exact response bytes, and
-`Location`. Reusing the same merchant-scoped key for another canonical payload returns `409`.
+`Location` header. A retry of the same merchant-scoped intent with the same canonical payload, under
+the same or a new key, returns the stored status, exact response bytes, and `Location`. Reusing the
+intent or the key for another payment returns `409`. One BFF-stamped expiry bounds every attempt;
+see [ADR 0008](../adr/0008-payment-intent-arbitration-and-deadline.md).
 
 ### Query a payment
 
@@ -33,6 +36,16 @@ downgraded to the generic `not_found`.
 
 Queries never rehydrate the aggregate: the read is `payment_details` and, only when that misses, the
 `payment_idempotency_receipts` fallback, both inside one short adapter-owned transaction.
+
+### Recover recent intents
+
+`GET /api/payment-intents` requires the same bearer token and resolves the merchant the same way.
+It lists the merchant's intent-bearing receipts from the last 24 hours, newest first, at most 20,
+with `truncated`, joining amount and currency from `payment_details` only under the same merchant.
+The same query adapter checks the projection gate first and answers `503 projection_rebuilding`
+while it is closed. Only an untruncated `200` can show that an intent created no payment; the
+contract and its guarantee are in the
+[recovery read](../specifications/payments/projection-and-query.md#recovery-read).
 
 ## Write path
 

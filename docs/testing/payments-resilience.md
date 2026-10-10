@@ -20,6 +20,9 @@ commands before the scaffold exists.
   transaction retry, and stable response replay.
 - `GET /api/payments/{paymentId}` — projected state, pending state, tenant ownership, missing state,
   and rebuild gating.
+- `GET /api/payment-intents` - tenant ownership, the merchant-scoped projection join, the 24-hour
+  window, truncation, and rebuild gating; evidence in the
+  [recovery read](../specifications/payments/projection-and-query.md#recovery-read).
 
 ## Initiate payment
 

@@ -99,6 +99,7 @@ function insertReceipt(
     ?string $keyHash = null,
     ?string $paymentId = null,
     string $responseBody = '{"status":"initiated"}',
+    ?string $intentId = null,
 ): string {
     $id = (string) Str::uuid7();
     $paymentId ??= (string) Str::uuid7();
@@ -116,6 +117,7 @@ function insertReceipt(
         'response_location' => "/api/payments/{$paymentId}",
         'created_at' => $now,
         'updated_at' => $now,
+        'intent_id' => $intentId,
     ]);
 
     return $id;
@@ -182,9 +184,10 @@ it('gives payment_idempotency_receipts its exact documented shape', function ():
     expect(array_keys($columns))->toEqualCanonicalizing([
         'id', 'merchant_id', 'idempotency_key_hash', 'request_fingerprint',
         'payment_id', 'response_status', 'response_body', 'response_location',
-        'created_at', 'updated_at',
+        'created_at', 'updated_at', 'intent_id',
     ])
         ->and($columns['id'])->toMatchArray(['type' => 'uuid', 'nullable' => false])
+        ->and($columns['intent_id'])->toMatchArray(['type' => 'uuid', 'nullable' => true, 'default' => null])
         ->and($columns['merchant_id'])->toMatchArray(['type' => 'bigint', 'nullable' => false])
         ->and($columns['idempotency_key_hash'])->toMatchArray(['type' => 'character', 'nullable' => false, 'length' => 64])
         ->and($columns['request_fingerprint'])->toMatchArray(['type' => 'character', 'nullable' => false, 'length' => 64])
@@ -200,13 +203,49 @@ it('gives payment_idempotency_receipts its exact documented shape', function ():
         'payment_receipts_merchant_key_unique',
         'payment_receipts_payment_id_unique',
         'payment_receipts_merchant_payment_index',
+        'payment_receipts_merchant_intent_unique',
+        'payment_receipts_merchant_recent_intent_index',
     ])
         ->and($indexes['payment_receipts_merchant_key_unique'])
         ->toMatchArray(['columns' => 'merchant_id,idempotency_key_hash', 'unique' => true])
         ->and($indexes['payment_receipts_payment_id_unique'])
         ->toMatchArray(['columns' => 'payment_id', 'unique' => true])
         ->and($indexes['payment_receipts_merchant_payment_index'])
-        ->toMatchArray(['columns' => 'merchant_id,payment_id', 'unique' => false]);
+        ->toMatchArray(['columns' => 'merchant_id,payment_id', 'unique' => false])
+        ->and($indexes['payment_receipts_merchant_intent_unique'])
+        ->toMatchArray(['columns' => 'merchant_id,intent_id', 'unique' => true, 'partial' => false])
+        ->and($indexes['payment_receipts_merchant_recent_intent_index'])
+        ->toMatchArray(['columns' => 'merchant_id,created_at,id', 'unique' => false, 'partial' => true]);
+});
+
+it('orders the recent-intent index newest first and covers only intent-bearing receipts', function (): void {
+    $definition = (string) DB::selectOne(
+        "select indexdef from pg_indexes
+          where schemaname = current_schema() and indexname = 'payment_receipts_merchant_recent_intent_index'",
+    )?->indexdef;
+
+    expect($definition)->toContain('(merchant_id, created_at DESC, id DESC)')
+        ->and(t5NormalisePredicate(t5IndexCatalog('payment_idempotency_receipts')['payment_receipts_merchant_recent_intent_index']['predicate']))
+        ->toBe('intent_id IS NOT NULL');
+});
+
+it('arbitrates intents per merchant, never globally, and leaves historical receipts without one', function (): void {
+    $first = Merchant::factory()->create()->getKey();
+    $second = Merchant::factory()->create()->getKey();
+    $intent = (string) Str::uuid();
+
+    insertReceipt(merchantId: $first, intentId: $intent);
+    insertReceipt(merchantId: $second, intentId: $intent);
+
+    // NULLs are distinct in a unique index, so any number of historical receipts may lack an intent.
+    insertReceipt(merchantId: $first);
+    insertReceipt(merchantId: $first);
+
+    expect(fn () => DB::transaction(fn () => insertReceipt(merchantId: $first, intentId: $intent)))
+        ->toThrow(UniqueConstraintViolationException::class, 'payment_receipts_merchant_intent_unique');
+
+    expect(DB::table('payment_idempotency_receipts')->count())->toBe(4)
+        ->and(DB::table('payment_idempotency_receipts')->whereNull('intent_id')->count())->toBe(2);
 });
 
 it('gives payment_outbox its exact documented shape', function (): void {

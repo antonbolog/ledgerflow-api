@@ -22,6 +22,9 @@ final readonly class PaymentInitiationContext
         public string $occurredAt,
         public string $idempotencyKeyHash,
         public string $requestFingerprint,
+        public string $intentId,
+        // Absolute and BFF-stamped: every attempt and the rerun spend this one deadline.
+        public string $intentExpiresAt,
     ) {
         $this->responseStatus = 202;
 

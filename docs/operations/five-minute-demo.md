@@ -57,15 +57,28 @@ exists.
 
 ### 1. Initiate a payment
 
+Every initiation names a payment intent and its expiry, as the BFF does.
+Stamp both once, then send them unchanged on every retry of that payment:
+
+```sh
+INTENT=$(uuidgen | tr '[:upper:]' '[:lower:]')
+EXPIRES_AT=$(docker compose exec -T app php -r 'echo gmdate("Y-m-d\TH:i:s", time() + 30), ".000Z";')
+```
+
+The expiry must be at most 32 seconds ahead of PostgreSQL time, so send the request below promptly.
+
 ```sh
 curl -i -X POST "$API/api/payments" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Idempotency-Key: demo-0001" \
+  -H "Ledgerflow-Intent-Id: $INTENT" \
+  -H "Ledgerflow-Intent-Expires-At: $EXPIRES_AT" \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json' \
   -d '{"amount_minor":1250,"currency":"USD"}'
 ```
 
+A request without either intent header is `422 validation_failed`.
 Expect `202 Accepted`, `Content-Type: application/json`, a `Location` header, and:
 
 ```json
@@ -107,23 +120,27 @@ The point is that the write path never waits for the projection.
 
 ### 3. Prove idempotency
 
-Replay the identical request with the same key:
+Replay the identical request with the same key, intent, and expiry:
 
 ```sh
 curl -i -X POST "$API/api/payments" \
   -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: demo-0001" \
+  -H "Ledgerflow-Intent-Id: $INTENT" -H "Ledgerflow-Intent-Expires-At: $EXPIRES_AT" \
   -H 'Content-Type: application/json' -H 'Accept: application/json' \
   -d '{"amount_minor":1250,"currency":"USD"}'
 ```
 
 Expect the same `202`, the same `payment_id`, the same `Location`, and byte-identical body: the
 response is replayed from the stored receipt rather than recomputed.
+It replays even though the expiry has probably passed by now: a committed intent always replays.
+Sending the same intent under a new `Idempotency-Key`, as a new BFF session would, replays it too.
 
-Now reuse the key with a different payload:
+Now reuse the key and intent with a different payload:
 
 ```sh
 curl -i -X POST "$API/api/payments" \
   -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: demo-0001" \
+  -H "Ledgerflow-Intent-Id: $INTENT" -H "Ledgerflow-Intent-Expires-At: $EXPIRES_AT" \
   -H 'Content-Type: application/json' -H 'Accept: application/json' \
   -d '{"amount_minor":9900,"currency":"USD"}'
 ```
@@ -138,11 +155,14 @@ Nothing new is written.
 docker compose stop redis
 ```
 
-Initiate another payment with a fresh key:
+Initiate another payment with a fresh key, a fresh intent, and a fresh expiry:
 
 ```sh
+INTENT=$(uuidgen | tr '[:upper:]' '[:lower:]')
+EXPIRES_AT=$(docker compose exec -T app php -r 'echo gmdate("Y-m-d\TH:i:s", time() + 30), ".000Z";')
 curl -i -X POST "$API/api/payments" \
   -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: demo-0002" \
+  -H "Ledgerflow-Intent-Id: $INTENT" -H "Ledgerflow-Intent-Expires-At: $EXPIRES_AT" \
   -H 'Content-Type: application/json' -H 'Accept: application/json' \
   -d '{"amount_minor":4200,"currency":"USD"}'
 ```

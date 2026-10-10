@@ -19,6 +19,8 @@ function slice2Context(
         occurredAt: '2026-08-14T10:11:12.123456+00:00',
         idempotencyKeyHash: str_repeat('a', 64),
         requestFingerprint: PaymentInitiationContext::fingerprint($merchantId, $amountMinor, $currency),
+        intentId: '0199c6a8-3f1e-7c2a-9b4d-5e6f7a8b9c0d',
+        intentExpiresAt: '2026-08-14T10:11:42.123Z',
     );
 }
 
@@ -53,6 +55,8 @@ it('never carries the raw idempotency key on any property', function (): void {
         occurredAt: '2026-08-14T10:11:12.123456+00:00',
         idempotencyKeyHash: PaymentInitiationContext::hashKey($raw),
         requestFingerprint: PaymentInitiationContext::fingerprint(7, 1_250, 'USD'),
+        intentId: '0199c6a8-3f1e-7c2a-9b4d-5e6f7a8b9c0d',
+        intentExpiresAt: '2026-08-14T10:11:42.123Z',
     );
 
     expect(PaymentInitiationContext::hashKey($raw))->toBe(hash('sha256', $raw));
