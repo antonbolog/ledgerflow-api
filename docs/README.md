@@ -20,7 +20,7 @@ unrelated implementation details.
 | How is resilience proved? | [Resilience test plan](testing/payments-resilience.md) |
 | Which application processes run locally and on AWS? | [Runtime contract](operations/runtime-contract.md) |
 | How do I see the whole slice working in five minutes? | [Five-minute demo](operations/five-minute-demo.md) |
-| What exactly do the two HTTP endpoints return? | [OpenAPI artifact](api/openapi.json) |
+| What exactly do the implemented HTTP endpoints return? | [OpenAPI artifact](api/openapi.json) |
 | Why was a durable architecture choice made? | [Architecture decision records](adr/README.md) |
 
 ## Documentation rules
