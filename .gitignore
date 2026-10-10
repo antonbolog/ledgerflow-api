@@ -54,7 +54,8 @@ yarn-error.log
 
 # Graphify
 # Exclude local Graphify cache, usage data, machine-specific paths, dated
-# pre-update backups, integrity signatures, and the incremental-build manifest.
+# pre-update backups, integrity signatures, the local analysis sidecar, and the
+# incremental-build manifest.
 # `manifest.json` is local rebuild state — it records per-file hashes and mtimes
 # of one machine's last build, so it conflicts on every merge and proves nothing
 # about the graph. The curated root artifacts (graph.json, graph.html,
@@ -66,3 +67,4 @@ graphify-out/.graphify_python
 graphify-out/.graphify_root
 graphify-out/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/
 graphify-out/*.sig
+graphify-out/.graphify_analysis.json

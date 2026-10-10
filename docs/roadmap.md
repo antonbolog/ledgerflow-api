@@ -269,7 +269,7 @@ T13 carries the demo half through the
 
 The Payments resilience slice is complete, so these directions are now unblocked. They are not yet
 decomposed into the active task set, except for merchant dashboard integration, which ANT-28 through
-ANT-31 now carry.
+ANT-32, ANT-34, and ANT-35 now carry.
 
 ### Filament admin and realtime foundation
 
@@ -293,7 +293,8 @@ ANT-31 now carry.
 ### Merchant dashboard integration
 
 This direction is decomposed: ANT-28 specifies the authentication contract, and it blocks ANT-29 and
-ANT-30 while relating to ANT-31.
+ANT-30 while relating to ANT-31. ANT-32 builds the payment flow on that foundation, and ANT-35 makes
+its intent recovery durable across BFF sessions.
 
 - **ANT-28 is specification only and complete as documentation.**
   [ADR 0006](adr/0006-merchant-oauth-bff-authentication.md) and
@@ -320,8 +321,30 @@ ANT-30 while relating to ANT-31.
   tokens live in a Redis-backed BFF session record behind one opaque cookie, and refresh is
   coordinated by a lock but made correct by record and rotation compare-and-set. ANT-31 develops and
   validates against local Redis.
-- **A `ledgerflow-infra` task provisions the deployed BFF session store** under the Redis contract in
-  that specification. It blocks deployment of ANT-31, not its local development.
+- **ANT-32 implements the merchant payment flow in `ledgerflow-spa`.**
+  The browser generates one payment intent per logical payment; the BFF claims it in session-scoped
+  Redis, derives the `Idempotency-Key` from the session and the intent, and recovers a lost response
+  within the same BFF session. Since ANT-35 it also forwards `Ledgerflow-Intent-Id` and the expiry it
+  stamps at first claim, which the API now requires.
+- **ANT-34 (`ledgerflow-infra`) provisions the deployed BFF session store and the edge controls**:
+  the Redis contract in that specification, the edge rate rule, and the declared proxy chain. It
+  blocks deployment of ANT-31, not its local development. It also owns the deployment order ANT-35
+  needs: every API worker cut over at once, and the SPA's 30 s intent lifetime deployed before the
+  API's 32 s expiry cap.
+- **ANT-35 makes payment intent recovery durable across BFF sessions.**
+  Phase 1 measured and selected the transaction deadline mechanism. Phase 2 is implemented and
+  accepted: it makes `POST /api/payments` require both intent headers, arbitrates initiation by
+  `(merchant_id, intent_id)` with a merchant-scoped unique index, and bounds every attempt and the
+  single reservation rerun by one BFF-stamped expiry enforced in PostgreSQL
+  ([ADR 0008](adr/0008-payment-intent-arbitration-and-deadline.md), accepted, amending ADR 0003).
+  The SPA merge gate is satisfied: `ledgerflow-spa` lowered its intent lifetime from 15 minutes to
+  30 seconds. The deploy gate remains open: that SPA change must be deployed before any API build
+  enforcing the 32 s cap is deployed. Phase 3 is implemented and accepted: the merchant-scoped
+  recovery read `GET /api/payment-intents`
+  ([recovery read](specifications/payments/projection-and-query.md#recovery-read)). The recovery
+  guarantee applies only once every API worker runs the Phase 2 code. The SPA recovery proxy and UI
+  are a later `ledgerflow-spa` slice. Follow-up: an intent-scoped lookup, because a merchant with
+  more than 20 intents in 24 hours always reads `truncated: true` and cannot conclude absence.
 - Finalize production deployment domains, WebSocket authorization, and reconnect behavior; the
   production hostnames are the one open item named in that specification.
 - Deploy and validate the frontend independently from the API image.

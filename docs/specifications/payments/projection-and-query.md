@@ -26,6 +26,7 @@ checks it before the envelope row lock, and the query's transaction checks it be
 lookup - see [verification and rebuild](verification-and-rebuild.md#t11-slice-2-implementation-evidence).
 The bounded batch rebuild and recovery are documented in the [T11 evidence](verification-and-rebuild.md#t11-implementation-evidence). [The roadmap](../../roadmap.md)
 owns task state.
+ANT-35 Phase 3 adds the merchant-scoped [recovery read](#recovery-read) to the same query adapter.
 
 ## Consumer transaction
 
@@ -144,6 +145,62 @@ query adapter, `DatabasePaymentQuery`, may read only `payment_details` and
 performs its normal Passport and `MerchantContext` identity queries. The endpoint never rehydrates
 `PaymentAggregate` and never treats Redis/SQS state as proof that a payment exists.
 
+## Recovery read
+
+**Implemented by ANT-35 Phase 3.**
+A BFF that lost its session state can find the payments its merchant's recent intents created.
+The identity, arbitration, and deadline it relies on are [ADR 0008](../../adr/0008-payment-intent-arbitration-and-deadline.md)'s.
+
+`GET /api/payment-intents` takes no parameters and resolves the merchant only through `MerchantContext`.
+It extends `PaymentQuery` with `recentIntents()`, implemented by the same `DatabasePaymentQuery` adapter, in one short transaction on the one injected connection:
+
+- the shared gate check is the first statement; a closed gate raises `Application\Query\ProjectionRebuilding` before any receipt or projection read, answered `503 projection_rebuilding` with `Retry-After: 1`;
+- one SELECT then reads `payment_idempotency_receipts` with a `LEFT JOIN` to `payment_details` on both `payment_id` and `merchant_id`, because nothing in the schema ties a projection's merchant to its receipt's;
+- it selects named columns only, so the key hash, the request fingerprint, and the stored response bytes never reach this path, and it writes nothing.
+
+The rows are the merchant's receipts that carry an intent, with `created_at >= statement_timestamp() - interval '24 hours'` (inclusive, PostgreSQL time), ordered `created_at DESC, id DESC`, at most 20.
+The SELECT fetches 21 rows, so the rows and `truncated` come from one snapshot.
+Receipts written without an intent, before ANT-35, never appear.
+
+`200` carries exactly `{"intents": [...], "truncated": <bool>}`:
+
+- each element is, in wire order, `intent_id`, `payment_id`, `created_at`, then `amount_minor` and `currency` when the projection exists;
+- a pending element omits `amount_minor` and `currency` entirely, never `null`;
+- `created_at` is the receipt's PostgreSQL creation time, UTC ISO-8601 with six fractional digits and a `+00:00` offset, like `initiated_at`;
+- `truncated` is `true` exactly when a 21st qualifying receipt exists;
+- an empty list is still `200`.
+
+There is no cursor, filter, or page size; the read is recovery, not listing.
+
+### Guarantee
+
+The guarantee is ADR 0008's, and holds only for a `200` with `truncated: false`:
+
+- an intent absent from such a read at BFF time `E + S + R` (`S = 2 s`, `R = 1 s`) does not commit, under the tested conditions;
+- it covers only intents committed after every API worker runs the ANT-35 Phase 2 code; a receipt an older worker wrote has no intent and is never listed;
+- it becomes merchant-usable only once the `ledgerflow-spa` recovery slice ships.
+
+**Truncation.** A `truncated: true` read proves nothing about an intent missing from it, and no request can page further.
+A merchant with more than 20 intent-bearing receipts in the window therefore always reads `truncated: true` and can never conclude absence; for such merchants recovery stays unresolved until a follow-up adds an intent-scoped lookup.
+
+**Window.** Absence also proves nothing once the window has passed the intent.
+The API refuses an expiry beyond its 32 s cap against PostgreSQL time, so an intent's receipt has `created_at >= E - 32 s`.
+A read made later than `E + 24 h - 32 s` in PostgreSQL time can therefore miss an intent that did commit.
+
+`R` and `S` are deployment assumptions recorded in ADR 0008, not measurements of a deployed topology.
+
+### SPA recovery-slice handoff
+
+The later `ledgerflow-spa` recovery slice owns the proxy and the UI; this section is the API's side of that contract.
+
+- The BFF proxies `GET /api/payment-intents` with the session's bearer token. It adds no merchant, query, or body parameter, and never forwards a browser-supplied identity.
+- The BFF relays statuses per the [BFF status table](../merchant/oauth-bff-authentication.md#status-code-behavior): `401` refreshes once; `503 projection_rebuilding` honours `Retry-After`.
+- An intent is found only by the `intent_id` the BFF stored at first claim. A listed intent already has its payment; the BFF follows `payment_id`, never initiates again, and may poll `GET /api/payments/{paymentId}` for a pending one.
+- The BFF concludes absence only from a `200` with `truncated: false`, read no earlier than `E + S + R` on its own clock and within the window above.
+  A merchant above 20 intents in the window never gets that answer; the SPA must keep such an intent unresolved rather than offer a new payment.
+  Neither a `503`, a `401`, nor a truncated `200` lets it conclude absence.
+- No new payment is offered for an intent before that conclusion. With the BFF's 30 s lifetime, the earliest point is 33 s after first claim.
+
 ## Failure handling
 
 - Projection failure rolls back the read row, receipt, and completion marker together.
@@ -259,6 +316,16 @@ T11:
 - That backend-affinity evidence is T11's alone: it cannot be produced before a gate lock exists to
   prove it against.
 
+ANT-35 Phase 3:
+
+- Only the authenticated merchant's intent-bearing receipts are listed, and the projection join never attaches another merchant's amount.
+- The 24-hour window is inclusive on PostgreSQL time and pinned on both sides; ordering is newest first with ties by receipt id; receipts without an intent never appear.
+- 20 qualifying receipts answer `truncated: false`; 21 answer 20 rows and `truncated: true`; none answers `200` with an empty list.
+- Projected elements carry amount and currency; pending elements omit both keys.
+- A closed gate answers `503 projection_rebuilding` before any receipt or projection read; unauthenticated access answers the shared `401`.
+- No response contains the raw key, its hash, the request fingerprint, the expiry, or stored initiation response bytes.
+- OpenAPI documents the operation with route, response, and example parity.
+
 ## Implementation evidence
 
 **Satisfied by T8**, which shipped ten production types - eight under
@@ -346,7 +413,7 @@ dependency and no process.** Every row below was observed through `make check` a
 | Q-11 | The query path reads two tables and writes nothing | `PaymentQueryTest::it reads only the two allowed tables and writes nothing` | Every statement across all three reachable states must start with `select`, and every table it names - matched on `from` **and** `join`, so a join cannot smuggle a third in - must be `payment_details` or `payment_idempotency_receipts`. A positive allowlist rather than a list of forbidden names, which would pass any table nobody predicted: `payment_projection_controls` above all, the read T11 prepends here | **PASS** |
 | Q-12 | `payment_not_found` is reachable only through the query endpoint's own exception type | `QueryPaymentTest::it leaves an unknown api path on the generic not_found contract` | An unmatched `/api/*` path still answers `not_found`; the mapper matches `PaymentNotFound` by type above the 404 status fallback, so a status-driven mapping would have been caught here | **PASS** |
 | Q-13 | The merchant is resolved once, through `MerchantContext` only | `QueryPaymentTest::it resolves the merchant through MerchantContext exactly once` | A counting `MerchantContext` double records exactly one call. `AuthenticatedMerchantContext` memoises nothing, so a controller asking twice would do the identity work twice and no response assertion would notice | **PASS** |
-| Q-14 | The unauthenticated contract is unchanged | `OpenApiContractTest::it refuses both operations unauthenticated, exactly as the shared 401 documents it` | `401`, `application/problem+json`, and the whole document equal to the shared documented example for both routes, with `instance` echoing the requested path. Every authenticated test uses a **real Sanctum bearer token** and `Auth::forgetGuards()` between requests, never `Sanctum::actingAs`, so an isolation claim cannot pass by reusing the first token's merchant | **PASS** |
+| Q-14 | The unauthenticated contract is unchanged | `OpenApiContractTest::it refuses every payments operation unauthenticated, exactly as the shared 401 documents it` | `401`, `application/problem+json`, and the whole document equal to the shared documented example for `POST /api/payments`, `GET /api/payments/{paymentId}`, and `GET /api/payment-intents`, with `instance` echoing the requested path. Every authenticated test uses a **real Passport bearer token** and `Auth::forgetGuards()` between requests, never `Passport::actingAs`, so an isolation claim cannot pass by reusing the first token's merchant | **PASS** |
 | Q-15 | A not-found payment is not reported to the log | `QueryPaymentTest::it does not report a not-found payment to the log` | `shouldReport()` is false for `PaymentNotFound` and true for an unrelated `RuntimeException`. Laravel already declines to report the framework's `NotFoundHttpException`; without the `dontReport` in `bootstrap/app.php` this endpoint would be the one 404 in the API writing an error-level line with a stack trace once per request, at whatever rate a client asks for identifiers it does not own | **PASS** |
 
 **What T9 did not prove.** No load, throughput, latency or query-plan claim, and therefore no new
@@ -360,8 +427,34 @@ path is established by source inspection only - the SQL listener that pins the t
 observe a Redis call.
 The historical T8 process rehearsal was not extended by T9 and was retired in ANT-18.
 
+**Satisfied by ANT-35 Phase 3**, which added `PaymentQuery::recentIntents()`, the Application types `RecentIntents`, `ProjectedIntent` and `PendingIntent`, `DatabasePaymentQuery::recentIntents()`, `RecentPaymentIntentsController`, and one route.
+**No migration, no index, no Composer dependency and no process**: the partial index `payment_receipts_merchant_recent_intent_index` came with ANT-35 Phase 2.
+Every row below was observed through `make check` against PostgreSQL 18.4.
+The R-3 through R-9 controls were also confirmed by mutation: the merchant join predicate, the window bound (`>`, and one microsecond either way), the tie-break, the intent filter, the 21-row fetch, and the gate's position were each broken in the adapter, and the cited test failed.
+
+| # | Invariant | Proving test | Observed mechanism | Status |
+|---|---|---|---|---|
+| R-1 | Projected and pending elements have exact shapes in wire order | `RecentPaymentIntentsTest::it lists projected and pending intents newest first, in wire order, with no amount keys on pending ones`, `PaymentQueryTest::it lists a projected intent with its amount and a pending intent without one` | The whole decoded document compared order-sensitively, so a `null` amount on a pending element would fail as an extra key; `created_at` normalised to UTC by the adapter under a `Europe/Kyiv` session | **PASS** |
+| R-2 | Only the requested merchant's intents are listed | `PaymentQueryTest::it lists only the requested merchant intents`, `RecentPaymentIntentsTest::it never lists another merchant intents`, `PassportResourceAuthenticationTest` credential matrix | Two merchants with receipts each; each list contains only its own; unusable and revoked tokens and a `merchant_web` session get the shared `401` | **PASS** |
+| R-3 | The projection join never attaches another merchant's amount | `PaymentQueryTest::it never attaches another merchant amount, even to a receipt whose payment id it shares` | A deliberately inconsistent pair, a receipt for one merchant and a `payment_details` row for the same `payment_id` under another, lists as pending; removing the join's merchant predicate fails it | **PASS** |
+| R-4 | The window is inclusive on the read statement's PostgreSQL clock | `PaymentQueryTest::it includes an intent just inside the 24-hour window and excludes one at its edge before the read`, `…it bounds the window inclusively on the read statement clock` | A receipt exactly 24 hours before a `clock_timestamp()` taken before the read is excluded, and one 5 s inside is included. `statement_timestamp()` cannot be pinned from outside the statement, so `>` and a one-microsecond shift either way are caught only by the predicate assertion | **PASS** |
+| R-5 | Ordering is newest first with ties broken by receipt id | `PaymentQueryTest::it orders newest first, breaking equal timestamps by receipt id` (2 datasets) | Five equal timestamps with ascending ids inserted in ascending order, under the default plan and with index scans disabled, so neither insertion order nor the partial index's own order can supply the tie-break | **PASS** |
+| R-6 | Receipts without an intent never appear | `PaymentQueryTest::it never lists a receipt written without an intent, even the newest one` | The null-intent receipt is the newest row | **PASS** |
+| R-7 | At most 20 rows, with `truncated` set by a 21st | `PaymentQueryTest::it returns at most 20 intents and reports whether an older one was cut off` (3 datasets), `…it does not report truncation for a 21st receipt the listing excludes` (3 datasets), `RecentPaymentIntentsTest::it answers an empty list as 200 with truncated false` | 0, 20, and 21 qualifying receipts; the 21-row case returns the newest 20; a 21st receipt that is out of window, without an intent, or another merchant's leaves `truncated: false`; the empty list is exactly `{"intents":[],"truncated":false}` | **PASS** |
+| R-8 | One transaction on the injected connection, gate first, two tables, no write | `PaymentQueryTest::it lists in one transaction on the injected connection, gate first, and leaves none open` | One `TransactionBeginning` and one `TransactionCommitted`; three statements at level 1 on the default connection: gate probe, control read, then one `select` naming only `payment_idempotency_receipts` and `payment_details` | **PASS** |
+| R-9 | A closed gate refuses before either table, and the HTTP answer matches OpenAPI | `PaymentQueryTest::it refuses the list with ProjectionRebuilding before either table is touched, and leaves no transaction open`, `RecentPaymentIntentsTest::it answers 503 projection_rebuilding with Retry-After: 1 while the gate is closed`, `OpenApiContractTest::it refuses the recent intents read exactly as the documented 503 says while the gate is closed` | Only the two gate statements run; `503`, `Retry-After: 1`, and the documented example; reopening the gate serves the list | **PASS** |
+| R-10 | No key, hash, fingerprint, expiry, or stored response bytes reach a response | `RecentPaymentIntentsTest::it reveals no key, hash, fingerprint, expiry or stored response bytes of a real initiation` | After a real `POST /api/payments`, each probe is read back from the database and proven non-trivial, the listing is proven to contain that receipt, and the whole body plus headers is scanned | **PASS** |
+| R-11 | The merchant is resolved once, through `MerchantContext` only | `RecentPaymentIntentsTest::it resolves the merchant through MerchantContext exactly once` | A counting `MerchantContext` double records exactly one call | **PASS** |
+| R-12 | OpenAPI matches the route, body, both element shapes, and example | `OpenApiContractTest::it documents every implemented api route and no other`, `…it documents the recent intents body and both intent shapes in wire order` | Route parity includes `get /api/payment-intents`; a real projected and a real pending element match `ProjectedPaymentIntent` and `PendingPaymentIntent` key for key, and so does the documented example | **PASS** |
+
+**What ANT-35 Phase 3 did not prove.** No load, latency, or query-plan claim: the partial index exists, but no test asserts the planner uses it.
+The guarantee's `R` and `S` are ADR 0008 deployment assumptions, and the rolling-deploy boundary is a documented constraint, not a tested one.
+No `ledgerflow-spa` code exists for the handoff above yet.
+
 ## Related
 
 - [Outbox delivery](outbox-delivery.md)
 - [Verification and rebuild](verification-and-rebuild.md)
+- [ADR 0008](../../adr/0008-payment-intent-arbitration-and-deadline.md)
+- [Merchant OAuth and BFF authentication](../merchant/oauth-bff-authentication.md)
 - [Resilience test plan](../../testing/payments-resilience.md)

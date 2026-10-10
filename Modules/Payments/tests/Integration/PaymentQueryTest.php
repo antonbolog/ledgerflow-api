@@ -10,7 +10,9 @@ use Illuminate\Support\Str;
 use Modules\Merchant\Infrastructure\Persistence\Eloquent\Merchant;
 use Modules\Payments\Application\Query\PaymentNotFound;
 use Modules\Payments\Application\Query\PaymentQuery;
+use Modules\Payments\Application\Query\PendingIntent;
 use Modules\Payments\Application\Query\PendingPayment;
+use Modules\Payments\Application\Query\ProjectedIntent;
 use Modules\Payments\Application\Query\ProjectedPayment;
 use Modules\Payments\Application\Query\ProjectionRebuilding;
 use Modules\Payments\Infrastructure\Projection\ProjectionGate;
@@ -384,6 +386,278 @@ it('holds the gate lock on its own connection while a read is refused by the con
 
     expect(ProjectionGateLocks::onKey(ProjectionGate::CLASS_ID, ProjectionGate::PAYMENT_DETAILS_OBJECT_ID))
         ->toBe([]);
+
+    paymentQueryReopenGate();
+});
+
+/**
+ * @param  string  $createdAt  a timestamptz SQL expression, so ages are measured on the PostgreSQL clock
+ * @return array{intent_id: string|null, payment_id: string}
+ */
+function paymentQueryIntentReceipt(
+    int $merchantId,
+    string $createdAt = 'statement_timestamp()',
+    bool $withIntent = true,
+    ?string $id = null,
+): array {
+    $paymentId = (string) Str::uuid7();
+    $intentId = $withIntent ? (string) Str::uuid() : null;
+
+    DB::table('payment_idempotency_receipts')->insert([
+        'id' => $id ?? (string) Str::uuid7(),
+        'merchant_id' => $merchantId,
+        'idempotency_key_hash' => hash('sha256', $paymentId),
+        'request_fingerprint' => str_repeat('b', 64),
+        'payment_id' => $paymentId,
+        'intent_id' => $intentId,
+        'response_status' => 202,
+        'response_body' => '{"payment_id":"'.$paymentId.'","status":"initiated"}',
+        'response_location' => '/api/payments/'.$paymentId,
+        'created_at' => DB::raw($createdAt),
+        'updated_at' => DB::raw($createdAt),
+    ]);
+
+    return ['intent_id' => $intentId, 'payment_id' => $paymentId];
+}
+
+/** @return list<string> */
+function paymentQueryRecentPaymentIds(int $merchantId): array
+{
+    return array_map(
+        static fn (ProjectedIntent|PendingIntent $intent): string => $intent->paymentId,
+        paymentQueryAdapter()->recentIntents($merchantId)->intents,
+    );
+}
+
+it('lists a projected intent with its amount and a pending intent without one', function (): void {
+    $merchantId = Merchant::factory()->create()->getKey();
+
+    /** @var string $instant */
+    $instant = DB::scalar(<<<'SQL'
+        select to_char((statement_timestamp() - interval '1 hour') at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"')
+        SQL);
+
+    $projected = paymentQueryIntentReceipt($merchantId, "'{$instant}'::timestamptz");
+    $pending = paymentQueryIntentReceipt($merchantId, "'{$instant}'::timestamptz - interval '1 second'");
+    paymentQueryProjection($merchantId, $projected['payment_id'], amountMinor: 4_200, currency: 'EUR');
+
+    // The session is otherwise UTC, which would hide a missing ->utc() in the adapter.
+    DB::statement("set time zone 'Europe/Kyiv'");
+    $recent = paymentQueryAdapter()->recentIntents($merchantId);
+    DB::statement("set time zone 'UTC'");
+
+    expect($recent->truncated)->toBeFalse()
+        ->and($recent->intents)->toHaveCount(2)
+        ->and($recent->intents[0])->toBeInstanceOf(ProjectedIntent::class)
+        ->and((array) $recent->intents[0])->toBe([
+            'intentId' => $projected['intent_id'],
+            'paymentId' => $projected['payment_id'],
+            'createdAt' => $instant,
+            'amountMinor' => 4_200,
+            'currency' => 'EUR',
+        ])
+        ->and($recent->intents[1])->toBeInstanceOf(PendingIntent::class)
+        ->and($recent->intents[1]->paymentId)->toBe($pending['payment_id'])
+        ->and($recent->intents[1]->createdAt)->toEndWith('+00:00');
+});
+
+it('lists only the requested merchant intents', function (): void {
+    $owner = Merchant::factory()->create()->getKey();
+    $stranger = Merchant::factory()->create()->getKey();
+
+    $own = paymentQueryIntentReceipt($owner);
+    $foreign = paymentQueryIntentReceipt($stranger);
+
+    expect(paymentQueryRecentPaymentIds($owner))->toBe([$own['payment_id']])
+        ->and(paymentQueryRecentPaymentIds($stranger))->toBe([$foreign['payment_id']]);
+});
+
+it('never attaches another merchant amount, even to a receipt whose payment id it shares', function (): void {
+    $owner = Merchant::factory()->create()->getKey();
+    $stranger = Merchant::factory()->create()->getKey();
+
+    // Inconsistent on purpose: no constraint ties a projection's merchant to its receipt's.
+    $receipt = paymentQueryIntentReceipt($owner);
+    paymentQueryProjection($stranger, $receipt['payment_id'], amountMinor: 9_999);
+
+    $intents = paymentQueryAdapter()->recentIntents($owner)->intents;
+
+    expect($intents)->toHaveCount(1)
+        ->and($intents[0])->toBeInstanceOf(PendingIntent::class)
+        ->and((array) $intents[0])->not->toHaveKey('amountMinor');
+
+    expect(paymentQueryAdapter()->recentIntents($stranger)->intents)->toBe([]);
+});
+
+it('includes an intent just inside the 24-hour window and excludes one at its edge before the read', function (): void {
+    $merchantId = Merchant::factory()->create()->getKey();
+
+    // Taken before the read, so the read's statement_timestamp() and its bound are strictly later.
+    /** @var string $anchor */
+    $anchor = DB::scalar('select clock_timestamp()::text');
+
+    $outside = paymentQueryIntentReceipt($merchantId, "'{$anchor}'::timestamptz - interval '24 hours'");
+    $inside = paymentQueryIntentReceipt($merchantId, "'{$anchor}'::timestamptz - interval '24 hours' + interval '5 seconds'");
+
+    expect(paymentQueryRecentPaymentIds($merchantId))->toBe([$inside['payment_id']])
+        ->and(paymentQueryRecentPaymentIds($merchantId))->not->toContain($outside['payment_id']);
+});
+
+it('bounds the window inclusively on the read statement clock', function (): void {
+    $merchantId = Merchant::factory()->create()->getKey();
+
+    $statements = paymentQueryStatements();
+    paymentQueryAdapter()->recentIntents($merchantId);
+
+    // statement_timestamp() cannot be pinned from outside the statement, so a one-microsecond
+    // shift or an exclusive bound is only observable in the predicate itself.
+    expect(paymentQuerySql($statements)[2])
+        ->toContain("receipt.created_at >= statement_timestamp() - interval '24 hours' order by");
+});
+
+it('orders newest first, breaking equal timestamps by receipt id', function (array $planner): void {
+    $merchantId = Merchant::factory()->create()->getKey();
+
+    $older = paymentQueryIntentReceipt($merchantId, "statement_timestamp() - interval '2 minutes'");
+    $newest = paymentQueryIntentReceipt($merchantId, "statement_timestamp() - interval '10 seconds'");
+
+    /** @var string $tie */
+    $tie = DB::scalar("select (statement_timestamp() - interval '1 minute')::text");
+
+    // Ascending ids inserted in ascending order, so neither insertion order nor a heap scan yields the expected order.
+    $tied = array_map(
+        static fn (int $n): string => paymentQueryIntentReceipt(
+            $merchantId,
+            "'{$tie}'::timestamptz",
+            id: sprintf('00000000-0000-7000-8000-%012d', $n),
+        )['payment_id'],
+        range(1, 5),
+    );
+
+    foreach ($planner as $setting) {
+        DB::statement("set {$setting} = off");
+    }
+
+    expect(paymentQueryRecentPaymentIds($merchantId))
+        ->toBe([$newest['payment_id'], ...array_reverse($tied), $older['payment_id']]);
+
+    foreach ($planner as $setting) {
+        DB::statement("reset {$setting}");
+    }
+})->with([
+    'planner default' => [[]],
+    'heap scan and sort' => [['enable_indexscan', 'enable_bitmapscan', 'enable_indexonlyscan']],
+]);
+
+it('never lists a receipt written without an intent, even the newest one', function (): void {
+    $merchantId = Merchant::factory()->create()->getKey();
+
+    $withIntent = paymentQueryIntentReceipt($merchantId, "statement_timestamp() - interval '1 minute'");
+    paymentQueryIntentReceipt($merchantId, withIntent: false);
+
+    expect(paymentQueryRecentPaymentIds($merchantId))->toBe([$withIntent['payment_id']]);
+});
+
+it('returns at most 20 intents and reports whether an older one was cut off', function (int $qualifying, int $listed, bool $truncated): void {
+    $merchantId = Merchant::factory()->create()->getKey();
+
+    $paymentIds = array_map(
+        static fn (int $age): string => paymentQueryIntentReceipt(
+            $merchantId,
+            "statement_timestamp() - interval '{$age} seconds'",
+        )['payment_id'],
+        $qualifying === 0 ? [] : range(1, $qualifying),
+    );
+
+    $recent = paymentQueryAdapter()->recentIntents($merchantId);
+
+    expect($recent->truncated)->toBe($truncated)
+        ->and(array_map(static fn (ProjectedIntent|PendingIntent $intent): string => $intent->paymentId, $recent->intents))
+        ->toBe(array_slice($paymentIds, 0, $listed));
+})->with([
+    'none' => [0, 0, false],
+    'exactly the limit' => [20, 20, false],
+    'one beyond the limit' => [21, 20, true],
+]);
+
+it('does not report truncation for a 21st receipt the listing excludes', function (Closure $excluded): void {
+    $merchantId = Merchant::factory()->create()->getKey();
+
+    foreach (range(1, 20) as $age) {
+        paymentQueryIntentReceipt($merchantId, "statement_timestamp() - interval '{$age} seconds'");
+    }
+
+    $excluded($merchantId);
+
+    $recent = paymentQueryAdapter()->recentIntents($merchantId);
+
+    expect($recent->intents)->toHaveCount(20)
+        ->and($recent->truncated)->toBeFalse();
+})->with([
+    'older than 24 hours' => [fn (int $merchantId): array => paymentQueryIntentReceipt($merchantId, "statement_timestamp() - interval '25 hours'")],
+    'without an intent' => [fn (int $merchantId): array => paymentQueryIntentReceipt($merchantId, withIntent: false)],
+    'of another merchant' => [fn (): array => paymentQueryIntentReceipt(Merchant::factory()->create()->getKey())],
+]);
+
+it('lists in one transaction on the injected connection, gate first, and leaves none open', function (): void {
+    $merchantId = Merchant::factory()->create()->getKey();
+    paymentQueryIntentReceipt($merchantId);
+
+    $begun = 0;
+    $committed = 0;
+    Event::listen(TransactionBeginning::class, function () use (&$begun): void {
+        $begun++;
+    });
+    Event::listen(TransactionCommitted::class, function () use (&$committed): void {
+        $committed++;
+    });
+
+    $statements = paymentQueryStatements();
+    $adapter = paymentQueryAdapter();
+
+    expect($adapter->recentIntents($merchantId)->intents)->toHaveCount(1);
+
+    $rows = iterator_to_array($statements);
+    $sql = array_column($rows, 'sql');
+
+    expect($begun)->toBe(1)
+        ->and($committed)->toBe(1)
+        ->and($rows)->toHaveCount(3)
+        ->and(array_column($rows, 'level'))->toBe([1, 1, 1])
+        ->and(array_unique(array_column($rows, 'connection')))->toBe([DB::getDefaultConnection()])
+        ->and($sql[0])->toContain('pg_try_advisory_xact_lock_shared')
+        ->and($sql[1])->toContain('payment_projection_controls')
+        ->and($sql[2])->toStartWith('select')
+        ->and($sql[2])->toContain('payment_idempotency_receipts');
+
+    preg_match_all('/(?:from|join)\s+"?([a-z_]+)"?/i', $sql[2], $tables);
+    expect($tables[1])->toBe(['payment_idempotency_receipts', 'payment_details']);
+
+    expect(DB::connection()->transactionLevel())->toBe(0)
+        ->and(DB::connection()->getPdo()->inTransaction())->toBeFalse();
+});
+
+it('refuses the list with ProjectionRebuilding before either table is touched, and leaves no transaction open', function (): void {
+    $merchantId = Merchant::factory()->create()->getKey();
+    paymentQueryIntentReceipt($merchantId);
+
+    paymentQueryCloseGate();
+
+    $statements = paymentQueryStatements();
+
+    expect(fn () => paymentQueryAdapter()->recentIntents($merchantId))
+        ->toThrow(ProjectionRebuilding::class);
+
+    $sql = paymentQuerySql($statements);
+
+    expect($sql)->toHaveCount(2)
+        ->and($sql[0])->toContain('pg_try_advisory_xact_lock_shared')
+        ->and($sql[1])->toContain('payment_projection_controls')
+        ->and(implode(' ', $sql))->not->toContain('payment_details')
+        ->and(implode(' ', $sql))->not->toContain('payment_idempotency_receipts');
+
+    expect(DB::connection()->transactionLevel())->toBe(0)
+        ->and(DB::connection()->getPdo()->inTransaction())->toBeFalse();
 
     paymentQueryReopenGate();
 });

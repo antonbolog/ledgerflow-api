@@ -14,17 +14,20 @@ use Modules\Merchant\Infrastructure\Persistence\Eloquent\Merchant;
 use Modules\Merchant\Infrastructure\Persistence\Eloquent\User;
 use Modules\Payments\Tests\Support\Initiation;
 
-/** @return array{0: TestResponse, 1: TestResponse} */
-function callBothPaymentRoutes(?string $authorization, string $paymentId): array
+/** @return array{0: TestResponse, 1: TestResponse, 2: TestResponse} */
+function callPaymentRoutes(?string $authorization, string $paymentId): array
 {
     Auth::forgetGuards();
     $headers = $authorization === null ? [] : ['Authorization' => $authorization];
-    $initiate = test()->postJson('/api/payments', Initiation::body(), [...$headers, 'Idempotency-Key' => Initiation::KEY]);
+    $initiate = test()->postJson('/api/payments', Initiation::body(), [...$headers, ...Initiation::headers()]);
 
     Auth::forgetGuards();
     $show = test()->withHeaders($headers)->getJson('/api/payments/'.$paymentId);
 
-    return [$initiate, $show];
+    Auth::forgetGuards();
+    $recover = test()->withHeaders($headers)->getJson('/api/payment-intents');
+
+    return [$initiate, $show, $recover];
 }
 
 function personalAccessToken(User $user, string $name): string
@@ -68,14 +71,15 @@ it('issues personal access tokens as one-hour Passport JWTs backed by a token ro
 
 it('answers every unusable credential with the unchanged 401 problem document', function (Closure $credential): void {
     $paymentId = (string) Str::uuid7();
-    [$expectedInitiate, $expectedShow] = callBothPaymentRoutes(null, $paymentId);
+    [$expectedInitiate, $expectedShow, $expectedRecover] = callPaymentRoutes(null, $paymentId);
 
     $expectedInitiate->assertStatus(401);
     $expectedShow->assertStatus(401);
+    $expectedRecover->assertStatus(401);
 
-    [$initiate, $show] = callBothPaymentRoutes($credential(), $paymentId);
+    [$initiate, $show, $recover] = callPaymentRoutes($credential(), $paymentId);
 
-    foreach ([[$initiate, $expectedInitiate], [$show, $expectedShow]] as [$actual, $expected]) {
+    foreach ([[$initiate, $expectedInitiate], [$show, $expectedShow], [$recover, $expectedRecover]] as [$actual, $expected]) {
         $actual->assertStatus(401);
 
         expect($actual->headers->get('Content-Type'))->toStartWith('application/problem+json')
@@ -105,13 +109,15 @@ it('accepts the token it revokes until the moment it is revoked', function (): v
     $token = personalAccessToken($user, 'control');
     $paymentId = (string) Str::uuid7();
 
-    [, $before] = callBothPaymentRoutes('Bearer '.$token, $paymentId);
+    [, $before, $recoverBefore] = callPaymentRoutes('Bearer '.$token, $paymentId);
     $before->assertStatus(404);
+    $recoverBefore->assertStatus(200);
 
     Passport::token()->newQuery()->whereKey(jwtClaims($token)['jti'])->update(['revoked' => true]);
 
-    [, $after] = callBothPaymentRoutes('Bearer '.$token, $paymentId);
+    [, $after, $recoverAfter] = callPaymentRoutes('Bearer '.$token, $paymentId);
     $after->assertStatus(401);
+    $recoverAfter->assertStatus(401);
 });
 
 it('never authenticates the resource api from a merchant_web session', function (): void {
@@ -122,10 +128,11 @@ it('never authenticates the resource api from a merchant_web session', function 
     expect(Auth::guard('merchant_web')->id())->toBe($user->getKey());
 
     $paymentId = (string) Str::uuid7();
-    [$initiate, $show] = callBothPaymentRoutes(null, $paymentId);
+    [$initiate, $show, $recover] = callPaymentRoutes(null, $paymentId);
 
     $initiate->assertStatus(401);
     $show->assertStatus(401);
+    $recover->assertStatus(401);
 
     Auth::forgetGuards();
 

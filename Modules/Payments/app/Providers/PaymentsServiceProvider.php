@@ -12,6 +12,7 @@ use Illuminate\Database\DatabaseManager;
 use Illuminate\Support\ServiceProvider;
 use Modules\Payments\Application\Initiation\AtomicTransaction;
 use Modules\Payments\Application\Initiation\IdempotencyReceipts;
+use Modules\Payments\Application\Initiation\PaymentIntentDeadline;
 use Modules\Payments\Application\Query\PaymentQuery;
 use Modules\Payments\Application\Rebuild\ProjectionRebuild;
 use Modules\Payments\Application\Repair\OutboxRepair;
@@ -23,6 +24,7 @@ use Modules\Payments\Infrastructure\Console\RelayPaymentOutboxCommand;
 use Modules\Payments\Infrastructure\Console\RepairPaymentOutboxCommand;
 use Modules\Payments\Infrastructure\Console\VerifyPaymentProjectionsCommand;
 use Modules\Payments\Infrastructure\Persistence\DatabaseIdempotencyReceipts;
+use Modules\Payments\Infrastructure\Persistence\DatabasePaymentIntentDeadline;
 use Modules\Payments\Infrastructure\Persistence\DatabasePaymentQuery;
 use Modules\Payments\Infrastructure\Persistence\RetryingAtomicTransaction;
 use Modules\Payments\Infrastructure\Projection\PaymentProjectionConsumer;
@@ -66,6 +68,13 @@ class PaymentsServiceProvider extends ServiceProvider
         $this->app->scoped(
             IdempotencyReceipts::class,
             fn (Application $app): DatabaseIdempotencyReceipts => new DatabaseIdempotencyReceipts(
+                $app->make(ConnectionInterface::class),
+            ),
+        );
+
+        $this->app->scoped(
+            PaymentIntentDeadline::class,
+            fn (Application $app): DatabasePaymentIntentDeadline => new DatabasePaymentIntentDeadline(
                 $app->make(ConnectionInterface::class),
             ),
         );

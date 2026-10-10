@@ -531,6 +531,9 @@ the browser unchanged (D-13).** The payments specifications own what each one me
 | `422 validation_failed` | Never refresh. Surface the problem document |
 | `503 projection_rebuilding`, `503 idempotency_contention` | Never refresh. Honour `Retry-After` |
 
+The recovery read `GET /api/payment-intents` answers only `200`, `401 unauthenticated`, and `503 projection_rebuilding`, each handled by the rows above.
+A `200` lets the BFF conclude that an intent is absent only when `truncated` is `false` and the timing rules of the [recovery read](../payments/projection-and-query.md#recovery-read) hold; neither a `503` nor a `200` with `truncated: true` does.
+
 Refreshing on anything but `401` would turn an authorization, tenancy, validation, or availability
 answer into a credential problem and rotate tokens for no reason.
 The tenant-hiding `404` matters most: it is what a merchant receives for another merchant's payment,

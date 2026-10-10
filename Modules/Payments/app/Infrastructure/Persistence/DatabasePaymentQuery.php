@@ -6,17 +6,23 @@ namespace Modules\Payments\Infrastructure\Persistence;
 
 use Carbon\CarbonImmutable;
 use Illuminate\Database\ConnectionInterface;
+use Illuminate\Database\Query\JoinClause;
 use Illuminate\Support\Str;
 use Modules\Payments\Application\Query\PaymentNotFound;
 use Modules\Payments\Application\Query\PaymentQuery;
+use Modules\Payments\Application\Query\PendingIntent;
 use Modules\Payments\Application\Query\PendingPayment;
+use Modules\Payments\Application\Query\ProjectedIntent;
 use Modules\Payments\Application\Query\ProjectedPayment;
 use Modules\Payments\Application\Query\ProjectionRebuilding;
+use Modules\Payments\Application\Query\RecentIntents;
 use Modules\Payments\Infrastructure\Projection\ProjectionGate;
 use Override;
 
 final readonly class DatabasePaymentQuery implements PaymentQuery
 {
+    private const int RECENT_INTENT_LIMIT = 20;
+
     public function __construct(
         private ConnectionInterface $connection,
         private ProjectionGate $gate,
@@ -36,6 +42,56 @@ final readonly class DatabasePaymentQuery implements PaymentQuery
         );
 
         return $found;
+    }
+
+    #[Override]
+    public function recentIntents(int $merchantId): RecentIntents
+    {
+        /** @var RecentIntents $recent */
+        $recent = $this->connection->transaction(fn (): RecentIntents => $this->listRecent($merchantId));
+
+        return $recent;
+    }
+
+    private function listRecent(int $merchantId): RecentIntents
+    {
+        // The gate check must be the first statement in this transaction (ADR 0005).
+        if (! $this->gate->inspectPaymentDetails()->isOpen()) {
+            throw ProjectionRebuilding::forRequestedPayment();
+        }
+
+        // One statement, so the rows and the extra row behind `truncated` share one snapshot.
+        /** @var list<object{intent_id: string, payment_id: string, created_at: string, amount_minor: int|string|null, currency: string|null}> $rows */
+        $rows = $this->connection->table('payment_idempotency_receipts as receipt')
+            ->leftJoin('payment_details as detail', function (JoinClause $join): void {
+                // Nothing in the schema ties a projection's merchant to its receipt's, so the join must.
+                $join->on('detail.payment_id', '=', 'receipt.payment_id')
+                    ->on('detail.merchant_id', '=', 'receipt.merchant_id');
+            })
+            ->where('receipt.merchant_id', $merchantId)
+            ->whereNotNull('receipt.intent_id')
+            ->whereRaw("receipt.created_at >= statement_timestamp() - interval '24 hours'")
+            ->latest('receipt.created_at')
+            ->orderByDesc('receipt.id')
+            ->limit(self::RECENT_INTENT_LIMIT + 1)
+            // Named columns only: the key hash, fingerprint and stored response bytes must not reach this read path.
+            ->get(['receipt.intent_id', 'receipt.payment_id', 'receipt.created_at', 'detail.amount_minor', 'detail.currency'])
+            ->all();
+
+        $intents = array_map(
+            static fn (object $row): ProjectedIntent|PendingIntent => $row->amount_minor === null || $row->currency === null
+                ? new PendingIntent($row->intent_id, $row->payment_id, self::canonicalInstant($row->created_at))
+                : new ProjectedIntent(
+                    intentId: $row->intent_id,
+                    paymentId: $row->payment_id,
+                    createdAt: self::canonicalInstant($row->created_at),
+                    amountMinor: (int) $row->amount_minor,
+                    currency: $row->currency,
+                ),
+            array_slice($rows, 0, self::RECENT_INTENT_LIMIT),
+        );
+
+        return new RecentIntents($intents, truncated: count($rows) > self::RECENT_INTENT_LIMIT);
     }
 
     private function lookUp(int $merchantId, string $paymentId): ProjectedPayment|PendingPayment

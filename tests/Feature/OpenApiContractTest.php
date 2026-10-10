@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Str;
 use Modules\Merchant\Infrastructure\Persistence\Eloquent\Merchant;
+use Modules\Payments\Http\Requests\PaymentIntentHeaders;
 use Modules\Payments\Tests\Support\Initiation;
 
 /** @return array<string, mixed> */
@@ -101,6 +102,7 @@ it('documents every implemented api route and no other', function (): void {
 
     expect($documented)->toBe($implemented)
         ->and($implemented)->toBe([
+            'get /api/payment-intents',
             'get /api/payments/{paymentId}',
             'post /api/auth/logout',
             'post /api/payments',
@@ -188,6 +190,81 @@ it('documents the pending payment body and its Retry-After header', function ():
         ->toHaveKey('Retry-After');
 });
 
+it('documents the recent intents body and both intent shapes in wire order', function (): void {
+    $merchant = Merchant::factory()->create();
+
+    $projected = Initiation::send(headers: ['Idempotency-Key' => 'openapi-projected'], merchant: $merchant);
+    $pending = Initiation::send(headers: ['Idempotency-Key' => 'openapi-pending'], merchant: $merchant);
+    $projected->assertStatus(202);
+    $pending->assertStatus(202);
+    projectPayment($merchant->id, (string) $projected->json('payment_id'));
+
+    $token = Initiation::token($merchant);
+    Auth::forgetGuards();
+
+    $response = test()
+        ->withHeader('Authorization', 'Bearer '.$token)
+        ->getJson('/api/payment-intents');
+
+    $response->assertStatus(200);
+
+    /** @var array<string, array<string, mixed>> $schemas */
+    $schemas = openApiDocument()['components']['schemas'];
+
+    /** @var list<array<string, mixed>> $intents */
+    $intents = $response->json('intents');
+    $shapes = collect($intents)->mapWithKeys(fn (array $intent): array => [
+        $intent['payment_id'] === $projected->json('payment_id') ? 'ProjectedPaymentIntent' : 'PendingPaymentIntent' => array_keys($intent),
+    ])->all();
+
+    expect(array_keys((array) $response->json()))
+        ->toBe(openApiBodyProperties('/api/payment-intents', 'get', 200, 'application/json'))
+        ->toBe(['intents', 'truncated'])
+        ->and($shapes)->toHaveCount(2)
+        ->and($shapes['ProjectedPaymentIntent'])->toBe(array_keys($schemas['ProjectedPaymentIntent']['properties']))
+        ->and($shapes['ProjectedPaymentIntent'])->toBe(['intent_id', 'payment_id', 'created_at', 'amount_minor', 'currency'])
+        ->and($shapes['PendingPaymentIntent'])->toBe(array_keys($schemas['PendingPaymentIntent']['properties']))
+        ->and($shapes['PendingPaymentIntent'])->toBe(['intent_id', 'payment_id', 'created_at'])
+        ->and($schemas['RecentPaymentIntents']['properties']['intents']['maxItems'])->toBe(20);
+
+    /** @var array<string, mixed> $example */
+    $example = openApiOperation('/api/payment-intents', 'get')['responses']['200']['content']['application/json']['example'];
+
+    expect(array_keys($example))->toBe(['intents', 'truncated'])
+        ->and(array_map(array_keys(...), $example['intents']))
+        ->toBe([$shapes['ProjectedPaymentIntent'], $shapes['PendingPaymentIntent']]);
+});
+
+it('refuses the recent intents read exactly as the documented 503 says while the gate is closed', function (): void {
+    $merchant = Merchant::factory()->create();
+    $token = Initiation::token($merchant);
+    Auth::forgetGuards();
+
+    DB::table('payment_projection_controls')->where('projection', 'payment_details')->update([
+        'state' => 'rebuilding',
+        'owner_token' => (string) Str::uuid7(),
+        'owner_pid' => 999_999,
+        'started_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    $response = test()
+        ->withHeader('Authorization', 'Bearer '.$token)
+        ->getJson('/api/payment-intents');
+
+    $response->assertStatus(503);
+
+    $operation = openApiOperation('/api/payment-intents', 'get');
+
+    expect($response->headers->get('Content-Type'))->toStartWith('application/problem+json')
+        ->and((array) $response->json())->toBe($operation['responses']['503']['content']['application/problem+json']['example'])
+        ->and($response->headers->get('Retry-After'))->toBe('1')
+        ->and($operation['responses']['503']['headers']['Retry-After'])->toBe(['$ref' => '#/components/headers/RetryAfter'])
+        ->and(array_keys($operation['responses']))->toBe([200, 401, 503])
+        ->and($operation)->not->toHaveKey('parameters')
+        ->and($operation['security'])->toBe([['bearerAuth' => []]]);
+});
+
 it('documents the problem document members the mapper actually emits', function (): void {
     $response = test()->getJson('/api/payments/'.Str::uuid7());
 
@@ -266,7 +343,7 @@ it('enumerates every ProblemType code, and derives every documented example from
     }
 });
 
-it('refuses both operations unauthenticated, exactly as the shared 401 documents it', function (): void {
+it('refuses every payments operation unauthenticated, exactly as the shared 401 documents it', function (): void {
     /** @var array<string, mixed> $documented */
     $documented = openApiDocument()['components']['responses']['Unauthenticated']['content']['application/problem+json']['example'];
 
@@ -275,8 +352,9 @@ it('refuses both operations unauthenticated, exactly as the shared 401 documents
     $queryPath = '/api/payments/'.Str::uuid7();
 
     $unauthenticated = [
-        ['/api/payments', test()->postJson('/api/payments', Initiation::body(), ['Idempotency-Key' => Initiation::KEY])],
+        ['/api/payments', test()->postJson('/api/payments', Initiation::body(), Initiation::headers())],
         [$queryPath, test()->getJson($queryPath)],
+        ['/api/payment-intents', test()->getJson('/api/payment-intents')],
     ];
 
     foreach ($unauthenticated as [$path, $response]) {
@@ -286,7 +364,7 @@ it('refuses both operations unauthenticated, exactly as the shared 401 documents
             ->and((array) $response->json())->toBe([...$documented, 'instance' => $path]);
     }
 
-    foreach ([['/api/payments', 'post'], ['/api/payments/{paymentId}', 'get']] as [$documentedPath, $method]) {
+    foreach ([['/api/payments', 'post'], ['/api/payments/{paymentId}', 'get'], ['/api/payment-intents', 'get']] as [$documentedPath, $method]) {
         expect(openApiOperation($documentedPath, $method)['responses']['401'])
             ->toBe(['$ref' => '#/components/responses/Unauthenticated']);
     }
@@ -389,4 +467,50 @@ it('constrains currency to the case variants the request object normalises to US
         Initiation::send(['currency' => $rejected], headers: ['Idempotency-Key' => 'currency-x-'.$rejected])
             ->assertStatus(422);
     }
+});
+
+it('documents both intent headers with the grammar the request object enforces', function (): void {
+    $parameters = openApiDocument()['components']['parameters'];
+    $references = array_column(openApiOperation('/api/payments', 'post')['parameters'], '$ref');
+
+    expect($references)->toBe([
+        '#/components/parameters/IdempotencyKey',
+        '#/components/parameters/IntentId',
+        '#/components/parameters/IntentExpiresAt',
+    ]);
+
+    foreach (['IntentId' => PaymentIntentHeaders::INTENT_ID, 'IntentExpiresAt' => PaymentIntentHeaders::EXPIRES_AT] as $name => $header) {
+        $parameter = $parameters[$name];
+
+        expect($parameter['name'])->toBe($header)
+            ->and($parameter['in'])->toBe('header')
+            ->and($parameter['required'])->toBeTrue()
+            ->and(preg_match('/'.$parameter['schema']['pattern'].'/', (string) $parameter['example']))->toBe(1);
+    }
+
+    expect(PaymentIntentHeaders::intentId([$parameters['IntentId']['example']]))->toBe($parameters['IntentId']['example'])
+        ->and(PaymentIntentHeaders::expiresAt([$parameters['IntentExpiresAt']['example']]))->not->toBeNull()
+        ->and(preg_match('/'.$parameters['IntentId']['schema']['pattern'].'/', strtoupper((string) $parameters['IntentId']['example'])))->toBe(0);
+});
+
+it('refuses an intent inside its deadline exactly as the documented 503 says, with a whole-second Retry-After', function (): void {
+    $expiresAt = (string) DB::selectOne(
+        "select to_char((clock_timestamp() + interval '200 milliseconds') at time zone 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') as e",
+    )->e;
+
+    $response = Initiation::send(headers: [
+        'Idempotency-Key' => 'documented-deadline',
+        PaymentIntentHeaders::EXPIRES_AT => $expiresAt,
+    ]);
+
+    $response->assertStatus(503);
+
+    /** @var array<string, mixed> $documented */
+    $documented = openApiOperation('/api/payments', 'post')['responses']['503']['content']['application/problem+json']['examples']['idempotency_contention']['value'];
+    $retryAfter = openApiOperation('/api/payments', 'post')['responses']['503']['headers']['Retry-After']['$ref'];
+
+    expect((array) $response->json())->toBe($documented)
+        ->and($retryAfter)->toBe('#/components/headers/RetryAfterSeconds')
+        ->and((int) $response->headers->get('Retry-After'))->toBeGreaterThanOrEqual(1)
+        ->and($response->headers->get('Retry-After'))->toMatch('/^[1-9][0-9]*$/');
 });

@@ -20,7 +20,7 @@ unrelated implementation details.
 | How is resilience proved? | [Resilience test plan](testing/payments-resilience.md) |
 | Which application processes run locally and on AWS? | [Runtime contract](operations/runtime-contract.md) |
 | How do I see the whole slice working in five minutes? | [Five-minute demo](operations/five-minute-demo.md) |
-| What exactly do the two HTTP endpoints return? | [OpenAPI artifact](api/openapi.json) |
+| What exactly do the implemented HTTP endpoints return? | [OpenAPI artifact](api/openapi.json) |
 | Why was a durable architecture choice made? | [Architecture decision records](adr/README.md) |
 
 ## Documentation rules
@@ -41,7 +41,7 @@ unrelated implementation details.
 The write path, the scheduler-driven outbox relay, the Horizon-supervised projection consumer with
 its failure accounting and operator retry, the merchant-scoped read model query endpoint
 (`GET /api/payments/{paymentId}`, projected `200` / pending `202` / `payment_not_found` `404`), the
-shared projection gate with its `503 projection_rebuilding` state, and the manual verification,
+merchant-scoped recovery read (`GET /api/payment-intents`), the shared projection gate with its `503 projection_rebuilding` state, and the manual verification,
 repair and rebuild commands are implemented.
 Current resilience evidence comes from the Pest suites; retired process rehearsals are marked
 historical in the [resilience test plan](testing/payments-resilience.md#process-level-resilience).

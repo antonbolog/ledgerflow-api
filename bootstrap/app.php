@@ -9,6 +9,7 @@ use Illuminate\Foundation\Configuration\Middleware;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use League\OAuth2\Server\Exception\OAuthServerException;
+use Modules\Payments\Application\Initiation\PaymentIntentDeadlineRefused;
 use Modules\Payments\Application\Query\PaymentNotFound;
 use Symfony\Component\HttpFoundation\Response;
 
@@ -30,6 +31,9 @@ return Application::configure(basePath: dirname(__DIR__))
 
         // Clients choose which identifiers to request, so this 404 must not write error-level reports.
         $exceptions->dontReport(PaymentNotFound::class);
+
+        // Clients stamp their own expiries, so refusals are routine; a session ended by the deadline is still reported.
+        $exceptions->dontReport(PaymentIntentDeadlineRefused::class);
 
         // Passport's token guard reports every rejected bearer token; expiry and revocation are routine 401s.
         $exceptions->dontReportWhen(

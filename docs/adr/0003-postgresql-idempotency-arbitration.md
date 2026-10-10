@@ -4,6 +4,7 @@
 - **Date** — 2026-08-14.
 - **Decision owner** — AB.
 - **Implemented by** — T6.
+- **Amended by** - [ADR 0008](0008-payment-intent-arbitration-and-deadline.md): a new receipt is now arbitrated by the merchant/intent pair as its named conflict target; the named-target rule and the retry allowlist below stand.
 
 ## Context
 

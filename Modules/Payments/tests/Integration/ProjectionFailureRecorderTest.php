@@ -331,10 +331,12 @@ it('keeps every recorder log context to safe fields only', function (): void {
             'projection_failure_count', 'projection_failure_generation',
         ]);
 
-    $rendered = (string) json_encode($recorded[0]);
+    expect($recorded[0]['event_id'])->toBe($eventId);
 
-    expect($rendered)->toContain($eventId)
-        ->and($rendered)->not->toContain('USD')
+    // A uuid7 event id begins with the current time in hex, so it can contain any of the probed digits.
+    $rendered = (string) json_encode(array_diff_key($recorded[0], ['event_id' => true]));
+
+    expect($rendered)->not->toContain('USD')
         ->and($rendered)->not->toContain('1250')
         ->and($rendered)->not->toContain('idempotency');
 });

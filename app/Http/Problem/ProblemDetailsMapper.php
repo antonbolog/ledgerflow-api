@@ -9,6 +9,8 @@ use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
 use Modules\Payments\Application\Initiation\IdempotencyContention;
 use Modules\Payments\Application\Initiation\IdempotencyPayloadMismatch;
+use Modules\Payments\Application\Initiation\PaymentIntentDeadlineRefused;
+use Modules\Payments\Application\Initiation\PaymentIntentSessionTerminated;
 use Modules\Payments\Application\Initiation\ProjectionRebuilding as InitiationProjectionRebuilding;
 use Modules\Payments\Application\Query\PaymentNotFound;
 use Modules\Payments\Application\Query\ProjectionRebuilding as QueryProjectionRebuilding;
@@ -36,12 +38,16 @@ final readonly class ProblemDetailsMapper
             $errors = $e->errors();
         }
 
+        if ($problem === ProblemType::ValidationFailed && $e instanceof PaymentIntentDeadlineRefused) {
+            $errors = ['intent_expires_at' => ['The payment intent expired before it could create a payment.']];
+        }
+
         $document = new ProblemDetails(
             $problem,
             $this->detailFor($problem, $e),
             $request->getPathInfo(),
             $errors,
-            in_array($problem, [ProblemType::IdempotencyContention, ProblemType::ProjectionRebuilding], true) ? 1 : null,
+            $this->retryAfterFor($problem, $e),
         )->toResponse();
 
         foreach (self::PRESERVED_HEADERS as $header) {
@@ -69,6 +75,13 @@ final readonly class ProblemDetailsMapper
             // cannot implement HttpExceptionInterface and would otherwise render as 500.
             $e instanceof IdempotencyPayloadMismatch => ProblemType::IdempotencyPayloadMismatch,
             $e instanceof IdempotencyContention => ProblemType::IdempotencyContention,
+
+            // Unsettled until the expiry plus the residual allowance: a concurrent request for the same intent may still
+            // commit, so only a refusal after that point may settle the intent as rejected (ADR 0008).
+            $e instanceof PaymentIntentDeadlineRefused => $e->millisecondsUntilSettled > 0
+                ? ProblemType::IdempotencyContention
+                : ProblemType::ValidationFailed,
+            $e instanceof PaymentIntentSessionTerminated => ProblemType::IdempotencyContention,
             $e instanceof InitiationProjectionRebuilding, $e instanceof QueryProjectionRebuilding => ProblemType::ProjectionRebuilding,
             $e instanceof PaymentNotFound => ProblemType::PaymentNotFound,
 
@@ -81,6 +94,17 @@ final readonly class ProblemDetailsMapper
                 default => ProblemType::InternalError,
             },
         };
+    }
+
+    private function retryAfterFor(ProblemType $problem, Throwable $e): ?int
+    {
+        if ($problem === ProblemType::IdempotencyContention && $e instanceof PaymentIntentDeadlineRefused) {
+            return max(1, (int) ceil($e->millisecondsUntilSettled / 1000));
+        }
+
+        // A deadline-terminated session ends at the expiry, so the residual allowance left until it settles is under one
+        // second and the minimum of 1 already covers it.
+        return in_array($problem, [ProblemType::IdempotencyContention, ProblemType::ProjectionRebuilding], true) ? 1 : null;
     }
 
     private function detailFor(ProblemType $problem, Throwable $e): string
